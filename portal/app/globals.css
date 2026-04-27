@@ -1,0 +1,61 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* highlight.js 主题 */
+@import 'highlight.js/styles/github.css';
+
+html, body {
+  height: 100%;
+}
+
+body {
+  font-family:
+    -apple-system, BlinkMacSystemFont,
+    'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei UI', 'Microsoft YaHei',
+    'Segoe UI', Roboto, sans-serif;
+  background: #f7f8fa;
+  color: #1f2937;
+}
+
+/* ─── 小说阅读器 ─── */
+.novel-reader {
+  font-family:
+    'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei UI', 'Microsoft YaHei',
+    'Noto Serif SC', Georgia, serif;
+  font-size: 1.0625rem;   /* 17px */
+  line-height: 1.95;
+  color: #2d2d2d;
+  max-width: 38rem;
+  margin: 0 auto;
+}
+
+.novel-reader p {
+  margin-bottom: 1em;
+  text-indent: 2em;
+}
+
+/* ─── 漫画图片：固定 9/13 比例防止 CLS ─── */
+.comic-page-wrap {
+  position: relative;
+  width: 100%;
+  background: #111;
+  overflow: hidden;
+}
+
+.comic-page-wrap img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+a {
+  text-decoration: none;
+}
+
+/* 自定义 prose 修饰 */
+.prose img {
+  border-radius: 0.5rem;
+}

@@ -1,0 +1,83 @@
+version: '3.8'
+
+# CMS 影视/小说/漫画站 — 本地开发依赖
+# 启动:   docker compose up -d
+# 停止:   docker compose down
+# 重置:   docker compose down -v   (会删除所有数据!)
+# 查日志: docker compose logs -f mysql
+
+services:
+  # ─────────────── MySQL 8 ───────────────
+  mysql:
+    image: mysql:8.0
+    container_name: cms-mysql
+    restart: unless-stopped
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_DATABASE: cms_dev
+      MYSQL_USER: cms
+      MYSQL_PASSWORD: cms123
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+      - --innodb-buffer-pool-size=256M
+      - --max-connections=200
+      - --sql-mode=STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION
+      - --skip-name-resolve
+    volumes:
+      - cms_mysql_data:/var/lib/mysql
+      - ./database/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot123"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ─────────────── Redis 7 ───────────────
+  redis:
+    image: redis:7-alpine
+    container_name: cms-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - "256mb"
+      - --maxmemory-policy
+      - "allkeys-lru"
+    volumes:
+      - cms_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ─────────────── Adminer (DB GUI) ───────────────
+  # 浏览器打开 http://localhost:8080  服务器填 mysql, 账号 cms / cms123
+  adminer:
+    image: adminer:latest
+    container_name: cms-adminer
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: mysql
+      ADMINER_DESIGN: pepa-linha
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+volumes:
+  cms_mysql_data:
+    name: cms_mysql_data
+  cms_redis_data:
+    name: cms_redis_data

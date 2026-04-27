@@ -1,0 +1,176 @@
+version: '3.8'
+
+services:
+  # 后端应用
+  cms-backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: cms-backend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - APP_PORT=3000
+      - DATABASE_URL=postgresql://cms_user:cms_password@cms-db:5432/cms_db?schema=public
+      - REDIS_HOST=cms-redis
+      - REDIS_PORT=6379
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET}
+      - CORS_ORIGIN=http://localhost:5173,http://localhost:3000
+    volumes:
+      - cms-uploads:/app/uploads
+      - ./logs/backend:/app/logs
+    depends_on:
+      - cms-db
+      - cms-redis
+    networks:
+      - cms-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # 前端应用
+  cms-frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    container_name: cms-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - VITE_API_BASE_URL=http://localhost:3000/api/v1
+      - VITE_APP_ENV=production
+    volumes:
+      - ./ssl:/etc/nginx/ssl
+      - ./nginx.conf:/etc/nginx/nginx.conf
+    depends_on:
+      - cms-backend
+    networks:
+      - cms-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # PostgreSQL数据库
+  cms-db:
+    image: postgres:15-alpine
+    container_name: cms-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: cms_db
+      POSTGRES_USER: cms_user
+      POSTGRES_PASSWORD: cms_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - cms-db-data:/var/lib/postgresql/data
+      - ../database/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./logs/postgresql:/var/log/postgresql
+    networks:
+      - cms-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cms_user -d cms_db"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis缓存
+  cms-redis:
+    image: redis:7-alpine
+    container_name: cms-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    ports:
+      - "6379:6379"
+    volumes:
+      - cms-redis-data:/data
+      - ./logs/redis:/var/log/redis
+    networks:
+      - cms-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Nginx反向代理（生产环境推荐）
+  cms-nginx:
+    image: nginx:alpine
+    container_name: cms-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/ssl:/etc/nginx/ssl
+      - ./logs/nginx:/var/log/nginx
+    depends_on:
+      - cms-backend
+      - cms-frontend
+    networks:
+      - cms-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # 监控服务 - Prometheus
+  cms-prometheus:
+    image: prom/prometheus:latest
+    container_name: cms-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - cms-prometheus-data:/prometheus
+    networks:
+      - cms-network
+    depends_on:
+      - cms-backend
+
+  # 监控服务 - Grafana
+  cms-grafana:
+    image: grafana/grafana:latest
+    container_name: cms-grafana
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - cms-grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+    networks:
+      - cms-network
+    depends_on:
+      - cms-prometheus
+
+# 网络配置
+networks:
+  cms-network:
+    driver: bridge
+
+# 持久化卷
+volumes:
+  cms-db-data:
+    driver: local
+  cms-redis-data:
+    driver: local
+  cms-uploads:
+    driver: local
+  cms-prometheus-data:
+    driver: local
+  cms-grafana-data:
+    driver: local
