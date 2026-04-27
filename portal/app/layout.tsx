@@ -8,8 +8,8 @@ export async function generateMetadata(): Promise<Metadata> {
   const config = await getSiteConfig().catch(() => null)
   return {
     title: {
-      default: config?.siteName || 'METU 内容站',
-      template: `%s | ${config?.siteName || 'METU'}`,
+      default: config?.siteName || 'Prism',
+      template: `%s | ${config?.siteName || 'Prism'}`,
     },
     description: config?.description || '一个内容平台',
     icons: config?.favicon ? [{ rel: 'icon', url: config.favicon }] : undefined,
@@ -24,7 +24,7 @@ export default async function RootLayout({
   // 全局 layout 拉一次站点配置和分类列表（用于导航）
   const [config, categories] = await Promise.all([
     getSiteConfig().catch(() => ({
-      siteName: 'METU 内容站',
+      siteName: 'Prism',
       description: '一个内容平台',
       logo: '',
       favicon: '',
