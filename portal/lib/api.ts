@@ -299,8 +299,8 @@ export async function getSiteConfig(): Promise<SiteConfig> {
     siteName:
       map.get('site_name') ||
       process.env.NEXT_PUBLIC_SITE_NAME ||
-      'METU 内容站',
-    description: map.get('site_description') || '基于 NestJS + Next.js 的内容平台',
+      'Prism',
+    description: map.get('site_description') || '影视·小说·漫画·文章，一站尽览',
     logo: map.get('site_logo') || '',
     favicon: map.get('site_favicon') || '',
     icp: map.get('site_icp') || '',

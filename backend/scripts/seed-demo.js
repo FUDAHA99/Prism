@@ -593,7 +593,7 @@ async function main() {
   // ─── 站点配置 ───
   console.log('\n[站点配置]');
   const settings = [
-    ['site_name',        'METU 内容站',                          'general', '站点名称'],
+    ['site_name',        'Prism',                                 'general', '站点名称'],
     ['site_description', '影视·小说·漫画·文章，一站尽览',        'general', '站点描述'],
     ['site_logo',        '',                                      'general', '站点 Logo URL'],
     ['site_favicon',     '',                                      'general', 'Favicon URL'],
