@@ -1,0 +1,196 @@
+version: '3.8'
+
+# Prism CMS — 生产部署
+#
+# 使用方法：
+#   1. cp .env.prod.example .env.prod  && 编辑 .env.prod
+#   2. bash scripts/deploy.sh
+#
+# 手动操作：
+#   启动: docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+#   停止: docker compose -f docker-compose.prod.yml down
+#   日志: docker compose -f docker-compose.prod.yml logs -f <service>
+#   重置: docker compose -f docker-compose.prod.yml down -v  ⚠️ 删除所有数据
+
+services:
+
+  # ─────────────── MySQL 8 ───────────────
+  mysql:
+    image: mysql:8.0
+    container_name: prism-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE:      ${MYSQL_DATABASE:-cms_prod}
+      MYSQL_USER:          ${MYSQL_USER:-cms}
+      MYSQL_PASSWORD:      ${MYSQL_PASSWORD}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+      - --innodb-buffer-pool-size=256M
+      - --max-connections=200
+      - --sql-mode=STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION
+      - --skip-name-resolve
+    volumes:
+      - prism_mysql_data:/var/lib/mysql
+      - ./database/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - prism-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost",
+             "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ─────────────── Redis 7 ───────────────
+  redis:
+    image: redis:7-alpine
+    container_name: prism-redis
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly yes
+      - --maxmemory 256mb
+      - --maxmemory-policy allkeys-lru
+      - --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - prism_redis_data:/data
+    networks:
+      - prism-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ─────────────── NestJS Backend ───────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: prism-backend
+    restart: unless-stopped
+    environment:
+      NODE_ENV:          production
+      APP_PORT:          3001
+      APP_URL:           ${DOMAIN}
+
+      DB_TYPE:           mysql
+      DATABASE_HOST:     mysql
+      DATABASE_PORT:     3306
+      DATABASE_NAME:     ${MYSQL_DATABASE:-cms_prod}
+      DATABASE_USER:     ${MYSQL_USER:-cms}
+      DATABASE_PASSWORD: ${MYSQL_PASSWORD}
+
+      # 首次部署设为 true 让 TypeORM 自动建表，之后改为 false
+      DB_SYNC:           ${DB_SYNC:-false}
+
+      REDIS_HOST:        redis
+      REDIS_PORT:        6379
+      REDIS_PASSWORD:    ${REDIS_PASSWORD}
+      REDIS_DB:          0
+
+      JWT_SECRET:        ${JWT_SECRET}
+      JWT_EXPIRES_IN:    ${JWT_EXPIRES_IN:-2h}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      JWT_REFRESH_EXPIRES_IN: ${JWT_REFRESH_EXPIRES_IN:-7d}
+
+      BCRYPT_SALT_ROUNDS: 12
+      RATE_LIMIT_TTL:    60
+      RATE_LIMIT_COUNT:  100
+
+      UPLOAD_MAX_SIZE:   10485760
+      UPLOAD_DEST:       ./uploads
+
+      CORS_ORIGIN:       ${DOMAIN},${DOMAIN_EXTRA:-}
+
+      LOG_LEVEL:         info
+    volumes:
+      - prism_uploads:/app/uploads
+    networks:
+      - prism-net
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ─────────────── Next.js Portal ───────────────
+  portal:
+    build:
+      context: ./portal
+      dockerfile: Dockerfile
+      args:
+        # NEXT_PUBLIC_* 在构建时写入 JS bundle（客户端用）
+        NEXT_PUBLIC_API_BASE:  ${DOMAIN}
+        NEXT_PUBLIC_SITE_NAME: ${SITE_NAME:-Prism}
+    container_name: prism-portal
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT:     3002
+      # 服务端 SSR 走内网直连 backend，快且绕过 nginx
+      BACKEND_INTERNAL_URL: http://backend:3001
+    networks:
+      - prism-net
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # ─────────────── Vite Admin SPA ───────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: prism-frontend
+    restart: unless-stopped
+    networks:
+      - prism-net
+
+  # ─────────────── Nginx 反向代理 ───────────────
+  nginx:
+    image: nginx:alpine
+    container_name: prism-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro          # SSL 证书（可选）
+      - prism_nginx_logs:/var/log/nginx
+    networks:
+      - prism-net
+    depends_on:
+      - backend
+      - portal
+      - frontend
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  prism-net:
+    driver: bridge
+
+volumes:
+  prism_mysql_data:
+    name: prism_mysql_data
+  prism_redis_data:
+    name: prism_redis_data
+  prism_uploads:
+    name: prism_uploads
+  prism_nginx_logs:
+    name: prism_nginx_logs

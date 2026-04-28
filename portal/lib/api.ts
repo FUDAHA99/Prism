@@ -21,8 +21,14 @@ import type {
   Tag,
 } from './types'
 
+// 服务端（SSR / Server Components）优先走内网 URL（Docker service name），
+// 客户端走 NEXT_PUBLIC_API_BASE（构建时写入，即公网域名）。
 const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:3001'
+  typeof window === 'undefined'
+    ? (process.env.BACKEND_INTERNAL_URL ||
+       process.env.NEXT_PUBLIC_API_BASE ||
+       'http://localhost:3001')
+    : (process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:3001')
 
 interface ApiEnvelope<T> {
   success: boolean

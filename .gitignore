@@ -12,6 +12,7 @@ node_modules/
 .env.test.local
 .env.production.local
 .env.production
+.env.prod          # 生产配置（含密钥，绝不入库）
 
 # ─── 构建产物 ────────────────────────────────────────
 dist/
@@ -49,6 +50,9 @@ coverage/
 
 # ─── TypeScript 增量编译缓存 ────────────────────────
 *.tsbuildinfo
+
+# ─── SSL 证书（含私钥，绝不入库）───────────────────
+nginx/ssl/
 
 # ─── 杂项 ───────────────────────────────────────────
 .cache/
