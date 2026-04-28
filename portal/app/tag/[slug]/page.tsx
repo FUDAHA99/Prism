@@ -1,3 +1,5 @@
+export const dynamic = 'force-dynamic'
+
 import { notFound } from 'next/navigation'
 import ArticleCard from '@/components/ArticleCard'
 import Pagination from '@/components/Pagination'

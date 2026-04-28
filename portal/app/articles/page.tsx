@@ -1,3 +1,5 @@
+﻿export const dynamic = 'force-dynamic'
+
 import ArticleCard from '@/components/ArticleCard'
 import Pagination from '@/components/Pagination'
 import { getContents, getSiteConfig } from '@/lib/api'
@@ -8,7 +10,7 @@ interface Props {
   searchParams: { page?: string }
 }
 
-export const metadata = { title: '全部文章' }
+export const metadata = { title: '鍏ㄩ儴鏂囩珷' }
 
 export default async function ArticlesPage({ searchParams }: Props) {
   const page = Math.max(1, Number(searchParams.page) || 1)
@@ -23,13 +25,13 @@ export default async function ArticlesPage({ searchParams }: Props) {
   return (
     <div className="max-w-6xl mx-auto px-4 py-8">
       <div className="mb-6">
-        <h1 className="text-2xl font-bold text-gray-900">全部文章</h1>
-        <p className="text-sm text-gray-500 mt-1">共 {total} 篇</p>
+        <h1 className="text-2xl font-bold text-gray-900">鍏ㄩ儴鏂囩珷</h1>
+        <p className="text-sm text-gray-500 mt-1">鍏?{total} 绡?/p>
       </div>
 
       {articles.length === 0 ? (
         <div className="bg-white rounded-lg p-12 text-center text-gray-400">
-          没有找到文章
+          娌℃湁鎵惧埌鏂囩珷
         </div>
       ) : (
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -47,3 +49,4 @@ export default async function ArticlesPage({ searchParams }: Props) {
     </div>
   )
 }
+
