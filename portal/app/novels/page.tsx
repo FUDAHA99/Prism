@@ -1,9 +1,11 @@
+﻿export const dynamic = 'force-dynamic'
+
 import type { Metadata } from 'next'
 import { getNovels } from '@/lib/api'
 import PosterCard from '@/components/PosterCard'
 import Pagination from '@/components/Pagination'
 
-export const metadata: Metadata = { title: '小说' }
+export const metadata: Metadata = { title: '灏忚' }
 
 export default async function NovelsPage({
   searchParams,
@@ -15,12 +17,12 @@ export default async function NovelsPage({
 
   return (
     <div className="max-w-6xl mx-auto px-4 py-6">
-      <h1 className="text-2xl font-bold text-gray-900 mb-5">小说</h1>
+      <h1 className="text-2xl font-bold text-gray-900 mb-5">灏忚</h1>
 
       {!list ? (
-        <div className="text-gray-500 text-sm py-12 text-center">加载失败</div>
+        <div className="text-gray-500 text-sm py-12 text-center">鍔犺浇澶辫触</div>
       ) : items.length === 0 ? (
-        <div className="text-gray-500 text-sm py-12 text-center">暂无小说</div>
+        <div className="text-gray-500 text-sm py-12 text-center">鏆傛棤灏忚</div>
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3 sm:gap-4">
           {items.map((n) => (
@@ -30,9 +32,9 @@ export default async function NovelsPage({
               title={n.title}
               posterUrl={n.coverUrl}
               score={n.score}
-              badge={n.serialStatus === 'finished' ? '完结' : null}
-              remark={n.author ? `作者：${n.author}` : null}
-              subtitle={n.chapterCount ? `${n.chapterCount} 章` : null}
+              badge={n.serialStatus === 'finished' ? '瀹岀粨' : null}
+              remark={n.author ? `浣滆€咃細${n.author}` : null}
+              subtitle={n.chapterCount ? `${n.chapterCount} 绔燻 : null}
             />
           ))}
         </div>
@@ -50,3 +52,4 @@ export default async function NovelsPage({
     </div>
   )
 }
+
