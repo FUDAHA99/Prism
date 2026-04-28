@@ -51,12 +51,13 @@ services:
     image: redis:7-alpine
     container_name: prism-redis
     restart: unless-stopped
-    command:
-      - redis-server
-      - --appendonly yes
-      - --maxmemory 256mb
-      - --maxmemory-policy allkeys-lru
-      - --requirepass ${REDIS_PASSWORD}
+    # YAML list 格式每项是一个 shell token，带空格的参数必须拆开
+    command: >-
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --requirepass ${REDIS_PASSWORD}
     volumes:
       - prism_redis_data:/data
     networks:
@@ -106,7 +107,8 @@ services:
       UPLOAD_MAX_SIZE:   10485760
       UPLOAD_DEST:       ./uploads
 
-      CORS_ORIGIN:       ${DOMAIN},${DOMAIN_EXTRA:-}
+      # DOMAIN_EXTRA 为空时不加逗号；非空示例："https://www.example.com"
+      CORS_ORIGIN:       ${DOMAIN}
 
       LOG_LEVEL:         info
     volumes:
@@ -119,7 +121,11 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3001/api/v1/health"]
+      # node:20-alpine 没有 wget/curl，用 Node.js 内置 http 模块探活
+      # 任何 HTTP 响应（含 404）都说明服务已起来
+      test: ["CMD", "node", "-e",
+             "require('http').get('http://localhost:3001/api/v1',
+             r=>process.exit(0)).on('error',()=>process.exit(1))"]
       interval: 30s
       timeout: 10s
       retries: 5
