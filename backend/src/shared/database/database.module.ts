@@ -37,8 +37,8 @@ const logger = new Logger('DatabaseModule');
             password,
             database,
             entities: [__dirname + '/../../**/*.entity{.ts,.js}'],
-            // 开发期允许自动建表，生产关掉，用 migration
-            synchronize: !isProd,
+            // 开发：自动建表；生产：默认关闭；可用 DB_SYNC=true 强制开启（首次部署用）
+            synchronize: configService.get<string>('DB_SYNC') === 'true' || !isProd,
             logging: false,
             charset: 'utf8mb4',
             timezone: '+08:00',

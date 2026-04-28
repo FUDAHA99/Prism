@@ -4,6 +4,8 @@ import path from 'path'
 
 export default defineConfig({
   plugins: [react()],
+  // 生产部署在 /admin/ 子路径；开发时保持根路径（vite dev server 不走 nginx）
+  base: process.env.NODE_ENV === 'production' ? '/admin/' : '/',
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

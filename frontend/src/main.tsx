@@ -116,7 +116,8 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     >
       <AntdApp>
       <QueryClientProvider client={queryClient}>
-        <BrowserRouter>
+        {/* 生产环境部署在 /admin/ 子路径，basename 与 vite.config base 保持一致 */}
+        <BrowserRouter basename={import.meta.env.BASE_URL === '/admin/' ? '/admin' : '/'}>
           <App />
         </BrowserRouter>
         <Toaster
