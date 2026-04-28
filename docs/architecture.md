@@ -2,58 +2,53 @@
 
 ## 1. 整体架构
 
+### 1.1 开发环境
+
 ```
-┌─────────────────────────────────────────────────────────┐
-│                     浏览器（用户）                        │
-└───────────────────────┬─────────────────────────────────┘
-                        │ HTTP / WebSocket
-                        ▼
-┌─────────────────────────────────────────────────────────┐
-│              前端 React 应用（Vite Dev Server）            │
-│                   localhost:5173                          │
-│                                                          │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐              │
-│  │  Pages   │  │Components│  │  Stores  │              │
-│  │ (路由页)  │  │ (公共组件) │  │(状态管理) │              │
-│  └──────────┘  └──────────┘  └──────────┘              │
-│         │              │                                  │
-│  ┌──────────────────────────────────────┐               │
-│  │         TanStack Query (API层)        │               │
-│  │     axios client + interceptors       │               │
-│  └──────────────────────────────────────┘               │
-└─────────────────────────┬───────────────────────────────┘
-                          │ /api → proxy → :3001
-                          ▼
-┌─────────────────────────────────────────────────────────┐
-│              后端 NestJS 应用                             │
-│                   localhost:3001                          │
-│                                                          │
-│  ┌──────────────────────────────────────────────────┐   │
-│  │                全局中间件层                        │   │
-│  │  TransformInterceptor | LoggingInterceptor        │   │
-│  │  HttpExceptionFilter | ValidationPipe             │   │
-│  └──────────────────────────────────────────────────┘   │
-│                                                          │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐  │
-│  │ Auth     │ │ Content  │ │  User    │ │  Media   │  │
-│  │ Module   │ │ Module   │ │  Module  │ │  Module  │  │
-│  └──────────┘ └──────────┘ └──────────┘ └──────────┘  │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐  │
-│  │Category  │ │  Tag     │ │ Comment  │ │  Notice  │  │
-│  │ Module   │ │ Module   │ │  Module  │ │  Module  │  │
-│  └──────────┘ └──────────┘ └──────────┘ └──────────┘  │
-│                                                          │
-│  ┌──────────────────────────────────────────────────┐   │
-│  │               TypeORM  数据访问层                  │   │
-│  └──────────────────────────────────────────────────┘   │
-└─────────────────────────┬───────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────┐
-│                    SQLite 数据库                          │
-│                   cms-dev.sqlite                          │
-└─────────────────────────────────────────────────────────┘
+浏览器
+  ├── localhost:5173  → Vite Dev Server（管理后台）
+  │       └── /api/** proxy → localhost:3001/api/v1/**
+  ├── localhost:3002  → Next.js Dev Server（前台门户）
+  │       └── SSR 服务端直接调用 localhost:3001
+  └── localhost:3001  → NestJS API
+          ├── MySQL（Docker）
+          └── Redis（Docker）
 ```
+
+### 1.2 生产环境（Docker Compose）
+
+```
+外部访问（80 端口）
+        │
+        ▼
+┌──────────────────┐
+│      nginx       │  反向代理（nginx:alpine）
+└──┬───┬───┬───┬──┘
+   │   │   │   │
+   │   │   │   └─ /uploads/  ──►  backend:3001
+   │   │   └───── /api/      ──►  backend:3001
+   │   └───────── /admin/    ──►  frontend:8080
+   └───────────── /          ──►  portal:3002
+                      │
+         ┌────────────┼────────────┐
+         ▼            ▼            ▼
+   backend:3001   portal:3002  frontend:8080
+   (NestJS API)  (Next.js SSR)  (React SPA,
+        │              │         nginx static)
+        ├──────────────┘
+        ▼
+  mysql:3306    redis:6379
+  (MySQL 8)    (Redis 7)
+```
+
+**路由规则**：
+
+| 路径 | 目标 | 说明 |
+|------|------|------|
+| `/api/*` | `backend:3001` | REST API，含 `/api/v1/` 前缀 |
+| `/uploads/*` | `backend:3001` | 上传文件静态资源 |
+| `/admin/` | `frontend:8080` | React SPA，nginx 剥离 `/admin` 前缀 |
+| `/` | `portal:3002` | Next.js SSR 门户 |
 
 ---
 
@@ -93,24 +88,27 @@ apiClient.interceptors.response.use(res => res.data.data)
 
 ### 2.3 完整请求链路
 
+**管理后台（客户端发起）**：
 ```
-前端组件
+React 组件
   → TanStack Query (useQuery/useMutation)
   → api/*.ts 函数
-  → axios apiClient
+  → axios apiClient（baseURL: /api/v1）
   → [请求拦截器：添加 JWT Token]
-  → Vite Dev Proxy（/api → localhost:3001/api/v1）
-  → NestJS Router
-  → Guard（JwtAuthGuard + RolesGuard）
-  → Controller
-  → Service
-  → TypeORM Repository
-  → SQLite
-  → [返回数据]
-  → TransformInterceptor 包裹
-  → [响应拦截器：剥离信封]
-  → TanStack Query 缓存
-  → 组件渲染
+  → 开发：Vite Dev Proxy（/api → localhost:3001）
+    生产：nginx（/api/ → backend:3001）
+  → NestJS Router → Guard → Controller → Service → TypeORM → MySQL
+  → TransformInterceptor 包裹响应
+  → [响应拦截器：剥离 {success,data,timestamp} 信封]
+  → TanStack Query 缓存 → 组件渲染
+```
+
+**门户 SSR（服务端发起）**：
+```
+Next.js page.tsx（Server Component）
+  → lib/api.ts（服务端：BACKEND_INTERNAL_URL=http://backend:3001）
+  → NestJS → MySQL
+  → HTML 流式渲染 → 浏览器
 ```
 
 ---
@@ -268,4 +266,4 @@ message.success('ok')
 
 ---
 
-*最后更新：2026-04-25*
+*最后更新：2026-04-28*
