@@ -1,7 +1,7 @@
 import axios from 'axios'
 
 export const apiClient = axios.create({
-  baseURL: '/api',
+  baseURL: '/api/v1',
   timeout: 15000,
 })
 
