@@ -7,7 +7,7 @@ import PosterCard from '@/components/PosterCard'
 import Pagination from '@/components/Pagination'
 import type { MovieType } from '@/lib/types'
 
-export const metadata: Metadata = { title: '褰辫' }
+export const metadata: Metadata = { title: '影视' }
 
 interface PageProps {
   searchParams: {
@@ -20,12 +20,12 @@ interface PageProps {
 }
 
 const TYPE_TABS: { key: MovieType | 'all'; label: string }[] = [
-  { key: 'all', label: '鍏ㄩ儴' },
-  { key: 'movie', label: '鐢靛奖' },
-  { key: 'tv', label: '鐢佃鍓? },
-  { key: 'anime', label: '鍔ㄦ极' },
-  { key: 'variety', label: '缁艰壓' },
-  { key: 'short', label: '鐭墽' },
+  { key: 'all', label: '全部' },
+  { key: 'movie', label: '电影' },
+  { key: 'tv', label: '电视剧' },
+  { key: 'anime', label: '动漫' },
+  { key: 'variety', label: '综艺' },
+  { key: 'short', label: '短剧' },
 ]
 
 export default async function MoviesPage({ searchParams }: PageProps) {
@@ -42,7 +42,7 @@ export default async function MoviesPage({ searchParams }: PageProps) {
   const items = list?.data ?? []
   const meta = list?.meta
 
-  // 鏋勯€犱繚鐣欑瓫閫夊弬鏁扮殑閾炬帴
+  // 构造保留筛选参数的链接
   const buildHref = (overrides: Record<string, string | undefined>) => {
     const next = new URLSearchParams()
     if (searchParams.type && searchParams.type !== 'all') next.set('type', searchParams.type)
@@ -57,17 +57,18 @@ export default async function MoviesPage({ searchParams }: PageProps) {
     return s ? `/movies?${s}` : '/movies'
   }
 
-  // 骞翠唤閫夐」锛氬綋鍓嶅勾璧?7 骞?  const thisYear = new Date().getFullYear()
+  // 年份选项：当前年起 7 年
+  const thisYear = new Date().getFullYear()
   const years = Array.from({ length: 8 }, (_, i) => thisYear - i)
-  const regions = ['澶ч檰', '棣欐腐', '鍙版咕', '缇庡浗', '鏃ユ湰', '闊╁浗', '鑻卞浗', '鍏朵粬']
+  const regions = ['大陆', '香港', '台湾', '美国', '日本', '韩国', '英国', '其他']
 
   return (
     <div className="max-w-6xl mx-auto px-4 py-6">
-      <h1 className="text-2xl font-bold text-gray-900 mb-4">褰辫</h1>
+      <h1 className="text-2xl font-bold text-gray-900 mb-4">影视</h1>
 
-      {/* 绛涢€夋潯 */}
+      {/* 筛选条 */}
       <div className="bg-white rounded-lg shadow-sm border border-gray-200 mb-5 divide-y">
-        <FilterRow label="绫诲瀷">
+        <FilterRow label="类型">
           {TYPE_TABS.map((t) => (
             <FilterPill
               key={t.key}
@@ -83,9 +84,9 @@ export default async function MoviesPage({ searchParams }: PageProps) {
           ))}
         </FilterRow>
 
-        <FilterRow label="鍦板尯">
+        <FilterRow label="地区">
           <FilterPill active={!searchParams.region} href={buildHref({ region: undefined, page: undefined })}>
-            鍏ㄩ儴
+            全部
           </FilterPill>
           {regions.map((r) => (
             <FilterPill key={r} active={searchParams.region === r} href={buildHref({ region: r, page: undefined })}>
@@ -94,9 +95,9 @@ export default async function MoviesPage({ searchParams }: PageProps) {
           ))}
         </FilterRow>
 
-        <FilterRow label="骞翠唤">
+        <FilterRow label="年份">
           <FilterPill active={!searchParams.year} href={buildHref({ year: undefined, page: undefined })}>
-            鍏ㄩ儴
+            全部
           </FilterPill>
           {years.map((y) => (
             <FilterPill
@@ -110,13 +111,13 @@ export default async function MoviesPage({ searchParams }: PageProps) {
         </FilterRow>
       </div>
 
-      {/* 缁撴灉 */}
+      {/* 结果 */}
       {!list ? (
-        <div className="text-gray-500 text-sm py-12 text-center">鍔犺浇澶辫触</div>
+        <div className="text-gray-500 text-sm py-12 text-center">加载失败</div>
       ) : items.length === 0 ? (
         <div className="text-gray-500 text-sm py-12 text-center">
-          鏆傛棤绗﹀悎鏉′欢鐨勫奖瑙嗭紝
-          <Link href="/movies" className="text-brand-600 hover:underline">鏌ョ湅鍏ㄩ儴</Link>
+          暂无符合条件的影视，
+          <Link href="/movies" className="text-brand-600 hover:underline">查看全部</Link>
         </div>
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3 sm:gap-4">
@@ -129,7 +130,7 @@ export default async function MoviesPage({ searchParams }: PageProps) {
               score={m.score}
               badge={badgeOf(m)}
               remark={remarkOf(m)}
-              subtitle={[m.year, m.region].filter(Boolean).join(' 路 ')}
+              subtitle={[m.year, m.region].filter(Boolean).join(' · ')}
             />
           ))}
         </div>
@@ -176,14 +177,13 @@ function FilterPill({
 
 function badgeOf(m: { isFinished: boolean; totalEpisodes?: number | null; movieType: string }): string | null {
   if (m.movieType === 'movie') return null
-  if (m.isFinished && m.totalEpisodes) return `鍏?{m.totalEpisodes}闆哷
+  if (m.isFinished && m.totalEpisodes) return `全${m.totalEpisodes}集`
   return null
 }
 
 function remarkOf(m: { currentEpisode?: number | null; isFinished: boolean; movieType: string }): string | null {
   if (m.movieType === 'movie') return null
-  if (m.isFinished) return '宸插畬缁?
-  if (m.currentEpisode) return `鏇存柊鑷崇 ${m.currentEpisode} 闆哷
+  if (m.isFinished) return '已完结'
+  if (m.currentEpisode) return `更新至第 ${m.currentEpisode} 集`
   return null
 }
-
