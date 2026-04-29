@@ -5,6 +5,7 @@ import { notFound } from 'next/navigation'
 import type { Metadata } from 'next'
 import { getMovieBySlug, getMovies } from '@/lib/api'
 import PosterCard from '@/components/PosterCard'
+import ResumeButton from '@/components/ResumeButton'
 import { friendlySourceName, movieTypeLabel } from '@/lib/movie-utils'
 
 interface Props {
@@ -87,12 +88,11 @@ export default async function MovieDetailPage({ params }: Props) {
 
             {firstEpisode && firstSource && (
               <div className="mt-5">
-                <Link
-                  href={`/movies/${movie.slug}/play/0/0`}
-                  className="inline-block px-6 py-2.5 bg-brand-600 hover:bg-brand-700 text-white rounded-md font-semibold shadow"
-                >
-                  ▶ 立即观看
-                </Link>
+                <ResumeButton
+                  movieId={movie.id}
+                  movieSlug={movie.slug}
+                  defaultHref={`/movies/${movie.slug}/play/0/0`}
+                />
               </div>
             )}
           </div>

@@ -29,6 +29,7 @@ import { MovieModule } from './modules/movie/movie.module';
 import { NovelModule } from './modules/novel/novel.module';
 import { ComicModule } from './modules/comic/comic.module';
 import { CollectModule } from './modules/collect/collect.module';
+import { WatchHistoryModule } from './modules/watch-history/watch-history.module';
 
 // 共享模块
 import { DatabaseModule } from './shared/database/database.module';
@@ -82,6 +83,7 @@ import { RedisModule } from './shared/redis/redis.module';
     NovelModule,
     ComicModule,
     CollectModule,
+    WatchHistoryModule,
   ],
   providers: [
     {

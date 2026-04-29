@@ -6,6 +6,10 @@ interface Props {
   src: string
   poster?: string | null
   autoPlay?: boolean
+  /** 从第几秒开始播放（续播用） */
+  initialTime?: number
+  /** 播放进度回调，每次 timeupdate 触发 */
+  onTimeUpdate?: (currentTime: number, duration: number) => void
 }
 
 /**
@@ -14,10 +18,19 @@ interface Props {
  *  - Safari / iOS 直接 <video src=…m3u8>，原生支持
  *  - 其他扩展名走原生 video
  */
-export default function HlsPlayer({ src, poster, autoPlay = true }: Props) {
+export default function HlsPlayer({
+  src,
+  poster,
+  autoPlay = true,
+  initialTime = 0,
+  onTimeUpdate,
+}: Props) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  // 用 ref 存 callback，避免 effect 重跑
+  const onTimeUpdateRef = useRef(onTimeUpdate)
+  onTimeUpdateRef.current = onTimeUpdate
 
   useEffect(() => {
     const video = videoRef.current
@@ -30,12 +43,27 @@ export default function HlsPlayer({ src, poster, autoPlay = true }: Props) {
     let hls: any = null
     let cancelled = false
 
-    const onCanPlay = () => setLoading(false)
+    const onCanPlay = () => {
+      setLoading(false)
+      // 续播跳转
+      if (initialTime > 5) {
+        video.currentTime = initialTime
+      }
+    }
+
+    const handleTimeUpdate = () => {
+      if (onTimeUpdateRef.current && video.duration > 0) {
+        onTimeUpdateRef.current(video.currentTime, video.duration)
+      }
+    }
+
     video.addEventListener('canplay', onCanPlay)
+    video.addEventListener('timeupdate', handleTimeUpdate)
 
     const cleanup = () => {
       cancelled = true
       video.removeEventListener('canplay', onCanPlay)
+      video.removeEventListener('timeupdate', handleTimeUpdate)
       if (hls) { try { hls.destroy() } catch {} }
     }
 
@@ -69,7 +97,7 @@ export default function HlsPlayer({ src, poster, autoPlay = true }: Props) {
     }
 
     return cleanup
-  }, [src, autoPlay])
+  }, [src, autoPlay, initialTime])
 
   return (
     <div className="relative w-full bg-black aspect-video rounded overflow-hidden">
