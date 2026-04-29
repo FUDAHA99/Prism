@@ -150,6 +150,18 @@ export class Movie {
   @Column({ type: 'varchar', length: 100, nullable: true })
   collectExternalId?: string;
 
+  @ApiProperty({ description: '别名（逗号分隔，用于搜索匹配）' })
+  @Column({ type: 'varchar', length: 1000, nullable: true })
+  aliases?: string;
+
+  @ApiProperty({ description: '封面图是否挂掉：NULL=未检测，false=正常，true=异常' })
+  @Column({ type: 'tinyint', nullable: true, default: null })
+  posterBroken?: boolean | null;
+
+  @ApiProperty({ description: '标题是否已经过清洗' })
+  @Column({ type: 'boolean', default: false })
+  titleCleaned: boolean;
+
   @ApiProperty({ description: '发布时间' })
   @Column({ type: 'datetime', nullable: true })
   publishedAt?: Date;

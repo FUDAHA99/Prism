@@ -14,6 +14,7 @@ import { Comic } from '../comic/entities/comic.entity';
 import { CollectSourceService } from './collect-source.service';
 import { CollectExecutorService } from './collect-executor.service';
 import { CollectController } from './collect.controller';
+import { PosterCheckerService } from './poster-checker.service';
 import { AuditModule } from '../audit/audit.module';
 
 @Module({
@@ -31,7 +32,7 @@ import { AuditModule } from '../audit/audit.module';
     AuditModule,
   ],
   controllers: [CollectController],
-  providers: [CollectSourceService, CollectExecutorService],
-  exports: [CollectSourceService, CollectExecutorService],
+  providers: [CollectSourceService, CollectExecutorService, PosterCheckerService],
+  exports: [CollectSourceService, CollectExecutorService, PosterCheckerService],
 })
 export class CollectModule {}

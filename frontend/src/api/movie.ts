@@ -71,6 +71,7 @@ export interface MovieParams {
   year?: number
   isFeatured?: boolean
   isVip?: boolean
+  posterBroken?: boolean | null
   page?: number
   limit?: number
 }
@@ -202,4 +203,15 @@ export async function updateMovieEpisode(
 
 export async function deleteMovieEpisode(episodeId: string): Promise<void> {
   await apiClient.delete(`/movies/episodes/${episodeId}`)
+}
+
+// 封面管理
+export async function updateMoviePoster(id: string, posterUrl: string): Promise<Movie> {
+  const res = await apiClient.patch<Movie>(`/movies/${id}/poster`, { posterUrl })
+  return res.data
+}
+
+export async function getBrokenPosters(params?: { page?: number; limit?: number }): Promise<MoviePaginated> {
+  const res = await apiClient.get<MoviePaginated>('/movies/broken-posters/list', { params })
+  return res.data
 }

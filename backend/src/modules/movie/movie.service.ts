@@ -73,6 +73,7 @@ export interface QueryMovieDto {
   year?: number;
   isFeatured?: boolean;
   isVip?: boolean;
+  posterBroken?: boolean | null;
   page?: number;
   limit?: number;
 }
@@ -162,6 +163,7 @@ export class MovieService {
       year,
       isFeatured,
       isVip,
+      posterBroken,
     } = query;
     const page = Number(query.page) || 1;
     const limit = Number(query.limit) || 20;
@@ -185,6 +187,11 @@ export class MovieService {
     if (isFeatured !== undefined)
       qb.andWhere('m.isFeatured = :isFeatured', { isFeatured });
     if (isVip !== undefined) qb.andWhere('m.isVip = :isVip', { isVip });
+    if (posterBroken === null) {
+      qb.andWhere('m.posterBroken IS NULL');
+    } else if (posterBroken !== undefined) {
+      qb.andWhere('m.posterBroken = :posterBroken', { posterBroken });
+    }
 
     qb.orderBy('m.createdAt', 'DESC')
       .skip((page - 1) * limit)
@@ -307,6 +314,43 @@ export class MovieService {
 
   async incrementViewCount(id: string): Promise<void> {
     await this.movieRepo.increment({ id }, 'viewCount', 1);
+  }
+
+  // ==================== 封面管理 ====================
+
+  async findBrokenPosters(query: { page?: number; limit?: number }) {
+    const page = Number(query.page) || 1;
+    const limit = Number(query.limit) || 50;
+
+    const [data, total] = await this.movieRepo.findAndCount({
+      where: { posterBroken: true },
+      select: ['id', 'title', 'posterUrl', 'posterBroken', 'updatedAt'],
+      order: { updatedAt: 'DESC' },
+      skip: (page - 1) * limit,
+      take: limit,
+    });
+
+    return { data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
+  }
+
+  async updatePoster(id: string, posterUrl: string, userId: string): Promise<Movie> {
+    const movie = await this.movieRepo.findOne({ where: { id } });
+    if (!movie) throw new NotFoundException(`影视不存在: ${id}`);
+
+    // 重置检测状态为 null（待异步重新检测）
+    await this.movieRepo.update(id, { posterUrl, posterBroken: null });
+
+    await this.auditService.log({
+      userId,
+      action: 'MOVIE_UPDATE_POSTER',
+      resourceType: 'movie',
+      resourceId: id,
+      ipAddress: 'system',
+      userAgent: 'system',
+      newValues: { posterUrl },
+    });
+
+    return this.findOne(id);
   }
 
   // ==================== Sources ====================

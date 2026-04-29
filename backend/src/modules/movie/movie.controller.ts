@@ -57,6 +57,26 @@ export class MovieController {
     return movie;
   }
 
+  @Get('broken-posters/list')
+  @UseGuards(AuthGuard('jwt'))
+  @ApiBearerAuth()
+  @ApiOperation({ summary: '获取封面异常的影视列表' })
+  async findBrokenPosters(@Query() query: { page?: number; limit?: number }) {
+    return this.movieService.findBrokenPosters(query);
+  }
+
+  @Patch(':id/poster')
+  @UseGuards(AuthGuard('jwt'))
+  @ApiBearerAuth()
+  @ApiOperation({ summary: '更新影视封面图并重置检测状态' })
+  async updatePoster(
+    @Param('id') id: string,
+    @Body() body: { posterUrl: string },
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.movieService.updatePoster(id, body.posterUrl, user.id);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: '获取影视详情' })
   async findOne(@Param('id') id: string) {

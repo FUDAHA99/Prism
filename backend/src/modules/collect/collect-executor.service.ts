@@ -21,6 +21,14 @@ import {
   buildCollectSlug,
   MacCmsItem,
 } from './maccms-client';
+import {
+  cleanTitle,
+  cleanIntro,
+  cleanPersonList,
+  buildAliases,
+  isValidImageUrl,
+} from './collect-cleaner';
+import { PosterCheckerService } from './poster-checker.service';
 
 import { Movie, MovieStatus, MovieType } from '../movie/entities/movie.entity';
 import { MovieSource, MovieSourceKind } from '../movie/entities/movie-source.entity';
@@ -68,6 +76,7 @@ export class CollectExecutorService {
     private readonly comicRepo: Repository<Comic>,
     private readonly dataSource: DataSource,
     private readonly sourceService: CollectSourceService,
+    private readonly posterChecker: PosterCheckerService,
   ) {}
 
   /**
@@ -243,19 +252,24 @@ export class CollectExecutorService {
     const slug = movie?.slug ?? buildCollectSlug(source.id.slice(0, 8), externalId);
     const movieType = this.mapMovieType(it);
 
+    // ── 数据清洗 ──
+    const cleanedTitle = cleanTitle(it.vod_name);
+    const posterUrl = it.vod_pic || null;
+
     const data: Partial<Movie> = {
-      title: it.vod_name || '未命名',
-      originalTitle: it.vod_sub || null,
+      title: cleanedTitle,
+      originalTitle: it.vod_sub ? cleanTitle(it.vod_sub) : null,
+      aliases: buildAliases(cleanedTitle, it.vod_sub),
       slug,
       movieType,
       categoryId: localCategoryId ?? null,
       year: toIntOrNull(it.vod_year) ?? undefined,
       region: it.vod_area || null,
       language: it.vod_lang || null,
-      director: it.vod_director || null,
-      actors: it.vod_actor || null,
-      intro: it.vod_content || it.vod_blurb || null,
-      posterUrl: it.vod_pic || null,
+      director: cleanPersonList(it.vod_director),
+      actors: cleanPersonList(it.vod_actor),
+      intro: cleanIntro(it.vod_content || it.vod_blurb),
+      posterUrl,
       totalEpisodes: toIntOrNull(it.vod_total) ?? undefined,
       currentEpisode: toIntOrNull(it.vod_serial) ?? undefined,
       isFinished:
@@ -268,6 +282,9 @@ export class CollectExecutorService {
       collectSource: source.id,
       collectExternalId: externalId,
       publishedAt: toDateOrNull(it.vod_pubdate || it.vod_time) ?? undefined,
+      titleCleaned: true,
+      // 封面格式校验：格式不合法直接标异常，合法的交给异步 HEAD 检测
+      posterBroken: isValidImageUrl(posterUrl) ? null : (posterUrl ? true : null),
     } as any;
 
     if (movie) {
@@ -276,6 +293,11 @@ export class CollectExecutorService {
       movie = this.movieRepo.create(data);
     }
     movie = await this.movieRepo.save(movie);
+
+    // 异步检测封面图可用性（不阻塞主采集流程）
+    if (posterUrl && isValidImageUrl(posterUrl)) {
+      this.posterChecker.checkAndMark(movie.id, posterUrl).catch(() => {});
+    }
 
     // 同步线路 + 剧集（增量替换：旧的删，新的插，避免脏数据堆积）
     const parsed = parsePlayData(it.vod_play_from, it.vod_play_url);

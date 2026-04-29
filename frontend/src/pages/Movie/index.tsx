@@ -8,6 +8,9 @@ import {
   Tag,
   Badge,
   Popconfirm,
+  Tooltip,
+  Modal,
+  Form,
   message,
   Row,
   Col,
@@ -22,6 +25,10 @@ import {
   SearchOutlined,
   CheckCircleOutlined,
   StopOutlined,
+  WarningOutlined,
+  CheckOutlined,
+  QuestionCircleOutlined,
+  PictureOutlined,
 } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -30,6 +37,7 @@ import {
   deleteMovie,
   publishMovie,
   unpublishMovie,
+  updateMoviePoster,
   type Movie,
   type MovieStatus,
   type MovieType,
@@ -57,23 +65,59 @@ const STATUS_LABEL: Record<string, string> = {
   archived: '已归档',
 }
 
+// 封面状态图标
+function PosterStatusIcon({ posterBroken }: { posterBroken?: boolean | null }) {
+  if (posterBroken === true)
+    return <Tooltip title="封面图挂掉"><WarningOutlined style={{ color: '#EF4444' }} /></Tooltip>
+  if (posterBroken === false)
+    return <Tooltip title="封面正常"><CheckOutlined style={{ color: '#10B981' }} /></Tooltip>
+  return <Tooltip title="未检测"><QuestionCircleOutlined style={{ color: '#94A3B8' }} /></Tooltip>
+}
+
 interface Filters {
   search: string
   status: MovieStatus | ''
   movieType: MovieType | ''
+  posterBroken: 'broken' | 'ok' | 'unchecked' | ''
   page: number
 }
 
 export default function MovieList() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const { message: msg } = (window as any).__antdApp__ ?? { message }
 
   const [filters, setFilters] = useState<Filters>({
     search: '',
     status: '',
     movieType: '',
+    posterBroken: '',
     page: 1,
   })
+
+  // 修复封面 Modal
+  const [posterModal, setPosterModal] = useState<{ open: boolean; movieId: string; title: string }>({
+    open: false, movieId: '', title: '',
+  })
+  const [posterForm] = Form.useForm()
+
+  const updatePosterMutation = useMutation({
+    mutationFn: ({ id, posterUrl }: { id: string; posterUrl: string }) =>
+      updateMoviePoster(id, posterUrl),
+    onSuccess: () => {
+      message.success('封面已更新，正在重新检测...')
+      queryClient.invalidateQueries({ queryKey: ['movies'] })
+      setPosterModal({ open: false, movieId: '', title: '' })
+      posterForm.resetFields()
+    },
+    onError: () => message.error('更新失败'),
+  })
+
+  // posterBroken 筛选映射到后端参数
+  const posterBrokenParam =
+    filters.posterBroken === 'broken' ? true :
+    filters.posterBroken === 'ok' ? false :
+    filters.posterBroken === 'unchecked' ? null : undefined
 
   const { data, isLoading } = useQuery({
     queryKey: ['movies', filters],
@@ -82,6 +126,7 @@ export default function MovieList() {
         search: filters.search || undefined,
         status: filters.status || undefined,
         movieType: filters.movieType || undefined,
+        posterBroken: posterBrokenParam,
         page: filters.page,
         limit: 20,
       }),
@@ -131,6 +176,15 @@ export default function MovieList() {
             }}
           />
         ),
+    },
+    {
+      title: '封面',
+      key: 'posterStatus',
+      width: 56,
+      align: 'center' as const,
+      render: (_: unknown, r: Movie) => (
+        <PosterStatusIcon posterBroken={(r as any).posterBroken} />
+      ),
     },
     {
       title: '标题',
@@ -229,6 +283,16 @@ export default function MovieList() {
           >
             {r.status === 'published' ? '取消发布' : '发布'}
           </Button>
+          <Button
+            size="small"
+            icon={<PictureOutlined />}
+            onClick={() => {
+              setPosterModal({ open: true, movieId: r.id, title: r.title })
+              posterForm.setFieldValue('posterUrl', (r as any).posterUrl ?? '')
+            }}
+          >
+            修复封面
+          </Button>
           <Popconfirm
             title="确认删除此影视？"
             okText="删除"
@@ -304,6 +368,21 @@ export default function MovieList() {
             <Select.Option value="archived">已归档</Select.Option>
           </Select>
         </Col>
+        <Col>
+          <Select
+            placeholder="封面状态"
+            value={filters.posterBroken || undefined}
+            onChange={(v) =>
+              setFilters((p) => ({ ...p, posterBroken: (v as any) || '', page: 1 }))
+            }
+            allowClear
+            style={{ width: 120 }}
+          >
+            <Select.Option value="broken"><WarningOutlined style={{ color: '#EF4444' }} /> 封面异常</Select.Option>
+            <Select.Option value="ok"><CheckOutlined style={{ color: '#10B981' }} /> 封面正常</Select.Option>
+            <Select.Option value="unchecked"><QuestionCircleOutlined style={{ color: '#94A3B8' }} /> 未检测</Select.Option>
+          </Select>
+        </Col>
       </Row>
 
       <Table<Movie>
@@ -318,8 +397,47 @@ export default function MovieList() {
           showTotal: (t) => `共 ${t} 条`,
           onChange: (page) => setFilters((p) => ({ ...p, page })),
         }}
-        scroll={{ x: 1200 }}
+        scroll={{ x: 1300 }}
       />
+
+      {/* 修复封面 Modal */}
+      <Modal
+        title={`修复封面 · ${posterModal.title}`}
+        open={posterModal.open}
+        onCancel={() => { setPosterModal({ open: false, movieId: '', title: '' }); posterForm.resetFields() }}
+        onOk={() => posterForm.submit()}
+        confirmLoading={updatePosterMutation.isPending}
+        okText="保存"
+        cancelText="取消"
+      >
+        <Form
+          form={posterForm}
+          layout="vertical"
+          onFinish={(v) => updatePosterMutation.mutate({ id: posterModal.movieId, posterUrl: v.posterUrl })}
+        >
+          <Form.Item
+            label="新封面图 URL"
+            name="posterUrl"
+            rules={[
+              { required: true, message: '请输入封面图 URL' },
+              { type: 'url', message: '请输入合法的 URL' },
+            ]}
+          >
+            <Input placeholder="https://example.com/poster.jpg" />
+          </Form.Item>
+          <Form.Item noStyle shouldUpdate>
+            {({ getFieldValue }) =>
+              getFieldValue('posterUrl') ? (
+                <Image
+                  src={getFieldValue('posterUrl')}
+                  style={{ maxHeight: 200, objectFit: 'contain' }}
+                  fallback="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+                />
+              ) : null
+            }
+          </Form.Item>
+        </Form>
+      </Modal>
     </div>
   )
 }
