@@ -44,10 +44,12 @@ fi
 log "构建镜像并启动服务（可能需要几分钟）..."
 $COMPOSE up -d --build
 
-# ── 等待 backend 健康 ───────────────────────────────────────────
+# ── 等待 backend 健康（用 Node.js 内置 http 模块，无需 wget/curl）──
 log "等待 backend 启动..."
 for i in $(seq 1 30); do
-  if $COMPOSE exec -T backend wget -qO- http://localhost:3001/api/v1/health &>/dev/null; then
+  if $COMPOSE exec -T backend \
+       node -e "require('http').get('http://localhost:3001/api/v1',r=>process.exit(0)).on('error',()=>process.exit(1))" \
+       &>/dev/null; then
     log "backend 已就绪"
     break
   fi

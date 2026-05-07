@@ -36,13 +36,13 @@ jobs:
               up -d --build --remove-orphans
 
             echo "=== [3/4] 等待 backend 健康 ==="
-            for i in $(seq 1 20); do
-              if docker exec prism-backend \
-                   node -e "require('http').get('http://localhost:3001/api/v1',r=>process.exit(0)).on('error',()=>process.exit(1))" 2>/dev/null; then
-                echo "backend 就绪"
+            for i in $(seq 1 24); do
+              STATUS=$(docker inspect --format='{{.State.Health.Status}}' prism-backend 2>/dev/null || echo "none")
+              if [ "$STATUS" = "healthy" ]; then
+                echo "backend 就绪 (healthy)"
                 break
               fi
-              [ $i -eq 20 ] && { echo "backend 启动超时"; exit 1; }
+              [ $i -eq 24 ] && { echo "backend 启动超时 (status=$STATUS)"; docker logs --tail 50 prism-backend; exit 1; }
               sleep 5
             done
 

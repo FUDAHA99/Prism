@@ -9,7 +9,7 @@
 #   4. .env.prod 中 DOMAIN 已填写真实域名，如 https://prism.example.com
 #
 # 用法：
-#   bash scripts/setup-ssl.sh
+#   bash scripts/setup-ssl.sh [邮箱]
 # =================================================================
 
 set -euo pipefail
@@ -18,6 +18,11 @@ GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
 log()  { echo -e "${GREEN}[+]${NC} $*"; }
 warn() { echo -e "${YELLOW}[!]${NC} $*"; }
 die()  { echo -e "${RED}[✗]${NC} $*" >&2; exit 1; }
+
+# 脚本所在目录（无论从哪里调用都能找到项目根目录）
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_DIR"
 
 # ── 读取域名 ────────────────────────────────────────────────────
 [ -f .env.prod ] || die ".env.prod 不存在，请先完成初始部署"
@@ -29,6 +34,9 @@ EMAIL=${1:-"admin@${DOMAIN}"}
 
 log "域名：$DOMAIN"
 log "邮箱：$EMAIL（用于 Let's Encrypt 到期提醒）"
+
+# ── 检查 nginx-ssl.conf 模板 ─────────────────────────────────────
+[ -f "nginx/nginx-ssl.conf" ] || die "找不到 nginx/nginx-ssl.conf，请确认代码完整"
 
 # ── 安装 Certbot ─────────────────────────────────────────────────
 if ! command -v certbot &>/dev/null; then
@@ -47,7 +55,7 @@ log "临时停止 nginx 容器..."
 docker compose -f docker-compose.prod.yml --env-file .env.prod stop nginx
 
 # ── 申请证书 ─────────────────────────────────────────────────────
-log "申请 SSL 证书..."
+log "申请 SSL 证书（使用 standalone 模式）..."
 certbot certonly \
   --standalone \
   --non-interactive \
@@ -66,25 +74,12 @@ cp "$CERT_DIR/privkey.pem"   nginx/ssl/privkey.pem
 chmod 644 nginx/ssl/fullchain.pem
 chmod 600 nginx/ssl/privkey.pem
 
-# ── 启用 nginx.conf 中的 HTTPS 配置 ─────────────────────────────
-log "更新 nginx.conf 启用 HTTPS..."
-NGINX_CONF="nginx/nginx.conf"
-# 替换 server_name，取消注释 HTTPS 相关行
-sed -i \
-  -e "s|server_name _;.*# 替换为你的域名.*|server_name $DOMAIN;|" \
-  -e 's|# *listen 443 ssl http2;|    listen 443 ssl http2;|' \
-  -e 's|# *ssl_certificate |    ssl_certificate |' \
-  -e 's|# *ssl_certificate_key |    ssl_certificate_key |' \
-  -e 's|# *ssl_protocols |    ssl_protocols |' \
-  -e 's|# *ssl_ciphers |    ssl_ciphers |' \
-  -e 's|# *server {|server {|' \
-  -e 's|# *    listen 80;|    listen 80;|' \
-  -e 's|# *    server_name _;|    server_name _;|' \
-  -e 's|# *    return 301|    return 301|' \
-  -e 's|# *}|    }|' \
-  "$NGINX_CONF" || warn "nginx.conf 自动修改失败，请参考文档手动取消注释 HTTPS 配置块"
+# ── 用 nginx-ssl.conf 模板生成带域名的配置，覆盖 nginx.conf ──────
+log "生成 HTTPS nginx 配置..."
+sed "s/PRISM_DOMAIN/$DOMAIN/g" nginx/nginx-ssl.conf > nginx/nginx.conf
+log "nginx.conf 已更新（HTTP→HTTPS 强制跳转 + SSL）"
 
-# ── 更新 .env.prod 的 DOMAIN 协议 ───────────────────────────────
+# ── 更新 .env.prod 的 DOMAIN 协议为 https ───────────────────────
 if grep -q "^DOMAIN=http://" .env.prod; then
   sed -i "s|^DOMAIN=http://|DOMAIN=https://|" .env.prod
   log ".env.prod DOMAIN 已更新为 https://"
@@ -94,14 +89,33 @@ fi
 log "重启 nginx..."
 docker compose -f docker-compose.prod.yml --env-file .env.prod up -d nginx
 
+# 等待 nginx 启动
+sleep 3
+docker compose -f docker-compose.prod.yml --env-file .env.prod ps nginx
+
 # ── 配置自动续签（crontab）──────────────────────────────────────
 log "配置证书自动续签（每天凌晨 3 点检查）..."
-CRON_JOB="0 3 * * * certbot renew --quiet && cp /etc/letsencrypt/live/$DOMAIN/fullchain.pem $(pwd)/nginx/ssl/fullchain.pem && cp /etc/letsencrypt/live/$DOMAIN/privkey.pem $(pwd)/nginx/ssl/privkey.pem && docker compose -f $(pwd)/docker-compose.prod.yml --env-file $(pwd)/.env.prod exec -T nginx nginx -s reload"
-(crontab -l 2>/dev/null | grep -v 'certbot renew'; echo "$CRON_JOB") | crontab -
+RENEW_SCRIPT="$PROJECT_DIR/scripts/renew-ssl.sh"
+
+cat > "$RENEW_SCRIPT" <<RENEW
+#!/bin/bash
+# 由 setup-ssl.sh 自动生成，用于 crontab 续签
+set -euo pipefail
+certbot renew --quiet --standalone \
+  --pre-hook  "docker compose -f $PROJECT_DIR/docker-compose.prod.yml --env-file $PROJECT_DIR/.env.prod stop nginx" \
+  --post-hook "cp /etc/letsencrypt/live/$DOMAIN/fullchain.pem $PROJECT_DIR/nginx/ssl/fullchain.pem && \
+               cp /etc/letsencrypt/live/$DOMAIN/privkey.pem   $PROJECT_DIR/nginx/ssl/privkey.pem && \
+               docker compose -f $PROJECT_DIR/docker-compose.prod.yml --env-file $PROJECT_DIR/.env.prod start nginx"
+RENEW
+chmod +x "$RENEW_SCRIPT"
+
+CRON_JOB="0 3 * * * $RENEW_SCRIPT >> $PROJECT_DIR/backup/ssl-renew.log 2>&1"
+(crontab -l 2>/dev/null | grep -v 'renew-ssl.sh'; echo "$CRON_JOB") | crontab -
 
 echo ""
 log "=== HTTPS 配置完成 ==="
 echo -e "  访问地址: ${GREEN}https://$DOMAIN${NC}"
 echo -e "  证书路径: /etc/letsencrypt/live/$DOMAIN/"
-echo -e "  自动续签: 已写入 crontab（每天 03:00 检查）"
-warn "证书有效期 90 天，certbot 会在到期前 30 天自动续签"
+echo -e "  续签脚本: $RENEW_SCRIPT"
+echo -e "  自动续签: 已写入 crontab（每天 03:00 检查，到期前 30 天自动续签）"
+warn "证书有效期 90 天，certbot 会在到期前 30 天自动续签并重启 nginx"
