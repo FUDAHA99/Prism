@@ -171,39 +171,88 @@ docker compose -f docker-compose.prod.yml up -d
 
 ## 6. 数据备份
 
-### 数据库备份
+### 自动备份（推荐）
+
+首次运行 `deploy.sh` 时会自动将备份任务写入 crontab（每天凌晨 2:00 执行）。
+
+也可手动触发：
 
 ```bash
-# 备份
-docker exec prism-mysql mysqldump -u root -p"${MYSQL_ROOT_PASSWORD}" cms_prod > backup_$(date +%Y%m%d).sql
-
-# 恢复
-docker exec -i prism-mysql mysql -u root -p"${MYSQL_ROOT_PASSWORD}" cms_prod < backup_20260101.sql
+bash scripts/backup.sh
 ```
 
-### 上传文件备份
+备份文件保存在项目根目录的 `backup/` 文件夹，默认保留最近 **7 天**，自动清理旧文件。
 
-上传文件存储在 `backend_uploads` Docker volume 中：
+### 恢复备份
 
 ```bash
-# 导出
-docker run --rm -v prism_backend_uploads:/data -v $(pwd):/backup alpine \
-  tar czf /backup/uploads_$(date +%Y%m%d).tar.gz -C /data .
+# 恢复数据库
+gunzip < backup/prism_2026-05-07_02-00.sql.gz | \
+  docker exec -i prism-mysql mysql -u cms -p<MYSQL_PASSWORD> cms_prod
 
-# 恢复
-docker run --rm -v prism_backend_uploads:/data -v $(pwd):/backup alpine \
-  tar xzf /backup/uploads_20260101.tar.gz -C /data
+# 恢复上传文件
+docker run --rm \
+  -v prism_uploads:/data \
+  -v $(pwd)/backup:/backup \
+  alpine tar xzf /backup/uploads_2026-05-07_02-00.tar.gz -C /data
 ```
 
 ---
 
-## 7. 配置 HTTPS（可选）
+## 7. 配置 HTTPS（Let's Encrypt）
 
-推荐使用 [Nginx Proxy Manager](https://nginxproxymanager.com/) 或在服务器上用 Certbot 配合宿主机 nginx 做 SSL 终止，然后将 80/443 流量反向代理到 Docker nginx 容器的 80 端口。
+**前提**：域名已解析到服务器 IP，防火墙放行 443 端口。
+
+```bash
+# 一键申请证书并启用 HTTPS（传入邮箱用于到期提醒）
+bash scripts/setup-ssl.sh admin@example.com
+```
+
+脚本会自动完成：
+1. 安装 Certbot
+2. 申请 Let's Encrypt 免费证书
+3. 将证书复制到 `nginx/ssl/`
+4. 启用 nginx.conf 中的 HTTPS 配置块
+5. 将自动续签任务写入 crontab（每天凌晨 3:00 检查）
 
 ---
 
-## 8. 常见问题
+## 8. CI/CD 自动部署（GitHub Actions）
+
+推送代码到 `main` 分支后自动触发部署，无需手动 SSH 登录。
+
+### 配置步骤
+
+在 GitHub 仓库 → **Settings → Secrets and variables → Actions** 中添加以下 Secret：
+
+| Secret 名称 | 说明 |
+|------------|------|
+| `SSH_HOST` | 服务器公网 IP 或域名 |
+| `SSH_USER` | SSH 登录用户名（如 `root`） |
+| `SSH_PRIVATE_KEY` | SSH 私钥内容（`cat ~/.ssh/id_rsa`） |
+| `SSH_PORT` | SSH 端口，默认 22（可省略） |
+| `DEPLOY_PATH` | 项目在服务器上的绝对路径（如 `/opt/prism-cms`） |
+
+配置完成后，每次 `git push origin main` 都会自动：
+1. SSH 登录服务器
+2. `git pull` 拉取最新代码
+3. `docker compose up -d --build` 重新构建并启动
+4. 等待 backend 健康检查通过
+5. 清理旧镜像
+
+### 生成 SSH 密钥对（若无）
+
+```bash
+ssh-keygen -t ed25519 -C "github-actions-deploy"
+# 公钥追加到服务器
+cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
+# 私钥内容粘贴到 GitHub Secret SSH_PRIVATE_KEY
+cat ~/.ssh/id_ed25519
+```
+
+---
+
+## 9. 常见问题
 
 ### 端口 80 被占用
 
@@ -239,4 +288,4 @@ curl http://localhost/api/v1/auth/login \
 
 ---
 
-*最后更新：2026-04-28*
+*最后更新：2026-05-07*

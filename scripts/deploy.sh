@@ -55,16 +55,26 @@ for i in $(seq 1 30); do
   sleep 3
 done
 
-# ── 首次部署：初始化管理员账号 ─────────────────────────────────
+# ── 首次部署：初始化管理员账号 + 配置自动备份 ────────────────────
 if $FIRST_DEPLOY; then
   log "初始化管理员账号..."
   $COMPOSE exec -T backend node scripts/seed-admin.js \
     && log "管理员账号创建成功（默认: admin / Admin@123456，请立即修改密码）"
 
+  # 配置每日自动备份（凌晨 2:00）
+  log "配置数据库自动备份（每天 02:00）..."
+  SCRIPT_ABS="$(cd "$(dirname "$0")" && pwd)/backup.sh"
+  chmod +x "$SCRIPT_ABS"
+  CRON_BACKUP="0 2 * * * $SCRIPT_ABS >> $(cd "$(dirname "$0")/.." && pwd)/backup/backup.log 2>&1"
+  (crontab -l 2>/dev/null | grep -v 'backup.sh'; echo "$CRON_BACKUP") | crontab -
+  log "自动备份已写入 crontab"
+
   warn "首次部署完成！建议："
   warn "  1. 登录管理后台修改管理员密码"
   warn "  2. 在 .env.prod 中将 DB_SYNC 改为 false 并重启 backend"
   warn "     $COMPOSE restart backend"
+  warn "  3. 如已有域名并配置好 DNS，运行 HTTPS 配置："
+  warn "     bash scripts/setup-ssl.sh"
 fi
 
 # ── 打印服务状态 ─────────────────────────────────────────────────

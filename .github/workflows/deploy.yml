@@ -1,0 +1,59 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:   # 允许手动触发
+
+jobs:
+  deploy:
+    name: SSH Deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      # ── 1. 检出代码（仅用于获取 commit 信息）──────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. SSH 登录服务器，拉代码并重新部署 ───────────────────
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:     ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key:      ${{ secrets.SSH_PRIVATE_KEY }}
+          port:     ${{ secrets.SSH_PORT || 22 }}
+          script: |
+            set -euo pipefail
+            cd ${{ secrets.DEPLOY_PATH || '/opt/prism-cms' }}
+
+            echo "=== [1/4] 拉取最新代码 ==="
+            git pull origin main
+
+            echo "=== [2/4] 构建并重启服务 ==="
+            docker compose -f docker-compose.prod.yml --env-file .env.prod \
+              up -d --build --remove-orphans
+
+            echo "=== [3/4] 等待 backend 健康 ==="
+            for i in $(seq 1 20); do
+              if docker exec prism-backend \
+                   node -e "require('http').get('http://localhost:3001/api/v1',r=>process.exit(0)).on('error',()=>process.exit(1))" 2>/dev/null; then
+                echo "backend 就绪"
+                break
+              fi
+              [ $i -eq 20 ] && { echo "backend 启动超时"; exit 1; }
+              sleep 5
+            done
+
+            echo "=== [4/4] 清理旧镜像 ==="
+            docker image prune -f
+
+            echo "✅ 部署完成: $(date '+%Y-%m-%d %H:%M:%S')"
+
+      # ── 3. 部署失败时通知（可选）─────────────────────────────
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "::error::部署失败！请检查 Actions 日志。"
+          # 可在此接入飞书/钉钉 Webhook，将 ${{ secrets.NOTIFY_WEBHOOK }} 配置好即可
