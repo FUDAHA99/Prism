@@ -9,6 +9,10 @@ import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
+import {
+  accessBlacklistKey,
+  refreshBlacklistKey,
+} from './token-blacklist.util';
 
 import { User } from '../user/entities/user.entity';
 import { LoginDto } from './dto/login.dto';
@@ -30,8 +34,9 @@ interface LoginAttemptData {
 @Injectable()
 export class AuthService {
   private readonly MAX_LOGIN_ATTEMPTS = 5;
-  private readonly LOGIN_BLOCK_TIME = 15 * 60;
-  private readonly ACCESS_TOKEN_BLACKLIST_PREFIX = 'blacklist:token:';
+  // cache-manager v5+ 的 TTL 一律以毫秒计（底层 Keyv）。
+  // 此前写的是 15 * 60（被当作 900 毫秒），登录锁定实际只有 0.9 秒。
+  private readonly LOGIN_BLOCK_TIME = 15 * 60 * 1000;
 
   constructor(
     private readonly userService: UserService,
@@ -128,7 +133,9 @@ export class AuthService {
       throw new UnauthorizedException('无效的token类型');
     }
 
-    const blacklistKey = `${this.ACCESS_TOKEN_BLACKLIST_PREFIX}refresh:${refreshToken.slice(-20)}`;
+    // 注意：目前没有任何地方写入 refresh 黑名单，此检查恒不命中。
+    // 保留并统一 key 构造，refresh 吊销待后续单独实现。
+    const blacklistKey = refreshBlacklistKey(refreshToken);
     const isBlacklisted = await this.cacheManager.get(blacklistKey);
     if (isBlacklisted) {
       throw new UnauthorizedException('refresh token已失效');
@@ -151,12 +158,16 @@ export class AuthService {
     if (accessToken) {
       try {
         const decoded = this.jwtService.decode(accessToken) as { exp?: number };
-        const ttl = decoded?.exp
+        // JWT 的 exp 是秒级 Unix 时间戳，缓存 TTL 要毫秒，需换算
+        const ttlSec = decoded?.exp
           ? decoded.exp - Math.floor(Date.now() / 1000)
           : 7200;
-        if (ttl > 0) {
-          const blacklistKey = `${this.ACCESS_TOKEN_BLACKLIST_PREFIX}${accessToken.slice(-20)}`;
-          await this.cacheManager.set(blacklistKey, 1, ttl);
+        if (ttlSec > 0) {
+          await this.cacheManager.set(
+            accessBlacklistKey(accessToken),
+            1,
+            ttlSec * 1000,
+          );
         }
       } catch {
         // ignore decode errors — token may already be invalid

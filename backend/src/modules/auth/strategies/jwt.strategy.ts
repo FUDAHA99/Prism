@@ -6,6 +6,7 @@ import { JwtPayload, AuthUser } from '../interfaces/auth.interface';
 import { AuthService } from '../auth.service';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
+import { accessBlacklistKey } from '../token-blacklist.util';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
@@ -26,7 +27,9 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     try {
       // 检查token是否在黑名单中
       const token = this.extractTokenFromHeader(request);
-      const isBlacklisted = await this.cacheManager.get(`blacklist:${token}`);
+      const isBlacklisted = await this.cacheManager.get(
+        accessBlacklistKey(token),
+      );
       if (isBlacklisted) {
         throw new UnauthorizedException('Token已被注销');
       }

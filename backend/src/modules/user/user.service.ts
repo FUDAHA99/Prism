@@ -21,7 +21,8 @@ import { AuditService } from '../audit/audit.service';
 @Injectable()
 export class UserService {
   private readonly CACHE_PREFIX = 'user:';
-  private readonly CACHE_TTL = 300;
+  // 毫秒（cache-manager v5+ 语义）。此前写 300，实际只缓存 0.3 秒。
+  private readonly CACHE_TTL = 5 * 60 * 1000;
 
   constructor(
     @InjectRepository(User)
