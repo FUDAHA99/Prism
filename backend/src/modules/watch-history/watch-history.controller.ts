@@ -8,67 +8,65 @@ import {
   UseGuards,
   HttpCode,
   HttpStatus,
+  BadRequestException,
+  DefaultValuePipe,
+  ParseIntPipe,
 } from '@nestjs/common';
-import { AuthGuard } from '@nestjs/passport';
-import { ApiTags, ApiOperation } from '@nestjs/swagger';
-import { WatchHistoryService, ReportProgressDto } from './watch-history.service';
+import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
+import { JwtOptionalGuard } from '../../common/guards/jwt-optional.guard';
+import { WatchHistoryService } from './watch-history.service';
+import { ReportProgressDto } from './dto/report-progress.dto';
 import { WatchContentType } from './entities/watch-history.entity';
 
+const CONTENT_TYPES: WatchContentType[] = ['movie', 'novel', 'comic'];
+
+/**
+ * 观看记录。三条接口都是「登录可用、游客也可用」。
+ *
+ * 此前它们各自手工 base64 解 Authorization 头取 payload.sub 当 userId，
+ * 不验签、不校验 exp、不查黑名单 —— 构造 `Bearer x.<自制payload>.y`
+ * 即可读写任意用户的观看记录。现改用 JwtOptionalGuard 走 Passport，
+ * 由 JwtStrategy 统一完成验签、过期、禁用状态与黑名单检查；
+ * 未登录时 req.user 为 undefined，按游客处理，不会 401。
+ */
 @ApiTags('观看记录')
+@ApiBearerAuth()
+@UseGuards(JwtOptionalGuard)
 @Controller('watch-history')
 export class WatchHistoryController {
   constructor(private readonly service: WatchHistoryService) {}
 
-  /**
-   * 上报播放进度（无需登录，游客也可上报）
-   * 登录用户自动读取 JWT；游客通过 body.guestId 标识
-   */
-  @Post('report')
-  @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({ summary: '上报播放进度' })
-  async report(@Body() dto: ReportProgressDto, @Request() req: any) {
-    // 尝试从 JWT 提取 userId（可选认证，不强制）
-    let userId: string | undefined;
-    try {
-      const authHeader: string = req.headers?.authorization ?? '';
-      if (authHeader.startsWith('Bearer ')) {
-        // 直接解 JWT payload（不走 Guard，避免 401）
-        const payload = JSON.parse(
-          Buffer.from(authHeader.split('.')[1], 'base64url').toString(),
-        );
-        if (payload?.sub) userId = payload.sub;
-      }
-    } catch {}
-
-    await this.service.report(dto, userId);
+  /** JwtStrategy.validate 返回对象的主键字段名是 id */
+  private userIdOf(req: any): string | undefined {
+    return req.user?.id;
   }
 
-  /**
-   * 查询某内容的播放进度
-   */
+  private assertContentType(value: string): WatchContentType {
+    if (!CONTENT_TYPES.includes(value as WatchContentType)) {
+      throw new BadRequestException('contentType 必须是 movie / novel / comic');
+    }
+    return value as WatchContentType;
+  }
+
+  @Post('report')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({ summary: '上报播放进度（登录用户与游客均可）' })
+  async report(@Body() dto: ReportProgressDto, @Request() req: any) {
+    await this.service.report(dto, this.userIdOf(req));
+  }
+
   @Get()
   @ApiOperation({ summary: '查询播放进度' })
   async findProgress(
-    @Query('contentType') contentType: WatchContentType,
+    @Query('contentType') contentType: string,
     @Query('contentId') contentId: string,
     @Query('guestId') guestId: string,
     @Request() req: any,
   ) {
-    let userId: string | undefined;
-    try {
-      const authHeader: string = req.headers?.authorization ?? '';
-      if (authHeader.startsWith('Bearer ')) {
-        const payload = JSON.parse(
-          Buffer.from(authHeader.split('.')[1], 'base64url').toString(),
-        );
-        if (payload?.sub) userId = payload.sub;
-      }
-    } catch {}
-
     const record = await this.service.findProgress(
-      contentType,
+      this.assertContentType(contentType),
       contentId,
-      userId,
+      this.userIdOf(req),
       guestId,
     );
 
@@ -84,27 +82,15 @@ export class WatchHistoryController {
     };
   }
 
-  /**
-   * 最近观看列表（备用）
-   */
   @Get('recent')
   @ApiOperation({ summary: '最近观看列表' })
   async findRecent(
-    @Query('limit') limit = 10,
+    @Query('limit', new DefaultValuePipe(10), ParseIntPipe) limit: number,
     @Query('guestId') guestId: string,
     @Request() req: any,
   ) {
-    let userId: string | undefined;
-    try {
-      const authHeader: string = req.headers?.authorization ?? '';
-      if (authHeader.startsWith('Bearer ')) {
-        const payload = JSON.parse(
-          Buffer.from(authHeader.split('.')[1], 'base64url').toString(),
-        );
-        if (payload?.sub) userId = payload.sub;
-      }
-    } catch {}
-
-    return this.service.findRecent(userId, guestId, Number(limit));
+    // 夹紧上限，避免 ?limit=100000 拖库
+    const safeLimit = Math.min(Math.max(limit, 1), 50);
+    return this.service.findRecent(this.userIdOf(req), guestId, safeLimit);
   }
 }

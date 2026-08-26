@@ -2,17 +2,11 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { WatchHistory, WatchContentType } from './entities/watch-history.entity';
+import { ReportProgressDto } from './dto/report-progress.dto';
 
-export interface ReportProgressDto {
-  contentType: WatchContentType;
-  contentId: string;
-  episodeId?: string;
-  srcIdx?: number;
-  epIdx?: number;
-  progressSec: number;
-  durationSec?: number;
-  guestId?: string;
-}
+export { ReportProgressDto };
+
+
 
 @Injectable()
 export class WatchHistoryService {
