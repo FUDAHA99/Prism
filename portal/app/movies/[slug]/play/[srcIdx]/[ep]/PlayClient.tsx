@@ -4,33 +4,14 @@ import { useEffect, useRef, useCallback } from 'react'
 import Link from 'next/link'
 import HlsPlayer from '@/components/HlsPlayer'
 import { friendlySourceName } from '@/lib/movie-utils'
-
-interface Episode {
-  id: string
-  title: string
-  url: string
-}
-
-interface Source {
-  id: string
-  name: string
-  episodes?: Episode[]
-}
-
-interface Movie {
-  id: string
-  slug: string
-  title: string
-  posterUrl?: string
-  sources?: Source[]
-}
+import type { Movie, MovieSource, MovieEpisode } from '@/lib/types'
 
 interface Props {
   movie: Movie
   srcIdx: number
   epIdx: number
-  source: Source
-  episode: Episode
+  source: MovieSource
+  episode: MovieEpisode
 }
 
 /** 获取或生成游客 ID */
