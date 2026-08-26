@@ -35,7 +35,12 @@ services:
       - --skip-name-resolve
     volumes:
       - prism_mysql_data:/var/lib/mysql
-      - ./database/init:/docker-entrypoint-initdb.d:ro
+      # 不挂载 database/init：那里的 00-init.sql 硬编码了开发库名 cms_dev，
+      # 而生产库是 cms_prod，MySQL 首次初始化会因 ALTER DATABASE cms_dev
+      # 找不到库而报错退出，容器起不来。
+      # 生产也确实不需要它：字符集由下方 command 的 --character-set-server
+      # 指定，建库与授权由 MySQL 官方 entrypoint 依 MYSQL_DATABASE /
+      # MYSQL_USER 自动完成；测试库仅开发环境需要。
     networks:
       - prism-net
     healthcheck:

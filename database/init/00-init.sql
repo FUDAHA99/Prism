@@ -1,3 +1,6 @@
+-- 仅供开发环境（docker-compose.yml）使用，生产不挂载此目录。
+-- 下面硬编码的 cms_dev 与开发环境 MYSQL_DATABASE 一致；生产库名为 cms_prod，
+-- 若误挂载会导致 MySQL 初始化失败、容器无法启动。
 -- MySQL 容器首次启动时自动执行
 -- 1. 确认数据库 utf8mb4 编码
 -- 2. 给 cms 用户全权限（默认只对 cms_dev 库有权限，但开发期方便起见放开）
