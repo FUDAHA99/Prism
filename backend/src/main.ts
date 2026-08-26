@@ -15,6 +15,14 @@ async function bootstrap() {
   const configService = app.get(ConfigService);
   const port = configService.get<number>('APP_PORT', 3000);
   const nodeEnv = configService.get<string>('NODE_ENV', 'development');
+
+  // 信任前置的 nginx 一层代理。
+  // ThrottlerBehindProxyGuard 用 req.ips[0] 作限流 key，而 Express 只有在
+  // trust proxy 开启后才会解析 X-Forwarded-For 填充 req.ips；否则 req.ips
+  // 恒为空数组，回退到 req.ip —— 那是 nginx 容器的内网 IP，全体访客因此
+  // 共用同一个限流桶，几个用户刷首页就能让其他人吃 429。
+  // 取 1 而非 true：只信任最近一跳，避免客户端自行伪造 X-Forwarded-For。
+  app.set('trust proxy', 1);
   
   // 安全中间件
   app.use(
