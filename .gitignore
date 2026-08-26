@@ -12,7 +12,9 @@ node_modules/
 .env.test.local
 .env.production.local
 .env.production
-.env.prod          # 生产配置（含密钥，绝不入库）
+# 生产配置（含密钥，绝不入库）
+# 注意：.gitignore 不支持行尾内联注释，注释必须单独成行
+.env.prod
 
 # ─── 构建产物 ────────────────────────────────────────
 dist/
@@ -50,6 +52,12 @@ coverage/
 
 # ─── TypeScript 增量编译缓存 ────────────────────────
 *.tsbuildinfo
+
+# ─── 数据库备份（含全量数据，绝不入库）───────────
+backup/
+
+# ─── setup-ssl.sh 运行时生成（含服务器绝对路径）─────
+scripts/renew-ssl.sh
 
 # ─── SSL 证书（含私钥，绝不入库）───────────────────
 nginx/ssl/
