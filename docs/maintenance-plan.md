@@ -29,6 +29,29 @@
   当前本地 `.env.prod` 的 `DOMAIN=http://localhost`，且 GitHub 未配置任何部署 secret
   （`gh secret list` 为空），即目前不存在真实生产环境 —— 此项在真正上线前必须先解决。
 
+### 批次 1 —— 进行中
+
+| 提交 | 内容 | 验证 |
+|---|---|---|
+| `0485f75` | **1-A** 统一黑名单 key（sha256）、三处 TTL 改毫秒、Redis 换 Keyv 适配器 | 实测往返：logout 后校验命中、未注销 token 不误伤；旧 TTL 写法 1.1 秒即过期 |
+| `11f1b6a` | **1-B** watch-history 改 Passport 可选守卫 + DTO 改 class | 实测 ValidationPipe：真实 payload 放行，6 类脏数据全部 400 |
+| `5dabf5c` | **限流三修** ttl 单位、SSR 豁免、getTracker 防伪造 | 实测四种请求形态 + tracker 取值全 PASS |
+
+**审计计划中一条会造成生产事故的建议已被拦下**：计划 1-B 第 3 点建议「顺带把
+`RATE_LIMIT_TTL` 改成 60000」。直接照做会打挂全站 —— portal 的 SSR 用
+`BACKEND_INTERNAL_URL` 直连 `backend:3001` 绕过 nginx，这些请求源 IP 恒为 portal
+容器地址，全站页面渲染共用一个桶；窗口一旦变成真正的 60 秒，每页 2~4 次 API 调用，
+全站每分钟几十次访问就会开始 429。已改为「先加 SSR 豁免，再改单位」。
+
+**待验证（需本地起 Docker，避免占用开发端口未执行）**
+- 1-A：连真实 Redis 的集成验证（`redis-cli KEYS 'blacklist:*'` 应能看到条目）
+- 1-B：登录态与游客态各跑一次真实上报，确认 `forbidNonWhitelisted` 无回归
+- 限流：带 nginx 的环境下确认外部请求按 IP 限流、SSR 不受限
+
+**批次 1 剩余**：1-C portal 攻击面收敛、1-D 上传加固、1-E nginx 硬化。
+
+---
+
 ### 邮箱暴露处置 —— 已完成技术侧，剩余两步需人工
 
 **背景**：仓库为 PUBLIC，此前 13 个提交的 author 与 committer 邮箱均为真实 gmail。
