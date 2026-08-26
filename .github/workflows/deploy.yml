@@ -1,23 +1,81 @@
-name: Deploy to Production
+name: CI & Deploy
 
 on:
   push:
     branches: [main]
-  workflow_dispatch:   # 允许手动触发
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一分支的旧运行自动取消，连续推送时不排队
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  # ─────────────────────────────────────────────────────────────
+  # 构建门禁：三端必须全部构建通过，deploy 才会执行
+  #
+  # 这个 job 是补上来的。此前本仓库唯一的 workflow 只有 SSH 部署一步，
+  # 没有任何构建/类型检查，导致 portal 的一个类型错误在 main 上躺了
+  # 111 天无人发现，而部署流水线自建立起就没成功构建过 portal。
+  # ─────────────────────────────────────────────────────────────
+  verify:
+    name: Build ${{ matrix.project }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false        # 一个挂了也要看到另外两个的结果
+      matrix:
+        project: [backend, frontend, portal]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'   # 与三个 Dockerfile 的 node:20-alpine 保持一致
+          cache: npm
+          cache-dependency-path: ${{ matrix.project }}/package-lock.json
+
+      - name: Install (npm ci)
+        working-directory: ${{ matrix.project }}
+        run: npm ci
+
+      # backend: nest build / frontend: tsc && vite build / portal: next build
+      # 三者都含类型检查，构建通过即等价于 tsc 通过
+      - name: Build
+        working-directory: ${{ matrix.project }}
+        run: npm run build
+        env:
+          # portal 构建期读取；取值不影响产物结构，仅避免未定义告警
+          NEXT_PUBLIC_API_BASE: http://localhost
+          NEXT_PUBLIC_SITE_NAME: Prism
+
+  # ─────────────────────────────────────────────────────────────
+  # 部署：仅在 verify 全绿、且是推送到 main 时执行
+  # 未配置 SSH secrets 时优雅跳过（而非红叉），避免 CI 长期挂红
+  # ─────────────────────────────────────────────────────────────
   deploy:
     name: SSH Deploy
+    needs: verify
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
     steps:
-      # ── 1. 检出代码（仅用于获取 commit 信息）──────────────────
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: 检查部署 secrets 是否已配置
+        id: gate
+        run: |
+          if [ -z "${{ secrets.SSH_HOST }}" ] || [ -z "${{ secrets.SSH_USER }}" ] || [ -z "${{ secrets.SSH_PRIVATE_KEY }}" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=已跳过部署::构建全部通过，但未配置 SSH_HOST / SSH_USER / SSH_PRIVATE_KEY，不执行部署。配置方法见 docs/deploy.md 第 8 节。"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
 
-      # ── 2. SSH 登录服务器，拉代码并重新部署 ───────────────────
       - name: Deploy via SSH
+        if: steps.gate.outputs.ready == 'true'
         uses: appleboy/ssh-action@v1.0.3
         with:
           host:     ${{ secrets.SSH_HOST }}
@@ -28,14 +86,18 @@ jobs:
             set -euo pipefail
             cd ${{ secrets.DEPLOY_PATH || '/opt/prism-cms' }}
 
-            echo "=== [1/4] 拉取最新代码 ==="
+            echo "=== [1/5] 拉取最新代码 ==="
             git pull origin main
 
-            echo "=== [2/4] 构建并重启服务 ==="
-            docker compose -f docker-compose.prod.yml --env-file .env.prod \
-              up -d --build --remove-orphans
+            echo "=== [2/5] 安全检查 ==="
+            if grep -q '^DB_SYNC=true' .env.prod 2>/dev/null; then
+              echo "::warning::.env.prod 中 DB_SYNC=true —— TypeORM 会在容器启动时 ALTER 生产库，改类型或删列将静默丢数据。首次部署完成后应改回 false。"
+            fi
 
-            echo "=== [3/4] 等待 backend 健康 ==="
+            echo "=== [3/5] 构建并重启服务 ==="
+            docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build --remove-orphans
+
+            echo "=== [4/5] 等待 backend 健康 ==="
             for i in $(seq 1 24); do
               STATUS=$(docker inspect --format='{{.State.Health.Status}}' prism-backend 2>/dev/null || echo "none")
               if [ "$STATUS" = "healthy" ]; then
@@ -46,14 +108,11 @@ jobs:
               sleep 5
             done
 
-            echo "=== [4/4] 清理旧镜像 ==="
+            echo "=== [5/5] 清理旧镜像 ==="
             docker image prune -f
 
-            echo "✅ 部署完成: $(date '+%Y-%m-%d %H:%M:%S')"
+            echo "部署完成: $(date '+%Y-%m-%d %H:%M:%S')"
 
-      # ── 3. 部署失败时通知（可选）─────────────────────────────
       - name: Notify on failure
         if: failure()
-        run: |
-          echo "::error::部署失败！请检查 Actions 日志。"
-          # 可在此接入飞书/钉钉 Webhook，将 ${{ secrets.NOTIFY_WEBHOOK }} 配置好即可
+        run: echo "::error::部署失败，请检查 Actions 日志。"
