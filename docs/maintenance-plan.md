@@ -29,11 +29,49 @@
   当前本地 `.env.prod` 的 `DOMAIN=http://localhost`，且 GitHub 未配置任何部署 secret
   （`gh secret list` 为空），即目前不存在真实生产环境 —— 此项在真正上线前必须先解决。
 
-### 遗留决策项
+### 邮箱暴露处置 —— 已完成技术侧，剩余两步需人工
 
-- 已推送的历史提交 author 邮箱为真实 gmail，且仓库为 PUBLIC。本轮起新提交已改用
-  GitHub noreply 邮箱（仓库 local 覆盖已移除，回落到全局配置）。抹除旧记录需重写
-  公开历史，未执行，待决定。
+**背景**：仓库为 PUBLIC，此前 13 个提交的 author 与 committer 邮箱均为真实 gmail。
+根因是本仓库 local 的 `user.email` 覆盖了全局已配置好的 GitHub noreply 邮箱。
+
+**已完成**
+
+| 动作 | 结果 |
+|---|---|
+| 移除 local `user.email` 覆盖，回落全局 noreply | 此后新提交不再暴露 |
+| `git filter-repo --mailmap` 重写全部 20 个提交的 author + committer | HEAD tree 哈希前后一致（`8833bff…`），文件内容一字未改；提交数 20 未变 |
+| `git push --force-with-lease` | 远程 20 个提交经 GitHub API 复核，100% 为 noreply |
+| CI 复跑 | 重写后的历史上三端构建仍全绿 |
+
+本地备份：`~/prism-pre-email-rewrite.bundle`（627KB，`git bundle verify` 通过，含完整旧历史）。
+**该备份不要推送到任何远程**，否则等于把旧邮箱又送回去。
+
+**未完成 —— 只能由仓库所有者操作**
+
+重写**不能**彻底清除。实测证据：force push 之后，从本仓库自己的 URL 仍能取到旧提交并读出 gmail：
+
+```
+GET /repos/FUDAHA99/Prism/commits/ad4fc26  ->  fuxiaoha@gmail.com
+GET /repos/FUDAHA99/Prism/commits/fad110c  ->  fuxiaoha@gmail.com
+```
+
+原因是 GitHub 官方行为：fork 网络内任一仓库持有的提交，可从网络内其他仓库按 SHA 访问；
+且旧提交还存在于 GitHub 的缓存视图中。本仓库存在 1 个 fork：`kk778956/Prism`（公开，
+2026-04-29 创建）。
+
+因此还需两步：
+
+1. **联系 GitHub Support**（https://support.github.com/contact）请求 GC 与清除缓存视图。
+   请求要点：仓库 `FUDAHA99/Prism`，已重写历史移除提交元数据中的私人邮箱，
+   请求 run garbage collection 并 dereference 受影响的缓存引用。
+2. **联系 fork 所有者 `kk778956`**，请其删除 fork 或同样重写。
+   注意：GitHub 文档明确说明，即使 fork 被删除，来自该 fork 的贡献仍可能对仓库网络保持可访问 ——
+   所以第 1 步的 GC 请求不能省。
+
+**风险量级判断（避免过度投入）**：该邮箱自 2026-04-27 起公开约 4 个月，仓库有 3 星 1 fork。
+GitHub 提交元数据被第三方大规模抓取，实际上应假定该邮箱已被采集。
+上述两步是收敛残留可见面，真正有效的是已完成的"阻断未来暴露"。
+若判断不值得投入，可只做第 1 步（免费、约 5 分钟）而跳过第 2 步。
 
 ---
 
