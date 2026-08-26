@@ -4,6 +4,39 @@
 
 ---
 
+## 执行进度
+
+最后更新：2026-08-26
+
+### 批次 0 —— 已完成 ✅
+
+| 提交 | 内容 | 验证 |
+|---|---|---|
+| `17ce53f` | `.gitignore` 行内注释导致 `.env.prod` 未被忽略（含真实密钥，仓库为 PUBLIC）；顺带补上 `backup/`、`scripts/renew-ssl.sh` | `git check-ignore -v` 逐项确认；确认该文件从未进入历史 |
+| `3c08131` | portal 构建失败：删除 `PlayClient.tsx` 三个重复的局部 interface，改用 `@/lib/types` | `tsc --noEmit` EXIT=0（原 2）；`npm run build` EXIT=0，16 路由全出 |
+| `17c5522` | 启用 Express `trust proxy`，恢复按 IP 限流 | `npm run build` EXIT=0 |
+| `ed214ca` | 生产不再挂载开发用 initdb 脚本（硬编码 `cms_dev`，生产库为 `cms_prod`） | compose 解析确认挂载已移除，开发端未受影响 |
+| `498e102` | 新增三端构建门禁，`deploy` 改为 `needs: verify`；无 secrets 时优雅跳过 | CI 首次全绿 |
+| `634b0e5` | actions 升 v7，消除 Node 20 弃用告警 | CI 全绿且零 annotation |
+
+**结果**：项目恢复可部署。CI 自 2026-05-07 建立以来第一次通过。
+
+### 批次 0 未完成项 —— 需在服务器上操作
+
+- **`DB_SYNC=true` + 零 migration**（本文档第三节）。这是唯一"什么都不做也会出事"的项，
+  但修复顺序不能反：必须先备份、先取证当前 schema、先手工补列，最后才关 `DB_SYNC`。
+  直接改成 `false` 重启会让影视模块与续播功能立刻 500。
+  当前本地 `.env.prod` 的 `DOMAIN=http://localhost`，且 GitHub 未配置任何部署 secret
+  （`gh secret list` 为空），即目前不存在真实生产环境 —— 此项在真正上线前必须先解决。
+
+### 遗留决策项
+
+- 已推送的历史提交 author 邮箱为真实 gmail，且仓库为 PUBLIC。本轮起新提交已改用
+  GitHub noreply 邮箱（仓库 local 覆盖已移除，回落到全局配置）。抹除旧记录需重写
+  公开历史，未执行，待决定。
+
+---
+
 ## 一、现状判定
 
 **这个项目现在不能部署，而且已经有 4 个月不能部署了，只是没人发现。**
