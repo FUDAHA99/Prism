@@ -50,7 +50,10 @@ import { RedisModule } from './shared/redis/redis.module';
       inject: [ConfigService],
       useFactory: (configService: ConfigService) => ({
         throttlers: [{
-          ttl: configService.get<number>('RATE_LIMIT_TTL', 60),
+          // @nestjs/throttler v5 的 ttl 以毫秒计
+          // （throttler.service.js: expiresAt = Date.now() + ttl）。
+          // 此前默认值 60 意味着限流窗口只有 60 毫秒，形同没有限流。
+          ttl: configService.get<number>('RATE_LIMIT_TTL', 60_000),
           limit: configService.get<number>('RATE_LIMIT_COUNT', 100),
         }],
       }),
