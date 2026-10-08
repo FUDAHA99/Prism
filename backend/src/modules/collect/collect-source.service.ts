@@ -1,5 +1,6 @@
 import {
   Injectable,
+  Logger,
   NotFoundException,
   BadRequestException,
 } from '@nestjs/common';
@@ -7,43 +8,34 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { CollectSource, CollectSourceStatus, CollectSourceType, CollectContentType } from './entities/collect-source.entity';
 import { CollectCategoryMapping } from './entities/collect-category-mapping.entity';
-import { fetchMacCmsList } from './maccms-client';
+import { collectErrorLogDetail, collectErrorMessage, fetchMacCmsList } from './maccms-client';
 import { AuditService } from '../audit/audit.service';
 import { auditKeysOnly, auditUrlHost, changedAuditFields } from '../audit/audit-summary';
+import {
+  CreateCollectSourceDto,
+  QueryCollectSourceDto,
+  UpdateCollectSourceDto,
+} from './dto/collect-source.dto';
+import { UpsertCategoryMappingDto } from './dto/category-mapping.dto';
 
-export interface CreateCollectSourceDto {
-  name: string;
-  sourceType?: CollectSourceType;
-  apiUrl: string;
-  contentType?: CollectContentType;
-  status?: CollectSourceStatus;
-  sortOrder?: number;
-  timeoutSec?: number;
-  userAgent?: string;
-  extraHeaders?: Record<string, string>;
-  defaultPlayFrom?: string;
-  remark?: string;
+/** 「测试连接」回显给后台的上游字符串（msg、样本标题等）截到这么长 */
+const TEST_ECHO_MAX_CHARS = 200;
+
+function clip(value: unknown): string | number | undefined {
+  if (value === null || value === undefined) return undefined;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  const text = String(value);
+  return text.length > TEST_ECHO_MAX_CHARS ? `${text.slice(0, TEST_ECHO_MAX_CHARS)}…` : text;
 }
 
-export interface UpdateCollectSourceDto extends Partial<CreateCollectSourceDto> {}
-
-export interface QueryCollectSourceDto {
-  page?: number;
-  pageSize?: number;
-  keyword?: string;
-  status?: CollectSourceStatus;
-  contentType?: CollectContentType;
-}
-
-export interface UpsertCategoryMappingDto {
-  sourceCategoryId: string;
-  sourceCategoryName: string;
-  localCategoryId?: string | null;
-  enabled?: boolean;
-}
+/** 与 collect_category_mappings 的列长一致：超长的源分类 ID 存不进去，名称截断 */
+const SOURCE_CATEGORY_ID_MAX = 50;
+const SOURCE_CATEGORY_NAME_MAX = 200;
 
 @Injectable()
 export class CollectSourceService {
+  private readonly logger = new Logger(CollectSourceService.name);
+
   constructor(
     @InjectRepository(CollectSource)
     private readonly sourceRepo: Repository<CollectSource>,
@@ -145,7 +137,8 @@ export class CollectSourceService {
   // ============ 测试连接 ============
 
   /**
-   * 测试一次接口连通性 + 返回首页前几条
+   * 测试一次接口连通性 + 返回首页前几条。
+   * 出站请求走 safe-fetch（拦截内网/元数据地址）；失败时只回固定文案，不回显上游响应内容。
    */
   async testConnection(id: string) {
     const source = await this.findOne(id);
@@ -154,21 +147,22 @@ export class CollectSourceService {
       return {
         ok: true,
         code: res.code,
-        msg: res.msg,
+        msg: clip(res.msg),
         page: res.page,
         pagecount: res.pagecount,
-        limit: res.limit,
+        limit: clip(res.limit),
         total: res.total,
         sample: (res.list || []).slice(0, 3).map((x: any) => ({
-          vod_id: x.vod_id,
-          vod_name: x.vod_name,
-          type_id: x.type_id,
-          type_name: x.type_name,
-          vod_time: x.vod_time,
+          vod_id: clip(x?.vod_id),
+          vod_name: clip(x?.vod_name),
+          type_id: clip(x?.type_id),
+          type_name: clip(x?.type_name),
+          vod_time: clip(x?.vod_time),
         })),
       };
-    } catch (e: any) {
-      return { ok: false, error: e.message ?? String(e) };
+    } catch (e) {
+      this.logger.warn(`测试采集源 ${id} 失败：${collectErrorLogDetail(e)}`);
+      return { ok: false, error: collectErrorMessage(e) };
     }
   }
 
@@ -178,6 +172,8 @@ export class CollectSourceService {
    * 探查源站全部分类（通过列表接口的分页/分类聚合）
    * MacCMS 列表接口本身不直接返回 type 列表 —— 我们扫一两页 + 分类去重，
    * 同时支持后续手动 upsert 映射。
+   * 第一页就失败时返回 400 + 固定文案（此前静默返回空数组，后台只会显示「发现 0 个分类」）；
+   * 后续页失败则保留已发现的分类。
    */
   async discoverSourceCategories(id: string) {
     const source = await this.findOne(id);
@@ -188,13 +184,17 @@ export class CollectSourceService {
       try {
         const res = await fetchMacCmsList(source, { page: p });
         for (const item of res.list || []) {
-          const tid = String(item.type_id);
+          const tid = String(item?.type_id ?? '');
+          if (!tid || tid.length > SOURCE_CATEGORY_ID_MAX) continue;
           if (!seen.has(tid)) {
-            seen.set(tid, { id: tid, name: item.type_name || `分类${tid}` });
+            const name = String(item.type_name || `分类${tid}`).slice(0, SOURCE_CATEGORY_NAME_MAX);
+            seen.set(tid, { id: tid, name });
           }
         }
         if (p >= (res.pagecount || 1)) break;
-      } catch {
+      } catch (e) {
+        this.logger.warn(`探查采集源 ${id} 第 ${p} 页失败：${collectErrorLogDetail(e)}`);
+        if (p === 1) throw new BadRequestException(collectErrorMessage(e));
         break;
       }
     }

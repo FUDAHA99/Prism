@@ -13,6 +13,9 @@ import {
 } from './entities/collect-log.entity';
 import { CollectSourceService } from './collect-source.service';
 import {
+  CollectError,
+  collectErrorLogDetail,
+  collectErrorMessage,
   fetchMacCmsList,
   parsePlayData,
   toIntOrNull,
@@ -36,15 +39,10 @@ import { MovieEpisode } from '../movie/entities/movie-episode.entity';
 import { Novel, NovelStatus } from '../novel/entities/novel.entity';
 import { Comic, ComicStatus } from '../comic/entities/comic.entity';
 
-export interface RunCollectDto {
-  mode?: CollectMode;
-  hours?: number;
-  pageStart?: number;
-  pageEnd?: number;
-  vodIds?: string;       // "1,2,3"
-  typeId?: string;       // 仅采某个源分类
-  maxPages?: number;     // 安全上限，默认 200
-}
+import { QueryCollectLogDto, RunCollectDto } from './dto/run-collect.dto';
+
+/** 单条失败的错误摘要上限（vod_id 来自上游，可以很长） */
+const ITEM_ERROR_MAX_CHARS = 500;
 
 interface RunStats {
   total: number;
@@ -131,7 +129,7 @@ export class CollectExecutorService {
       const mappingMap = await this.sourceService.getEnabledMappingMap(source.id);
 
       if (mode === CollectMode.SINGLE) {
-        if (!dto.vodIds) throw new Error('SINGLE 模式必须传 vodIds');
+        if (!dto.vodIds) throw new CollectError('SINGLE 模式必须传 vodIds');
         const res = await fetchMacCmsList(source, { ids: dto.vodIds });
         await this.processBatch(source, res.list, mappingMap, stats);
       } else {
@@ -161,10 +159,11 @@ export class CollectExecutorService {
         finalStatus = CollectLogStatus.FAILED;
         errorMessage = stats.firstError ?? '全部失败';
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       finalStatus = CollectLogStatus.FAILED;
-      errorMessage = e?.message ?? String(e);
-      this.logger.error(`采集 ${source.name} 失败: ${errorMessage}`);
+      // 存进 collect_logs、由后台日志页展示：只用固定文案，不回显上游响应内容
+      errorMessage = collectErrorMessage(e, '采集过程中发生内部错误（详见服务端日志）');
+      this.logger.error(`采集 ${source.name} 失败: ${collectErrorLogDetail(e)}`);
     }
 
     const durationMs = Date.now() - startedAt;
@@ -210,8 +209,12 @@ export class CollectExecutorService {
         else stats.skipped++;
       } catch (e: any) {
         stats.failed++;
-        if (!stats.firstError) stats.firstError = `vod_id=${it.vod_id}: ${e.message}`;
-        this.logger.warn(`采集条目 vod_id=${it.vod_id} 失败: ${e.message}`);
+        const summary = `vod_id=${String(it?.vod_id).slice(0, 64)}: ${e?.message ?? String(e)}`.slice(
+          0,
+          ITEM_ERROR_MAX_CHARS,
+        );
+        if (!stats.firstError) stats.firstError = summary;
+        this.logger.warn(`采集条目失败: ${summary}`);
       }
     }
   }
@@ -418,7 +421,7 @@ export class CollectExecutorService {
 
   // ============ 日志查询 ============
 
-  async listLogs(query: { sourceId?: string; page?: number; pageSize?: number }) {
+  async listLogs(query: QueryCollectLogDto) {
     const page = query.page ?? 1;
     const pageSize = query.pageSize ?? 20;
     const qb = this.logRepo

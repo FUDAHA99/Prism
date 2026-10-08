@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, IsNull } from 'typeorm';
 import { Movie } from '../movie/entities/movie.entity';
+import { safeFetch, SafeFetchError } from '../../common/net/safe-fetch';
 
 @Injectable()
 export class PosterCheckerService {
@@ -58,20 +59,22 @@ export class PosterCheckerService {
   }
 
   /**
-   * HEAD 请求检测 URL 是否可访问
+   * HEAD 请求检测 URL 是否可访问。
+   * 封面地址来自上游采集数据（vod_pic），外部可控：走 safe-fetch，内网/元数据地址直接判为不可用，
+   * 重定向逐跳校验、最多 3 跳。
    */
   private async headCheck(url: string): Promise<boolean> {
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), this.TIMEOUT_MS);
-      const res = await fetch(url, {
+      const res = await safeFetch(url, {
         method: 'HEAD',
-        signal: controller.signal,
+        timeoutMs: this.TIMEOUT_MS,
         headers: { 'User-Agent': 'Mozilla/5.0 (compatible; PrismCMS/1.0)' },
       });
-      clearTimeout(timer);
       return res.status < 400;
-    } catch {
+    } catch (e) {
+      if (e instanceof SafeFetchError && e.code === 'BLOCKED_ADDRESS') {
+        this.logger.warn(`封面地址指向内网或保留地址，已拦截：${e.detail ?? ''}`);
+      }
       return false;
     }
   }

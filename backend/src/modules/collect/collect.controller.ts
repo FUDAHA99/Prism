@@ -16,17 +16,18 @@ import {
   ApiBearerAuth,
 } from '@nestjs/swagger';
 
+import { CollectSourceService } from './collect-source.service';
+import { CollectExecutorService } from './collect-executor.service';
 import {
-  CollectSourceService,
   CreateCollectSourceDto,
-  UpdateCollectSourceDto,
   QueryCollectSourceDto,
-  UpsertCategoryMappingDto,
-} from './collect-source.service';
+  UpdateCollectSourceDto,
+} from './dto/collect-source.dto';
 import {
-  CollectExecutorService,
-  RunCollectDto,
-} from './collect-executor.service';
+  BatchUpsertCategoryMappingDto,
+  UpsertCategoryMappingDto,
+} from './dto/category-mapping.dto';
+import { QueryCollectLogDto, RunCollectDto } from './dto/run-collect.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthUser } from '../auth/interfaces/auth.interface';
 import { Access } from '../../common/authz/access.decorator';
@@ -117,7 +118,7 @@ export class CollectController {
   @ApiOperation({ summary: '批量分类映射' })
   batchMapping(
     @Param('id') id: string,
-    @Body() body: { items: UpsertCategoryMappingDto[] },
+    @Body() body: BatchUpsertCategoryMappingDto,
     @CurrentUser() user: AuthUser,
   ) {
     return this.sourceService.batchUpsertMappings(id, body.items, user.id);
@@ -149,12 +150,8 @@ export class CollectController {
 
   @Get('logs')
   @ApiOperation({ summary: '采集日志列表' })
-  listLogs(
-    @Query('sourceId') sourceId?: string,
-    @Query('page') page?: number,
-    @Query('pageSize') pageSize?: number,
-  ) {
-    return this.executor.listLogs({ sourceId, page, pageSize });
+  listLogs(@Query() query: QueryCollectLogDto) {
+    return this.executor.listLogs(query);
   }
 
   @Get('logs/:id')
