@@ -29,10 +29,14 @@ const TYPE_TABS: { key: MovieType | 'all'; label: string }[] = [
 ]
 
 export default async function MoviesPage({ searchParams }: PageProps) {
-  const page = Math.max(1, parseInt(searchParams.page || '1', 10))
-  const movieType = searchParams.type === 'all' ? undefined : (searchParams.type as MovieType | undefined)
+  // 查询串来自地址栏，先收成后端认的值：后端对非法 page / year / 类型返回 400，原样透传会让整页显示「加载失败」
+  const page = Math.max(1, parseInt(searchParams.page || '1', 10) || 1)
+  const movieType = TYPE_TABS.some((t) => t.key !== 'all' && t.key === searchParams.type)
+    ? (searchParams.type as MovieType)
+    : undefined
   const region = searchParams.region || undefined
-  const year = searchParams.year ? parseInt(searchParams.year, 10) : undefined
+  const parsedYear = searchParams.year ? parseInt(searchParams.year, 10) : NaN
+  const year = parsedYear >= 0 && parsedYear <= 9999 ? parsedYear : undefined
   const search = searchParams.q || undefined
 
   const list = await getMovies({

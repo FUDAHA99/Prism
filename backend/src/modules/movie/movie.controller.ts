@@ -21,13 +21,14 @@ import {
   MovieService,
   CreateMovieDto,
   UpdateMovieDto,
-  QueryMovieDto,
   CreateMovieSourceDto,
   CreateMovieEpisodeDto,
 } from './movie.service';
+import { QueryMovieDto } from './dto/query-movie.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthUser } from '../auth/interfaces/auth.interface';
 import { Access } from '../../common/authz/access.decorator';
+import { CurrentViewer, Viewer } from '../../common/authz/viewer';
 
 @ApiTags('影视管理')
 @Controller('movies')
@@ -44,17 +45,24 @@ export class MovieController {
 
   @Get()
   @Access('optional')
-  @ApiOperation({ summary: '获取影视列表' })
-  async findAll(@Query() query: QueryMovieDto) {
-    return this.movieService.findAll(query);
+  @ApiOperation({
+    summary: '获取影视列表（后台角色看全量；游客只看已发布、公开字段，每页最多 50）',
+  })
+  async findAll(@Query() query: QueryMovieDto, @CurrentViewer() viewer: Viewer) {
+    return this.movieService.findAll(query, viewer);
   }
 
+  /**
+   * 门户影视详情页与播放页（portal 从不带 token，后台不调用这条），所以保持 public、不区分身份：
+   * 只返回已发布影视（公开字段 + 线路剧集），播放量也只在这里累加。
+   */
   @Get('slug/:slug')
   @Access('public')
-  @ApiOperation({ summary: '【公共】通过 slug 获取影视详情（前台用）' })
+  @ApiOperation({ summary: '【公共】通过 slug 获取已发布影视（前台用）' })
+  @ApiResponse({ status: 404, description: '影视不存在或未发布' })
   async findBySlug(@Param('slug') slug: string) {
-    const movie = await this.movieService.findBySlug(slug);
-    if (movie?.id) await this.movieService.incrementViewCount(movie.id);
+    const movie = await this.movieService.findPublishedBySlug(slug);
+    await this.movieService.incrementViewCount(movie.id);
     return movie;
   }
 
@@ -70,13 +78,12 @@ export class MovieController {
     return this.movieService.updatePoster(id, body.posterUrl, user.id);
   }
 
+  /** 后台编辑页加载用：任意状态、完整字段；不累加播放量（此前管理员每打开一次编辑页就 +1） */
   @Get(':id')
   @Access('staff')
   @ApiOperation({ summary: '获取影视详情' })
   async findOne(@Param('id') id: string) {
-    const movie = await this.movieService.findOne(id);
-    await this.movieService.incrementViewCount(id);
-    return movie;
+    return this.movieService.findOne(id);
   }
 
   @Patch(':id')

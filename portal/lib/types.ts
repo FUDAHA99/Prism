@@ -97,7 +97,6 @@ export interface SiteSetting {
 
 // ─── 影视 ─────────────────────────────
 export type MovieType = 'movie' | 'tv' | 'variety' | 'anime' | 'short'
-export type MovieStatus = 'draft' | 'published' | 'archived'
 
 export interface MovieEpisode {
   id: string
@@ -119,6 +118,10 @@ export interface MovieSource {
   episodes?: MovieEpisode[]
 }
 
+/**
+ * 公开影视（后端 movie.service.ts PublicMovie 白名单）：只有已发布影视，
+ * 不含 status 与采集 / 封面检测等后台字段；sources 只在 slug 详情里有。
+ */
 export interface Movie {
   id: string
   title: string
@@ -140,7 +143,6 @@ export interface Movie {
   currentEpisode?: number | null
   isFinished: boolean
   score: number | string
-  status: MovieStatus
   isFeatured: boolean
   isVip: boolean
   viewCount: number
@@ -148,7 +150,6 @@ export interface Movie {
   createdAt: string
   updatedAt: string
   sources?: MovieSource[]
-  category?: Category | null
 }
 
 // ─── 小说 ─────────────────────────────

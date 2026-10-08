@@ -12,7 +12,11 @@ export default async function HomePage() {
     getContents({ page: 1, limit: 9 }),
     getCategories(),
     getTags(),
-    getMovies({ limit: 8, isFeatured: true }).catch(() => getMovies({ limit: 8 })),
+    // 有推荐片就展示推荐片，没有就退回最新上架的 8 部（isFeatured 筛选此前因布尔参数未转换而失效，
+    // 实际拿到的是非推荐片；修好后若站点还没设推荐，这里不能变成空板块）
+    getMovies({ limit: 8, isFeatured: true })
+      .then((r) => (r.data.length > 0 ? r : getMovies({ limit: 8 })))
+      .catch(() => getMovies({ limit: 8 })),
     getNovels({ limit: 8 }),
     getComics({ limit: 8 }),
   ])

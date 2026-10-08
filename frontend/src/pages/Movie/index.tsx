@@ -65,11 +65,11 @@ const STATUS_LABEL: Record<string, string> = {
   archived: '已归档',
 }
 
-// 封面状态图标
-function PosterStatusIcon({ posterBroken }: { posterBroken?: boolean | null }) {
-  if (posterBroken === true)
+// 封面状态图标（posterBroken 是 TINYINT 列，MySQL 读出来是 1 / 0 而不是 true / false）
+function PosterStatusIcon({ posterBroken }: { posterBroken?: boolean | number | null }) {
+  if (posterBroken === true || posterBroken === 1)
     return <Tooltip title="封面图挂掉"><WarningOutlined style={{ color: '#EF4444' }} /></Tooltip>
-  if (posterBroken === false)
+  if (posterBroken === false || posterBroken === 0)
     return <Tooltip title="封面正常"><CheckOutlined style={{ color: '#10B981' }} /></Tooltip>
   return <Tooltip title="未检测"><QuestionCircleOutlined style={{ color: '#94A3B8' }} /></Tooltip>
 }
@@ -113,11 +113,11 @@ export default function MovieList() {
     onError: () => message.error('更新失败'),
   })
 
-  // posterBroken 筛选映射到后端参数
+  // posterBroken 筛选映射到后端参数（「未检测」传字符串 'null'：axios 会把值为 null 的参数整个丢掉，等于不筛选）
   const posterBrokenParam =
     filters.posterBroken === 'broken' ? true :
     filters.posterBroken === 'ok' ? false :
-    filters.posterBroken === 'unchecked' ? null : undefined
+    filters.posterBroken === 'unchecked' ? ('null' as const) : undefined
 
   const { data, isLoading } = useQuery({
     queryKey: ['movies', filters],

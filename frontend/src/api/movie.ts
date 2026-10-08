@@ -71,7 +71,8 @@ export interface MovieParams {
   year?: number
   isFeatured?: boolean
   isVip?: boolean
-  posterBroken?: boolean | null
+  /** 封面检测状态筛选（仅后台角色生效）：'null' 表示未检测 —— axios 会丢掉值为 null 的参数，所以用字符串 */
+  posterBroken?: boolean | 'null'
   page?: number
   limit?: number
 }

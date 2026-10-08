@@ -555,6 +555,47 @@
 
 ---
 
+## 十五、影视模块 `/movies`
+
+🔒 写操作需要后台角色（admin / editor）
+
+### 15.1 获取影视列表
+`GET /movies`（可选登录：后台与门户共用）
+
+- **后台角色（admin / editor）带 token**：全量视图 —— 任意状态（含草稿、归档），可按 `status` / `posterBroken` 筛选，字段完整（含 `collectSource`、`collectExternalId`、`posterBroken`、`titleCleaned`、`aliases`），每页最多 100。
+- **游客、无角色的登录用户**：服务端固定只返回已发布、未删除的影视，`status` / `posterBroken` 参数被忽略；每页最多 50（`limit` 超过 50 时按 50 返回，不报错）；字段为公开白名单（见下方「公开视图」）。
+
+**查询参数**（未列出的参数一律 `400`）：
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `search` | string | 搜索标题 / 原名 / 导演 / 主演（最长 200）|
+| `status` | `draft` \| `published` \| `archived` | 状态筛选（仅后台角色生效）|
+| `movieType` | `movie` \| `tv` \| `variety` \| `anime` \| `short` | 类型筛选 |
+| `categoryId` | UUID | 分类筛选 |
+| `subType` | string | 子分类（最长 200）|
+| `region` | string | 地区（最长 100）|
+| `year` | 整数 0–9999 | 年份 |
+| `isFeatured` / `isVip` | `true` \| `false` | 推荐 / VIP 筛选（其他写法 `400`）|
+| `posterBroken` | `true` \| `false` \| `null` | 封面检测状态：异常 / 正常 / 未检测（仅后台角色生效）|
+| `page` | 整数 1–100000 | 页码（默认 1）|
+| `limit` | 整数 1–100 | 每页数量（默认 20；游客最多按 50 返回）|
+
+**公开视图**（游客列表与 slug 详情）：只含 `id`、`title`、`originalTitle`、`slug`、`movieType`、`categoryId`、`subType`、`year`、`region`、`language`、`director`、`actors`、`intro`、`posterUrl`、`trailerUrl`、`duration`、`totalEpisodes`、`currentEpisode`、`isFinished`、`score`（DECIMAL，MySQL 下是字符串）、`isFeatured`、`isVip`、`metaTitle`、`metaKeywords`、`metaDescription`、`viewCount`、`likeCount`、`publishedAt`、`createdAt`、`updatedAt`；
+slug 详情另有 `sources`（`{ id, movieId, name, kind, player, sortOrder, episodes }`，`episodes` 为 `{ id, sourceId, title, episodeNumber, url, durationSec, sortOrder }`）。
+不含 `status`、`collectSource`、`collectExternalId`、`posterBroken`、`titleCleaned`、`aliases`。
+
+### 15.2 获取影视详情
+`GET /movies/:id`  🔒 后台角色（admin / editor）
+
+后台编辑页加载用，任意状态、完整字段与全部线路剧集；不累加播放量。
+
+### 15.3 通过 slug 获取已发布影视（门户详情 / 播放页）
+`GET /movies/slug/:slug`（公开）
+
+只返回已发布且未删除的影视（公开视图字段 + 线路与剧集），草稿 / 归档与不存在一样返回 `404`；每次成功读取播放量 +1。
+
+---
+
 ## HTTP 状态码说明
 
 | 状态码 | 含义 |
