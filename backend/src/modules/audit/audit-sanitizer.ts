@@ -12,8 +12,9 @@
  * 2. URL 只留 host（与写入路径 auditUrlHost 同一规则：去掉 userinfo、路径、query）：
  *    - 键名为 apiUrl / url 的字符串（任何资源类型）按 sanitizeAuditUrl 处理；
  *    - resourceType 属于 AUDIT_URL_HOST_ONLY_RESOURCE_TYPES（采集源）的记录，所有字符串里出现的
- *      scheme://… 都换成 host。修复前采集源的 CREATE / UPDATE 记的是 apiUrl 原文与整份 dto，
- *      资源站常把 key 放在 query 里，userinfo 里也可能有账号密码。
+ *      scheme://…、省略 scheme 的 userinfo@host/… 与 host/…（见 stripUrlsInAuditText）都换成 host，
+ *      其余残留的 ?key=value 整段去掉。修复前采集源的 CREATE / UPDATE 记的是 apiUrl 原文与整份 dto，
+ *      资源站常把 key 放在 query 里，userinfo 里也可能有账号密码，备注里贴地址时常常不带 scheme。
  * 3. 字符串超过 AUDIT_MAX_STRING_LENGTH 截断（结果含标记且总长不超过上限，重复清洗结果不变）。
  * 4. 整个 oldValues / newValues 序列化后超过 AUDIT_MAX_JSON_BYTES 时，替换为只含顶层键名的摘要。
  *    simple-json 在 MySQL 上是 TEXT（64KB），严格模式下超长会让 INSERT 报错。
@@ -103,11 +104,43 @@ export function auditUrlHostOf(url: string): string | null {
 const URL_SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
 /** 已经只剩 host[:port] 的值（含 IPv6 方括号写法）：原样保留，保证重复清洗结果不变 */
 const HOST_ONLY = /^(?:[a-z0-9_-]+(?:\.[a-z0-9_-]+)*\.?|\[[0-9a-f:.]+\])(?::\d{1,5})?$/i;
+/** 文本里 URL 的组成字符：到空白、引号 / 尖括号或中文标点（全角逗号、句号等）为止 */
+const TEXT_URL_CHAR = '[^\\s"\'<>\\u3000-\\u303f\\uff01-\\uff0f\\uff1a-\\uff20\\uff3b-\\uff40\\uff5b-\\uff65]';
 /**
- * 文本中出现的 URL：scheme:// 起，到空白、引号 / 尖括号或中文标点（全角逗号、句号等）为止。
+ * 文本中出现的 URL：scheme:// 起，到空白、引号 / 尖括号或中文标点为止。
  * 宁可多吞：吞进 URL 的部分最终只留 host，漏掉的才会把 query 里的 key 留在审计里。
  */
-const URL_IN_TEXT = /[a-z][a-z0-9+.-]*:\/\/[^\s"'<>\u3000-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]+/gi;
+const URL_IN_TEXT = new RegExp('[a-z][a-z0-9+.-]*:\\/\\/' + TEXT_URL_CHAR + '+', 'gi');
+/**
+ * 省略了 scheme 的 userinfo@host：acct:pw@res.example.com（userinfo 里有冒号，即账号:密码，后面有没有路径都算）、
+ * u@h/x?k=…（没有冒号的只认后面跟着路径 / query / fragment 的）。普通邮箱地址（ops@example.com）不动。
+ */
+const USERINFO_CHAR = '[a-z0-9._~!$&()*+,;=%-]';
+const USERINFO_OR_COLON_CHAR = '[a-z0-9._~!$&()*+,;=%:-]';
+const AUTHORITY_HOST = '(?:[a-z0-9-]+(?:\\.[a-z0-9-]+)*|\\[[0-9a-f:.]+\\])(?::\\d{1,5})?';
+const USERINFO_IN_TEXT = new RegExp(
+  '(?<![\\w.%+/-])(?:' +
+    `${USERINFO_CHAR}*:${USERINFO_OR_COLON_CHAR}*@${AUTHORITY_HOST}(?:[/?#]${TEXT_URL_CHAR}*)?` +
+    '|' +
+    `${USERINFO_CHAR}+@${AUTHORITY_HOST}[/?#]${TEXT_URL_CHAR}*` +
+    ')',
+  'gi',
+);
+/**
+ * 省略了 scheme 的 host（带顶级域名的域名、IPv4、[IPv6]）后面跟着路径 / query / fragment：
+ * res.example.com/api.php?ac=list&key=…、10.0.0.5:8080/api?token=…。单独出现的 host 不动。
+ */
+const HOST_PATH_IN_TEXT = new RegExp(
+  '(?<![\\w.@%+/-])(?:(?:[a-z0-9-]+\\.)+[a-z]{2,}|\\d{1,3}(?:\\.\\d{1,3}){3}|\\[[0-9a-f:.]+\\])(?::\\d{1,5})?[/?#]' +
+    TEXT_URL_CHAR +
+    '*',
+  'gi',
+);
+/**
+ * 兜底：上面都没认出来的 ?key=value / &key=value / #key=value（相对路径、非 ASCII 域名、
+ * 没有顶级域名的主机……）整段去掉。键与值同样到空白、引号或中文标点为止。
+ */
+const QUERY_PARAM_IN_TEXT = new RegExp('[?&#](?:(?![=&?#])' + TEXT_URL_CHAR + ')+=(?:(?![&#])' + TEXT_URL_CHAR + ')*', 'g');
 
 /**
  * apiUrl / url 键的值：
@@ -125,9 +158,21 @@ export function sanitizeAuditUrl(value: string): string {
   return auditUrlHostOf(absolute) ?? AUDIT_REDACTED;
 }
 
-/** 把文本里出现的每个 URL 换成它的 host；解析不出 host 的换成打码标记 */
+/**
+ * 采集源记录里的自由文本（备注、名称等）：
+ * 1. scheme:// 开头的 URL 换成 host；
+ * 2. 省略 scheme 的「账号:密码@host…」「userinfo@host/路径…」与「host/路径…」（带顶级域名的域名、IP）
+ *    同样换成 host；
+ * 3. 仍残留的 ?key=value / &key=value / #key=value 整段去掉。
+ * 解析不出 host 的换成打码标记。每一步的结果都不会再被任何一步匹配，所以重复清洗结果不变。
+ */
 export function stripUrlsInAuditText(text: string): string {
-  return text.replace(URL_IN_TEXT, (url) => auditUrlHostOf(url) ?? AUDIT_REDACTED);
+  const hostOf = (candidate: string) => auditUrlHostOf(candidate) ?? AUDIT_REDACTED;
+  return text
+    .replace(URL_IN_TEXT, (url) => hostOf(url))
+    .replace(USERINFO_IN_TEXT, (token) => hostOf(`http://${token}`))
+    .replace(HOST_PATH_IN_TEXT, (token) => hostOf(`http://${token}`))
+    .replace(QUERY_PARAM_IN_TEXT, '');
 }
 
 /** sanitizeAuditValue 的选项 */

@@ -380,6 +380,45 @@ describe('URL 只留 host（与写入路径 auditUrlHost 同一规则）', () =>
     expect(stripUrlsInAuditText('没有地址')).toBe('没有地址');
   });
 
+  describe('省略 scheme 的地址与残留的 query（1-F-1 二次复审：备注里贴的地址常常不带 scheme）', () => {
+    it.each([
+      ['不带 scheme 的 host/路径?query', 'key in api.example.com/vod?ac=list&key=SECRET1 here', 'key in api.example.com here'],
+      ['带端口', '备用：res.example.com:8080/api?token=SECRET2，谢谢', '备用：res.example.com:8080，谢谢'],
+      ['不带 scheme 的 userinfo@host', 'acct:SECRET3@res.example.com/api.php?key=SECRET4', 'res.example.com'],
+      ['账号:密码@host（没有路径）', '账号 acct:SECRET13@res.example.com 已停用', '账号 res.example.com 已停用'],
+      ['账号:密码@IPv4:端口', 'root:SECRET14@10.0.0.9:3306。', '10.0.0.9:3306。'],
+      ['userinfo 里夹空格（scheme URL 在空格处截断）', 'https://u:p w@h/x?key=SECRET6', `${AUDIT_REDACTED} h`],
+      ['IPv4 + 端口', '内网 10.0.0.5:8080/api?token=SECRET7 停用', '内网 10.0.0.5:8080 停用'],
+      ['IPv6', '[::1]:3000/x?k=SECRET8', '[::1]:3000'],
+      ['大写域名', 'RES.Example.COM/Api?Key=SECRET9', 'res.example.com'],
+      ['非 ASCII 域名：路径保留、query 去掉', '例子.测试/api?key=SECRET10 结束', '例子.测试/api 结束'],
+      ['相对路径', '接口 /api.php/provide/vod/?ac=list&key=SECRET11', '接口 /api.php/provide/vod/'],
+      ['fragment 里的 token', '回调 /cb#access_token=SECRET12&x=1', '回调 /cb'],
+      ['只有 host：不动', '源站 res.example.com 很快', '源站 res.example.com 很快'],
+      ['邮箱：不动', '联系 ops@example.com 或 a.b+c@ex-ample.com', '联系 ops@example.com 或 a.b+c@ex-ample.com'],
+      ['版本号、普通标点：不动', 'v1.2.3 版本，100% 可用？是的', 'v1.2.3 版本，100% 可用？是的'],
+    ])('%s', (_name, input, expected) => {
+      const once = stripUrlsInAuditText(input);
+      expect(once).toBe(expected);
+      expect(stripUrlsInAuditText(once)).toBe(once);
+      expect(once).not.toMatch(/SECRET\d+/);
+    });
+
+    it('sanitizeAuditRecord：collect_source 的备注里省略 scheme 的地址同样只留 host；其他资源类型不动', () => {
+      const values = { remark: '主线 res.example.com/api.php?ac=list&key=SECRET1，备线 u:SECRET2@h/x?k=SECRET3' };
+      const report = createAuditSanitizeReport();
+      const collect = sanitizeAuditRecord(
+        { action: 'UPDATE', resourceType: 'collect_source', newValues: values },
+        report,
+      );
+      expect(collect.newValues).toEqual({ remark: '主线 res.example.com，备线 h' });
+      expect(report.urls).toEqual(['newValues.remark']);
+      expectNoSecrets(collect, ['SECRET1', 'SECRET2', 'SECRET3']);
+      const content = sanitizeAuditRecord({ action: 'CONTENT_UPDATE', resourceType: 'content', newValues: values });
+      expect(content.newValues).toEqual(values);
+    });
+  });
+
   it('sanitizeAuditRecord：collect_source 记录里所有字符串的 URL 只留 host，其他资源类型不受影响', () => {
     const values = {
       name: '源 https://res.example.com/?key=K1',

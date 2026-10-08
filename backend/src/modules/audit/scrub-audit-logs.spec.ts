@@ -201,6 +201,35 @@ describe('scrub-audit-logs.js', () => {
     expect(otherRemark.changes).toEqual({});
   });
 
+  it('scrubRow：采集源行里省略 scheme 的地址、userinfo 夹空格的 URL 也不再留下 query 里的 key（1-F-1 二次复审）', () => {
+    const row = scrub.scrubRow(
+      {
+        id: 'c4',
+        action: 'UPDATE',
+        resourceType: 'collect_source',
+        newValues: JSON.stringify({
+          remark: 'key in api.example.com/vod?ac=list&key=SECRET1 here',
+          note: 'https://u:p w@h/x?key=SECRET6',
+          creds: '备线 acct:SECRET7@mirror.example.net',
+        }),
+      },
+      sanitizer,
+    );
+    expect(JSON.parse(row.changes.newValues)).toEqual({
+      remark: 'key in api.example.com here',
+      note: `${AUDIT_REDACTED} h`,
+      creds: '备线 mirror.example.net',
+    });
+    expect(row.report.urls.sort()).toEqual(['newValues.creds', 'newValues.note', 'newValues.remark']);
+    expect(JSON.stringify(row)).not.toMatch(/SECRET1|SECRET6|SECRET7/);
+    // 写回后再清洗一次没有改动
+    const again = scrub.scrubRow(
+      { id: 'c4', action: 'UPDATE', resourceType: 'collect_source', newValues: row.changes.newValues },
+      sanitizer,
+    );
+    expect(again.changes).toEqual({});
+  });
+
   it('scrubRow：只返回需要改的列，干净的行没有改动', () => {
     const dirty = scrub.scrubRow(
       { id: 'x', action: 'USER_UPDATE', newValues: JSON.stringify({ passwordHash: HASH }), oldValues: null, userAgent: null },

@@ -6,7 +6,8 @@
  * （Authorization / Cookie / API key）、采集源 apiUrl 原文（query 里的 key、userinfo 里的账号密码）、
  * 内容更新的整份正文等。新写入已在 AuditService.log 里统一脱敏，
  * 这个脚本用**同一份规则**（后端编译产物 dist/modules/audit/audit-sanitizer.js）清洗已有的行：
- * 敏感键打码；apiUrl / url 键与采集源（resourceType = collect_source）行里所有字符串中的 URL 只留 host；
+ * 敏感键打码；apiUrl / url 键与采集源（resourceType = collect_source）行里所有字符串中的 URL 只留 host
+ * （含省略 scheme 的 host/路径、账号:密码@host，残留的 ?key=value 整段去掉）；
  * 超长字符串截断、超过 16KB 的 oldValues / newValues 换成只含键名的摘要、userAgent 截断。
  * 规则幂等，可重复执行；第二次执行应报告 0 行待改。
  *
