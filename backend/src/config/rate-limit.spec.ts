@@ -36,4 +36,13 @@ describe('resolveRateLimit', () => {
     expect(() => resolveRateLimit(cfg({ RATE_LIMIT_TTL: bad }))).toThrow(/RATE_LIMIT_TTL 非法/);
     expect(() => resolveRateLimit(cfg({ RATE_LIMIT_COUNT: bad }))).toThrow(/RATE_LIMIT_COUNT 非法/);
   });
+
+  it.each(['60', '999'])('TTL %p 低于 1000ms 视为按秒误填，启动即失败', (bad) => {
+    expect(() => resolveRateLimit(cfg({ RATE_LIMIT_TTL: bad }))).toThrow(/RATE_LIMIT_TTL 非法/);
+  });
+
+  it('TTL 超过 setTimeout 上限 2^31-1 启动即失败（否则被截成 1ms，限流静默失效）', () => {
+    expect(resolveRateLimit(cfg({ RATE_LIMIT_TTL: '2147483647' })).ttl).toBe(2_147_483_647);
+    expect(() => resolveRateLimit(cfg({ RATE_LIMIT_TTL: '2147483648' }))).toThrow(/RATE_LIMIT_TTL 非法/);
+  });
 });
