@@ -590,7 +590,7 @@ describe('认证核心安全行为', () => {
       const loginFrom = (who: { email: string; password: string }, ip: string) =>
         h.http().post('/auth/login').set('X-Forwarded-For', ip).send({ email: who.email, password: who.password });
 
-      it('前 4 次 400，第 5 次 429：盗用者手里的 access 与 refresh、本人的会话全部作废，受信任 IP 清空', async () => {
+      it('前 4 次 400，第 5 次 429：盗用者手里的 access 与 refresh、本人的会话全部作废，受信任 IP 保留', async () => {
         const u = await freshUser();
         const owner = (await loginFrom(u, '198.51.100.10').expect(200)).body as Awaited<ReturnType<typeof login>>;
         const attacker = await login(u); // 盗来的会话
@@ -610,13 +610,32 @@ describe('认证核心安全行为', () => {
           expect((await me(s.tokens.accessToken)).status).toBe(401);
           expect((await refresh(s.tokens.refreshToken)).status).toBe(401);
         }
-        expect(await h.cache.get(trustedIpsKey(u.id))).toBeUndefined();
+        // 1-F-1 三次复审：受信任 IP 必须保留。否则持有盗来会话的人先猜 5 次清掉本人的受信任 IP，
+        // 再用 4×5 次匿名失败登录触发账号级锁定，就能把本人锁在门外
+        const trustedAfter = (await h.cache.get<Array<{ ip: string }>>(trustedIpsKey(u.id))) ?? [];
+        expect(trustedAfter.map((entry) => entry.ip)).toContain('198.51.100.10');
 
         const key = changePasswordFailuresKey(u.id);
         expect(key).toBe(`change_password_failures:${u.id}`);
         expect(await h.cache.get(key)).toBe(5);
         expect(h.cache.ttls.get(key)).toBe(15 * 60 * 1000);
       });
+
+      it('盗用会话猜满 5 次后，再用 4×5 次匿名失败登录触发账号级锁定，也锁不住本人的常用 IP（三次复审）', async () => {
+        const u = await freshUser();
+        expect((await loginFrom(u, '198.51.100.20')).status).toBe(200);
+        const attacker = await login(u);
+        for (let i = 0; i < 5; i += 1) await wrong(attacker.tokens.accessToken);
+
+        for (let ipIndex = 0; ipIndex < 4; ipIndex += 1) {
+          for (let i = 0; i < 5; i += 1) {
+            const res = await loginFrom({ email: u.email, password: 'Wrong1234' }, `203.0.113.${120 + ipIndex}`);
+            expect(res.status).toBe(401);
+          }
+        }
+        expect((await loginFrom(u, '203.0.113.199')).status).toBe(429);
+        expect((await loginFrom(u, '198.51.100.20')).status).toBe(200);
+      }, 30_000); // 约 28 次真实 bcrypt 比对，超出 jest 默认的 5 秒
 
       it('达到上限后，本人用口令重新登录即清零计数，可以立刻改密；盗用者的旧会话仍然无效', async () => {
         const u = await freshUser();

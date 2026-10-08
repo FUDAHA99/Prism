@@ -34,7 +34,7 @@ import {
   isTrustedIp,
   loginSubject,
   rememberTrustedIpUnlessRevoked,
-  revokeAllSessions,
+  revokeTokensKeepTrustedIps,
 } from './login-attempts';
 
 import { AuthIdentity, SafeUser, toSafeUser } from '../user/user-fields';
@@ -310,9 +310,10 @@ export class AuthService {
         const next = failures + 1;
         await this.cacheManager.set(failuresKey, next, LOGIN_BLOCK_TIME_MS);
         if (next >= MAX_CHANGE_PASSWORD_FAILURES) {
-          // 吊销该用户的全部会话（含攻击者手里的 refresh token）并清空受信任 IP：只吊销发起请求的
-          // access token 的话，盗用者拿 refresh 换一个新的，等窗口过去再来 5 次，本人一直改不了密码
-          await revokeAllSessions(this.cacheManager, userId);
+          // 吊销该用户的全部 token（含攻击者手里的 refresh token）：只吊销发起请求的 access token 的话，
+          // 盗用者拿 refresh 换一个新的，等窗口过去再来 5 次，本人一直改不了密码。
+          // 受信任 IP 保留：口令没泄露，清掉它只会帮攻击者绕过账号级锁定的豁免（见 revokeTokensKeepTrustedIps）
+          await revokeTokensKeepTrustedIps(this.cacheManager, userId);
           const access = this.tryVerifyAccessToken(accessToken);
           if (access && access.sub === userId) {
             await blacklistUntilExpiry(this.cacheManager, accessBlacklistKey(access.jti), access.exp);

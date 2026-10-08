@@ -119,7 +119,10 @@ export async function rememberTrustedIpUnlessRevoked(
   });
 }
 
-/** 吊销该用户此刻之前签发的全部 token（access 与 refresh）并清空受信任 IP；与上面的记 IP 同一把锁 */
+/**
+ * 吊销该用户此刻之前签发的全部 token（access 与 refresh）并清空受信任 IP；与上面的记 IP 同一把锁。
+ * 用于口令可能已经泄露的场合（改密、管理员重置密码）：用旧口令登录过的 IP 不能继续免于账号级锁定。
+ */
 export async function revokeAllSessions(cache: Cache, userId: string): Promise<void> {
   await trustedIpLocks.run(userId, async () => {
     await revokeTokensIssuedBefore(cache, userId);
@@ -128,11 +131,23 @@ export async function revokeAllSessions(cache: Cache, userId: string): Promise<v
 }
 
 /**
+ * 只吊销 token、保留受信任 IP；同样与记 IP 同一把锁（吊销后进行中的登录不会再记 IP）。
+ * 用于改密时当前密码猜错达到上限：此时口令并未泄露（猜的人正是因为不知道口令才在猜），
+ * 清空受信任 IP 毫无安全收益，反而让持有盗来会话的人先猜 5 次清掉本人的受信任 IP，
+ * 再用 4×5 次匿名失败登录把本人锁在门外（1-F-1 三次复审）。
+ */
+export async function revokeTokensKeepTrustedIps(cache: Cache, userId: string): Promise<void> {
+  await trustedIpLocks.run(userId, async () => {
+    await revokeTokensIssuedBefore(cache, userId);
+  });
+}
+
+/**
  * 修改密码时「当前密码」校验失败的计数（按 userId，15 分钟窗口，每次失败重新计时）。
  * 拿到别人 access token 的人可以在 /auth/change-password 上猜当前密码，猜中即可改密接管账号；
  * 此前这里只有每 IP 每分钟 5 次的限流，换 IP 就能并行猜，完全不受登录锁定约束。
  *
- * 达到上限时吊销该用户的全部会话（revokeAllSessions）：拿着盗来的 access / refresh token 的人就此出局，
+ * 达到上限时吊销该用户的全部 token（revokeTokensKeepTrustedIps，保留受信任 IP）：拿着盗来的 access / refresh token 的人就此出局，
  * 本人用口令重新登录即可（见 AuthService.login 对计数的清理）。
  */
 export const MAX_CHANGE_PASSWORD_FAILURES = 5;
