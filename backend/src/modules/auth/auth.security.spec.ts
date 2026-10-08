@@ -19,6 +19,7 @@ import { ThrottlerBehindProxyGuard } from '../../common/guards/throttler-behind-
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { accessBlacklistKey, refreshBlacklistKey } from './token-blacklist.util';
+import { accountAttemptsKey, ipAttemptsKey } from './login-attempts';
 import { UserService } from '../user/user.service';
 import { RoleService } from '../role/role.service';
 import { AuditService } from '../audit/audit.service';
@@ -92,6 +93,7 @@ interface Harness {
   cache: MemoryCache;
   ds: DataSource;
   userService: UserService;
+  authService: AuthService;
   users: Repository<User>;
   adminId: string;
   otherId: string;
@@ -164,6 +166,7 @@ async function createHarness({ throttle = false } = {}): Promise<Harness> {
     cache,
     ds,
     userService,
+    authService: moduleRef.get(AuthService),
     users,
     adminId: admin.id,
     otherId: other.id,
@@ -377,7 +380,7 @@ describe('认证核心安全行为', () => {
       const { tokens } = await login();
       const tok = tokens.accessToken;
       await h.http().post('/auth/logout').set('Authorization', `Bearer ${tok}`).expect(200);
-      for (const header of [`Bearer ${tok}`, `Bearer  ${tok}`, `Bearer ${tok} x`, `bearer ${tok}`, `Bearer	${tok}`]) {
+      for (const header of [`Bearer ${tok}`, `Bearer  ${tok}`, `Bearer ${tok} x`, `bearer ${tok}`, `Bearer\t${tok}`]) {
         expect((await h.http().get('/probe/me').set('Authorization', header)).status).toBe(401);
         expect((await h.http().get('/auth/me').set('Authorization', header)).status).toBe(401);
         expect((await h.http().get('/probe/admin').set('Authorization', header)).status).toBe(401);
@@ -405,7 +408,7 @@ describe('认证核心安全行为', () => {
       ['双空格', (t: string) => `Bearer  ${t}`],
       ['尾部追加内容', (t: string) => `Bearer ${t} x`],
       ['小写 scheme', (t: string) => `bearer ${t}`],
-      ['Tab 分隔', (t: string) => `Bearer	${t}`],
+      ['Tab 分隔', (t: string) => `Bearer\t${t}`],
       ['缺 scheme', (t: string) => t],
       ['两个 token', (t: string) => `Bearer ${t},Bearer ${t}`],
       ['段内混入非 base64url 字符', (t: string) => `Bearer ${t.replace('.', '.+')}`],
@@ -549,8 +552,9 @@ describe('认证核心安全行为', () => {
     });
   });
 
-  describe('登录失败计数（按归一化邮箱 + req.ip）', () => {
+  describe('登录失败计数（按库里查出的 user.id + req.ip）', () => {
     let seq = 0;
+    const accountKey = (userId: string) => accountAttemptsKey(`uid:${userId}`);
     async function freshUser() {
       seq += 1;
       const email = `locked${seq}@cms.test`;
@@ -575,7 +579,8 @@ describe('认证核心安全行为', () => {
       expect(locked.status).toBe(429);
       expect(locked.body.message).toBe(LOCK_MESSAGE);
       // 锁 15 分钟（毫秒），不是 0.9 秒
-      expect(h.cache.ttls.get(`login_attempts:account:${u.email}`)).toBe(15 * 60 * 1000);
+      expect(h.cache.ttls.get(accountKey(u.id))).toBe(15 * 60 * 1000);
+      expect(accountKey(u.id)).toBe(`login_attempts:account:uid:${u.id}`);
     });
 
     it('伪造 X-Forwarded-For 最左值不能换出新计数', async () => {
@@ -605,19 +610,103 @@ describe('认证核心安全行为', () => {
       );
       expect(results.filter((r) => r.status === 401)).toHaveLength(5);
       expect(results.filter((r) => r.status === 429)).toHaveLength(5);
-      expect(await h.cache.get(`login_attempts:account:${u.email}`)).toBe(5);
+      expect(await h.cache.get(accountKey(u.id))).toBe(5);
     });
 
     it('登录成功清掉该 IP 的计数（账号级计数保留到过期）', async () => {
       const u = await freshUser();
       for (let i = 0; i < 4; i += 1) await attempt(u.email, 'Wrong1234', '192.0.2.88');
       expect((await attempt(u.email, u.password, '192.0.2.88')).status).toBe(200);
-      expect(await h.cache.get(`login_attempts:ip:192.0.2.88:${u.email}`)).toBeUndefined();
-      expect(await h.cache.get(`login_attempts:account:${u.email}`)).toBe(4);
+      expect(await h.cache.get(ipAttemptsKey(`uid:${u.id}`, '192.0.2.88'))).toBeUndefined();
+      expect(await h.cache.get(accountKey(u.id))).toBe(4);
       for (let i = 0; i < 5; i += 1) {
         expect((await attempt(u.email, 'Wrong1234', '192.0.2.88')).status).toBe(401);
       }
       expect((await attempt(u.email, 'Wrong1234', '192.0.2.88')).status).toBe(429);
+    });
+
+    it('不存在的账号按归一化邮箱计数（大小写不同仍是同一个）', async () => {
+      for (const email of ['Ghost@cms.test', 'ghost@CMS.test', ' ghost@cms.test ', 'GHOST@cms.test', 'ghost@cms.test']) {
+        expect((await attempt(email, 'Wrong1234', '192.0.2.90')).status).toBe(401);
+      }
+      expect((await attempt('ghost@cms.test', 'Wrong1234', '192.0.2.90')).status).toBe(429);
+      expect(await h.cache.get(accountAttemptsKey('email:ghost@cms.test'))).toBe(5);
+    });
+
+    /**
+     * users.email 是 utf8mb4_unicode_ci：在一次性 MySQL 8.0 上实测，下面这些写法都与 ASCII 原文判为相等
+     * （重音、组合附加符、全角、零宽字符、软连字符、0x01-0x08 等可忽略的控制字符、非 ASCII 域名）。
+     * 可打印 ASCII 之间除大小写外没有等价关系，所以入口只收 ASCII、再转小写。
+     */
+    const UNICODE_CI_VARIANTS = (email: string) => {
+      const [local, domain] = email.split('@');
+      return [
+        `${(local[0] + '\u0301').normalize('NFC')}${local.slice(1)}@${domain}`, // 预组合的重音字母（l → U+013A）
+        `${local[0]}\u0301${local.slice(1)}@${domain}`, // 组合重音
+        `${String.fromCharCode(local.charCodeAt(0) + 0xfee0)}${local.slice(1)}@${domain}`, // 全角首字母
+        `${local.slice(0, 2)}\u200b${local.slice(2)}@${domain}`, // 零宽空格
+        `${local.slice(0, 2)}\u00ad${local.slice(2)}@${domain}`, // 软连字符
+        `${local.slice(0, 2)}\u0001${local.slice(2)}@${domain}`, // 可忽略的控制字符
+        `${local}@${domain.replace(/^c/, '\u0107')}`, // 非 ASCII 域名（c → U+0107）
+      ];
+    };
+
+    it('unicode_ci 等价写法在 DTO 层就被拒（400），不触达口令校验、不产生新计数', async () => {
+      const u = await freshUser();
+      for (const variant of UNICODE_CI_VARIANTS(u.email)) {
+        const res = await attempt(variant, u.password, '192.0.2.91');
+        expect({ variant, status: res.status }).toEqual({ variant, status: 400 });
+      }
+      expect([...h.cache.store.keys()].filter((k) => k.startsWith('login_attempts:') && k.includes('192.0.2.91'))).toEqual([]);
+      expect((await attempt(u.email, u.password, '192.0.2.91')).status).toBe(200);
+    });
+
+    describe('即使绕过 DTO：库按 unicode_ci 认作同一账号的写法共用同一把锁', () => {
+      /** 模拟 utf8mb4_unicode_ci 的比较：去附加符、全角转半角、去零宽 / 软连字符 / 可忽略控制字符、不分大小写 */
+      const unicodeCiFold = (value: string) =>
+        value
+          .normalize('NFKD')
+          .replace(/[\u0300-\u036f\u200b-\u200d\u00ad\u0001-\u0008\u000e-\u001f\u007f]/g, '')
+          .toLowerCase();
+
+      let spy: jest.SpyInstance;
+      beforeEach(() => {
+        const original = h.userService.findByEmailWithPassword.bind(h.userService);
+        spy = jest.spyOn(h.userService, 'findByEmailWithPassword').mockImplementation(async (email: string) => {
+          const folded = unicodeCiFold(email);
+          const all = await h.users.find({ select: ['email'] });
+          const hit = all.find((row) => unicodeCiFold(row.email) === folded);
+          return hit ? original(hit.email) : null;
+        });
+      });
+      afterEach(() => spy.mockRestore());
+
+      const loginDirect = (email: string, password: string, ip: string) =>
+        h.authService.login({ email, password } as any, { ip }).then(
+          () => 200,
+          (e: any) => e.getStatus?.() ?? 500,
+        );
+
+      it('同一 IP 用 5 种写法各错一次 → 该 IP 对该账号锁定，规范写法 + 正确口令也 429', async () => {
+        const u = await freshUser();
+        const variants = UNICODE_CI_VARIANTS(u.email).slice(0, 5);
+        for (const variant of variants) {
+          expect(await loginDirect(variant, 'Wrong1234', '192.0.2.92')).toBe(401);
+        }
+        expect(await loginDirect(u.email, u.password, '192.0.2.92')).toBe(429);
+        expect(await h.cache.get(ipAttemptsKey(`uid:${u.id}`, '192.0.2.92'))).toBe(5);
+      });
+
+      it('换 IP 用不同写法累计失败 20 次 → 账号级锁定，正确口令的写法变体也 429', async () => {
+        const u = await freshUser();
+        const variants = UNICODE_CI_VARIANTS(u.email);
+        for (let i = 0; i < 20; i += 1) {
+          expect(await loginDirect(variants[i % variants.length], 'Wrong1234', `198.51.100.${i}`)).toBe(401);
+        }
+        expect(await h.cache.get(accountKey(u.id))).toBe(20);
+        expect(await loginDirect(variants[0], u.password, '198.51.100.250')).toBe(429);
+        expect(await loginDirect(u.email, u.password, '198.51.100.251')).toBe(429);
+      });
     });
   });
 

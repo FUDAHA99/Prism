@@ -1,7 +1,6 @@
-import { IsEmail, IsString, IsBoolean, IsOptional, MinLength, MaxLength } from 'class-validator';
+import { IsString, IsBoolean, IsOptional, MinLength, MaxLength } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
-import { Transform } from 'class-transformer';
-import { normalizeEmail } from '../../../common/utils/normalize-email';
+import { IsAccountEmail } from './account-email.decorator';
 
 export class LoginDto {
   @ApiProperty({
@@ -9,8 +8,8 @@ export class LoginDto {
     description: '用户邮箱',
     required: true,
   })
-  @Transform(({ value }) => normalizeEmail(value))
-  @IsEmail({}, { message: '请输入有效的邮箱地址' })
+  // 只收 ASCII（见 IsAccountEmail）：unicode_ci 下的等价写法从入口挡掉
+  @IsAccountEmail()
   email: string;
 
   @ApiProperty({
