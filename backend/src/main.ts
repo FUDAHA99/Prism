@@ -9,6 +9,7 @@ import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { parseCorsOrigins } from './common/utils/cors-origins';
+import { globalValidationPipeOptions } from './common/pipes/global-validation';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
@@ -72,16 +73,7 @@ async function bootstrap() {
   app.setGlobalPrefix('api/v1');
   
   // 全局管道 - 数据验证
-  app.useGlobalPipes(
-    new ValidationPipe({
-      transform: true,
-      whitelist: true,
-      forbidNonWhitelisted: true,
-      transformOptions: {
-        enableImplicitConversion: true,
-      },
-    })
-  );
+  app.useGlobalPipes(new ValidationPipe(globalValidationPipeOptions()));
   
   // 全局过滤器 - 异常处理
   app.useGlobalFilters(new HttpExceptionFilter());
