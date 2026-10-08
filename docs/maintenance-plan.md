@@ -94,8 +94,42 @@
 | 中 | `role.service.ts` 角色分配是 Postgres 语法（MySQL 上报错）；`enable_register` 开关后端从未执行 |
 | 低 | 登录响应与 JWT 里没有 roles（Dashboard 显示不出角色）；评论 `isRegistered`/`ipAddress` 可由客户端自报 |
 
-做法：先盘点全部 controller 的每个接口应有的角色，与 admin 前端实际调用对照，再统一加守卫，配回归测试；
-同时决定注册策略（默认关闭或注册用户无后台权限）。
+#### 清点结果（2026-10-08，7 个只读代理逐个 controller 清点 + 汇总）
+
+全量 **143 条路由**：29 条完全无守卫，85 条只校验登录不校验角色。逐条的现状与目标访问级别见
+[`docs/access-matrix.md`](access-matrix.md)（目标态：admin 45 / staff:admin,editor 61 / optional-auth 12 /
+public-filtered 8 / public 6 / authenticated 3 / 删除 8）。共发现 67 个问题（critical 3、high 19、medium 18、low 27），
+除上表外，清点新增的最严重几条：
+
+| 严重度 | 问题 |
+|---|---|
+| critical | `GET /media`、`/media/:id` join 完整上传者实体，**bcrypt 密码哈希与邮箱**对任意登录用户可见；`GET /users*` 用 `{...user}` 展开使 `@Exclude` 失效 |
+| critical | JWT 密钥在配置缺失时回退到仓库里公开的默认值，且启动不报错 —— 可伪造任意用户 token |
+| critical | content/movie/novel/comic 的新建/更新 DTO 是 interface（零校验）：可伪造 authorId、直接置为已发布、刷 viewCount、级联写章节 |
+| high | refresh token 与 access token 同密钥且不校验类型，refresh 可当 access 用；logout/改密不吊销 |
+| high | 后台存储型 XSS：菜单 url 不限协议，`javascript:` 链接在 admin 列表可点，token 存 localStorage |
+| high | 角色分配前后端路由不一致（前端调 `/users/:id/roles`，后端是 `/assign-roles`）且 SQL 是 Postgres 语法 —— 角色分配功能完全不可用 |
+| medium | 改密接口对所有人都 500（前后端字段名不一致），部署文档要求的「首登改默认密码」做不到 |
+| medium | `POST /site-settings/batch` 的 DTO 缺校验装饰器，后台「系统配置」保存必然失败 |
+
+#### 决策
+
+- **默认拒绝**：RolesGuard 是 fail-open（无 `@Roles` 即放行），靠人记得挂守卫已被证明不可靠。目标形态是全局 AccessGuard，
+  未声明访问级别的路由按仅 admin 处理；分两步落地 —— 先逐方法挂守卫并建立覆盖全部路由的矩阵测试，测试变绿后再翻转为全局守卫，
+  同一套测试保证前后语义等价。
+- **注册**：产品上没有注册的消费方（portal 无登录 UI），后端强制执行 `enable_register`、默认关闭；但所有后台接口的角色守卫
+  不以「注册已关闭」为前提（纵深防御）。关闭前必须先修好角色分配、补上后台「新建用户」，否则无法再造号。
+- **角色模型**：只用基于角色名的 RBAC，固定 admin / editor 两个系统角色；permission 表从未被任何守卫使用，不再每请求查询。
+  内容类（content/movie/novel/comic/category/tag/media/comment/notice）给 admin+editor；
+  用户/角色/审计/系统配置/采集/菜单/广告/友链给 admin。
+
+#### 拆成三小批，各自实测、各自推送
+
+| 小批 | 范围 | 风险 |
+|---|---|---|
+| **1-F-1** | 全部写接口与管理接口按矩阵加角色守卫（删除 8 条无消费方的接口，含匿名可写的 `PUT /site-settings/:key`）；密码哈希不出库；JWT 密钥启动校验 + refresh/access 分离；审计日志脱敏与存量清洗；采集 SSRF 拦截内网；登录限流单位/重复计数/IP 取值；角色分配修复；**覆盖全部路由的访问矩阵回归测试** | 低：portal 从不带 token，收紧写权限对门户透明 |
+| **1-F-2** | 公开读接口强制只返回已发布、剥离内部字段；content/movie/novel/comic 等 DTO 改 class 校验；评论身份改由服务端填 | 中：与 portal 字段有部署顺序约束 |
+| **1-F-3** | 翻转为全局默认拒绝；admin 403 提示与按角色显示菜单；后台「新建用户」；关闭注册 | 中：改动面广，靠矩阵测试保证语义等价 |
 
 **其他已记录、未排期**：JSON 请求体 100kb 上限导致超长章节无法保存（413）；`prism_nginx_logs` 卷里只有指向
 stdout 的符号链接，实际不持久化日志；helmet 与 nginx 安全头重复、nginx 的 Referrer-Policy 覆盖了 helmet 的
