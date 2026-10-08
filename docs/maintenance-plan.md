@@ -43,12 +43,64 @@
 容器地址，全站页面渲染共用一个桶；窗口一旦变成真正的 60 秒，每页 2~4 次 API 调用，
 全站每分钟几十次访问就会开始 429。已改为「先加 SSR 豁免，再改单位」。
 
-**待验证（需本地起 Docker，避免占用开发端口未执行）**
-- 1-A：连真实 Redis 的集成验证（`redis-cli KEYS 'blacklist:*'` 应能看到条目）
-- 1-B：登录态与游客态各跑一次真实上报，确认 `forbidNonWhitelisted` 无回归
-- 限流：带 nginx 的环境下确认外部请求按 IP 限流、SSR 不受限
+**真实环境验证（2026-10-08 补齐，见下方端到端实测）**
+- 1-A：Redis 黑名单生效。注意 Keyv 会给键加命名空间，`redis-cli KEYS 'blacklist:*'` 恒为空，
+  正确命令是 `redis-cli -a "$REDIS_PASSWORD" --no-auth-warning --scan --pattern '*blacklist:*'`
+  （实际键形如 `keyv::keyv:blacklist:token:<sha256>`）；注销后旧 token 返回 401「Token已被注销」
+- 1-B：游客与登录用户真实上报均 2xx；夹带 `userId` 字段返回 400
+- 限流：经 nginx 的 150 次 SSR 页面请求全部 200（SSR 豁免生效）；外部 API 第 101 次起后端返回 429
 
-**批次 1 剩余**：1-C portal 攻击面收敛、1-D 上传加固、1-E nginx 硬化 —— 方案已于 2026-10-08 重新核查，见下节。
+### 批次 1-C / 1-D / 1-E —— 已完成 ✅（2026-10-08，本地 24 个提交）
+
+| 提交 | 内容 |
+|---|---|
+| `d97a00c` | **1-C** 关闭 Next 图片优化器（`/_next/image` 不再是公网抓取代理）、删死 rewrite、`poweredByHeader: false`、Dockerfile 修 clone 后缺 `public/` 导致镜像构建失败 |
+| `a54658b` | **1-C** next 14.2.5 → 14.2.35（advisory 35→23，critical 3→2；剩余 critical 之一是图片优化器 AVIF RCE，已由上一条缓解） |
+| `eea7e8d` `93806fe` | **1-D** multer 2.4.0 去重为单份、limits 在解析阶段生效且走配置（≤11MiB 与 nginx 12M 耦合）、按 code 映射 multer 错误（2.4.0 改文案导致 500）；扩展名改由 mimetype 白名单决定 |
+| `af6f527` `8ee91df` | admin 上传前端预检与真实错误展示、批量上传并发上限 3、401 跳转带 `/admin/` 基路径；413 文案只用于文件上传 |
+| `24b919e` | seed-admin 幂等创建并分配 admin 角色（此前全新部署的唯一管理员没有任何角色） |
+| `b8ecddf` `97ff96e` `4b0d2d8` | **1-E #29** 评论公开接口字段白名单（不再泄露游客邮箱/IP）、管理端 8 个接口加 `RolesGuard('admin','editor')`；守卫元数据回归测试；列表缺省分页不再 500 |
+| `07cd90b` | CI 增加后端单元测试 |
+| `e354b31` | **1-E #53** CORS_ORIGIN 归一化 + 启动日志 |
+| `c7a35a9` | **1-E #52** 删除遗留 Postgres 编排 `deploy/`、`database/init.sql`，README 写明唯一生产入口 |
+| `8445a02` `a485219` | **1-E nginx** `server_tokens off`、隐藏 X-Powered-By、/api 限流桶（burst 100）与登录严格桶（10r/m）、nginx 自身 429 返回 JSON、/uploads 安全头继承、最小 CSP、`client_max_body_size 12M`、屏蔽 `/_next/image`；拒绝路径含 `\` 或 `#` 的请求（堵登录桶绕过） |
+| `56db7b9` `e2a6084` `6f676a0` `1ab2e72` `8999c03` `6cb210e` `17c130c` | **部署流程** nginx 生效配置改为未跟踪的生成物 `nginx/nginx.active.conf`（彻底消除 setup-ssl 改写受跟踪文件导致 git pull 中止）；部署前（桩主机）与部署后（真实网络）两道 `nginx -t`；deploy.sh 自更新 re-exec；CI 部署直接复用 deploy.sh；CI 新增 nginx 配置门禁（两种模式 `nginx -t` + 两份配置镜像校验）；旧 HTTPS 服务器迁移失败自动还原；setup-ssl 续签任务提前安装；**每日备份 cron 此前从未执行**（`backup/` 不存在时 cron 打不开日志重定向目标）已修 |
+| `323ef9c` `9aa35b9` | 限流配置按数值读取（此前字符串拼接导致 `Retry-After` ≈ 570 万年）、窗口上下限校验 |
+
+**验证方式**
+
+- 每个提交由实现代理跑完门禁才提交（三端构建、后端 48 个单测、portal standalone 实测 404、multer 运行时矩阵、
+  nginx 在 Docker 里的真实请求测试）；之后三轮对抗性审查（应用正确性 / 部署与 nginx / 安全绕过）+ 两轮复审。
+- **端到端实测**：克隆仓库，数据卷全部改名 `prism_verify_*`、只发布 `127.0.0.1:39080`，用仓库自己的
+  `scripts/deploy.sh` 完成首次部署与二次部署，22 项检查通过 20 项；未通过的两项（评论列表缺省分页 500、
+  `Retry-After` 垃圾值）均为本批之前的存量问题，已在 `4b0d2d8`、`323ef9c` 修复并在独立 harness 复测通过。
+  实测后环境已复原，用户原有容器/数据卷/镜像前后对比一致。
+- 二次部署时 nginx 重建造成的中断约数秒（已在 docs/deploy.md 记录为可接受代价）。
+
+### 批次 1-F —— 下一批：后台接口鉴权收口（审查中发现的存量高危）
+
+审查 1-E 时发现，「只校验登录、不校验角色」不是评论接口独有，而是后台接口的普遍问题；
+加上 `POST /auth/register` 对所有人开放，注册即可调用大部分后台 API。**还没有真实生产环境，所以没有现网暴露，
+但必须在任何部署之前完成。**
+
+| 严重度 | 问题 |
+|---|---|
+| 高 | `PUT /site-settings/:key`、`POST /site-settings/batch` **完全没有鉴权**，匿名即可改站名/logo/开关 |
+| 高 | `GET /audit-logs` 任何注册用户可读，含全站邮箱、管理员登录 IP，以及管理员改密时写入的 bcrypt 哈希 |
+| 高 | 采集源「测试连接」是带回显的 SSRF（可读云元数据/内网服务前 200 字符），注册用户可用，DTO 是 interface 零校验 |
+| 高 | 匿名可读草稿：content/movie/novel/comic 公开接口不按发布状态过滤 |
+| 中 | collect、advertisements、menus、notices、stats、media 等管理接口同样只挂 `AuthGuard('jwt')` |
+| 中 | 登录限流后端侧失效：`@Throttle` ttl 按秒写、方法级 ThrottlerGuard 与全局重复计数、`login_attempts` 用可伪造的 XFF 最左值；生产暂由 nginx 登录桶兜住 |
+| 中 | `role.service.ts` 角色分配是 Postgres 语法（MySQL 上报错）；`enable_register` 开关后端从未执行 |
+| 低 | 登录响应与 JWT 里没有 roles（Dashboard 显示不出角色）；评论 `isRegistered`/`ipAddress` 可由客户端自报 |
+
+做法：先盘点全部 controller 的每个接口应有的角色，与 admin 前端实际调用对照，再统一加守卫，配回归测试；
+同时决定注册策略（默认关闭或注册用户无后台权限）。
+
+**其他已记录、未排期**：JSON 请求体 100kb 上限导致超长章节无法保存（413）；`prism_nginx_logs` 卷里只有指向
+stdout 的符号链接，实际不持久化日志；helmet 与 nginx 安全头重复、nginx 的 Referrer-Policy 覆盖了 helmet 的
+`no-referrer`；漫画章节上传无并发上限且页序按完成顺序；上传字节不落盘（媒体功能不可用）；frontend 的
+`vitest` 无测试文件即失败（CI 测试步骤暂只跑 backend）；nginx 镜像未锁版本。
 
 ### 批次 1-C / 1-D / 1-E —— 交叉核查后的修订方案（2026-10-08）
 
@@ -523,7 +575,8 @@ cd backend && npx tsc --noEmit -p tsconfig.json
 # 手工回归（暂无自动化测试）：
 # 1) 登录 → logout → 用同一 token 请求受保护接口，应 401
 # 2) 连续 5 次密码错误 → 第 6 次应被锁定，等待 <15min 内重试仍被锁
-# 3) redis-cli KEYS 'blacklist:*' 能看到条目（证明真的写进 Redis 了）
+# 3) redis-cli --scan --pattern '*blacklist:*' 能看到条目（证明真的写进 Redis 了；
+#    Keyv 给键加了 keyv::keyv: 前缀，KEYS 'blacklist:*' 恒为空）
 ```
 
 ---
