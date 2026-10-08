@@ -1,3 +1,4 @@
+import { SelectQueryBuilder } from 'typeorm';
 import { CommentService } from './comment.service';
 import { Comment } from './entities/comment.entity';
 
@@ -36,5 +37,44 @@ describe('CommentService.findApprovedByContent（公共接口出参白名单）'
     expect(Object.keys(out[0]).sort()).toEqual(
       ['body', 'children', 'contentId', 'createdAt', 'guestName', 'id', 'isRegistered', 'parentId', 'status'],
     );
+  });
+});
+
+describe('CommentService.findAll（管理端分页参数）', () => {
+  // 原型是 TypeORM 真实的 SelectQueryBuilder：skip / take 遇到 NaN 会照常抛错
+  function fakeRepo() {
+    const qb = Object.create(SelectQueryBuilder.prototype);
+    qb.expressionMap = {};
+    qb.andWhere = jest.fn().mockReturnValue(qb);
+    qb.orderBy = jest.fn().mockReturnValue(qb);
+    qb.getManyAndCount = jest.fn().mockResolvedValue([[], 45]);
+    return { qb, repo: { createQueryBuilder: () => qb } };
+  }
+  async function run(query: Record<string, unknown>) {
+    const { qb, repo } = fakeRepo();
+    const out = await new CommentService(repo as any).findAll(query as any);
+    return { skip: qb.expressionMap.skip, take: qb.expressionMap.take, meta: out.meta };
+  }
+
+  it('缺省 page / limit（含 ValidationPipe 把缺省转成的 NaN）时用 1 / 20，不再把 NaN 交给 skip', async () => {
+    for (const q of [{}, { page: undefined, limit: undefined }, { page: NaN, limit: NaN }]) {
+      const r = await run(q);
+      expect(r).toEqual({ skip: 0, take: 20, meta: { total: 45, page: 1, limit: 20, totalPages: 3 } });
+    }
+  });
+
+  it('正常分页', async () => {
+    expect(await run({ page: 3, limit: 10 })).toMatchObject({ skip: 20, take: 10, meta: { page: 3, limit: 10 } });
+  });
+
+  it('limit 夹到 [1, 100]，page 至少为 1', async () => {
+    expect(await run({ page: 0, limit: 1000 })).toMatchObject({ skip: 0, take: 100, meta: { page: 1, limit: 100 } });
+    expect(await run({ page: -2, limit: 0 })).toMatchObject({ skip: 0, take: 1, meta: { page: 1, limit: 1 } });
+  });
+
+  it('超大页码不会让 OFFSET 失去整数精度', async () => {
+    const r = await run({ page: 1e23, limit: 100 });
+    expect(Number.isSafeInteger(r.skip)).toBe(true);
+    expect(r.take).toBe(100);
   });
 });

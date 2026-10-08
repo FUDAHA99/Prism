@@ -25,6 +25,22 @@ export interface QueryCommentDto {
   limit?: number;
 }
 
+/** 管理端评论列表的分页：缺省每页 20 条，上限 100 条（避免 ?limit=100000 一次拖出全表） */
+export const COMMENT_PAGE_SIZE_DEFAULT = 20;
+export const COMMENT_PAGE_SIZE_MAX = 100;
+
+/**
+ * 把分页参数收敛成 [min, max] 内的整数；缺省或不是有限数字（NaN、Infinity）时用 fallback。
+ * HTTP 入口已由 DefaultValuePipe + ParseIntPipe 转成整数，这里兜住越界值和其他调用方：
+ * TypeORM 的 skip(NaN) 会直接抛错（GET /comments 不带参数曾因此 500）。
+ */
+function clampInt(v: unknown, fallback: number, min: number, max: number): number {
+  if (v === undefined || v === null || v === '') return fallback;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(Math.max(Math.trunc(n), min), max);
+}
+
 @Injectable()
 export class CommentService {
   constructor(
@@ -37,8 +53,9 @@ export class CommentService {
     meta: { total: number; page: number; limit: number; totalPages: number };
   }> {
     const { contentId, status } = query;
-    const page = query.page ?? 1;
-    const limit = query.limit ?? 20;
+    const limit = clampInt(query.limit, COMMENT_PAGE_SIZE_DEFAULT, 1, COMMENT_PAGE_SIZE_MAX);
+    // 页码上限只为让 (page - 1) * limit 保持安全整数（否则 SQL 里会出现 1e+24 这样的 OFFSET）
+    const page = clampInt(query.page, 1, 1, Math.floor(Number.MAX_SAFE_INTEGER / limit));
 
     const qb = this.commentRepository.createQueryBuilder('comment');
 
