@@ -6,6 +6,7 @@ import { changePassword } from '../../api/auth'
 import { updateUser } from '../../api/user'
 import PageHeader from '../../components/common/PageHeader'
 import { useAuthStore } from '../../stores/authStore'
+import { ASCII_EMAIL_RULE } from '../../utils/email'
 
 interface ProfileFormValues {
   nickname: string
@@ -77,6 +78,7 @@ function ProfileTab() {
         rules={[
           { required: true, message: '请输入邮箱' },
           { type: 'email', message: '邮箱格式不正确' },
+          ASCII_EMAIL_RULE,
         ]}
       >
         <Input placeholder="请输入邮箱" />

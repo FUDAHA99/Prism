@@ -1,5 +1,4 @@
 import {
-  IsEmail,
   IsString,
   MinLength,
   MaxLength,
@@ -9,6 +8,7 @@ import {
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
+import { IsAccountEmail } from '../../auth/dto/account-email.decorator';
 
 export class CreateUserDto {
   @ApiProperty({
@@ -32,8 +32,9 @@ export class CreateUserDto {
     description: '用户邮箱',
     required: true,
   })
-  @IsEmail({}, { message: '请输入有效的邮箱地址' })
-  @Transform(({ value }) => value?.toLowerCase().trim())
+  // 与登录 / 注册同一条规则（只收 ASCII，去首尾空白并转小写）：管理员不能再建出、改出用户自己登录不上的账号。
+  // UpdateUserDto 经 PartialType 继承这里的校验与转换
+  @IsAccountEmail()
   email: string;
 
   @ApiProperty({

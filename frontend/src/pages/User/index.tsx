@@ -19,6 +19,7 @@ import { assignRoles, deleteUser, getUsers, removeRoles, updateUser } from '../.
 import { getRoles } from '../../api/role'
 import PageHeader from '../../components/common/PageHeader'
 import { formatDate } from '../../utils'
+import { ASCII_EMAIL_RULE } from '../../utils/email'
 import type { Role, User } from '../../types'
 
 const ROLE_COLORS = ['blue', 'green', 'orange', 'purple', 'cyan', 'magenta', 'gold', 'volcano']
@@ -286,6 +287,7 @@ export default function UserPage() {
             rules={[
               { required: true, message: '请输入邮箱' },
               { type: 'email', message: '邮箱格式不正确' },
+              ASCII_EMAIL_RULE,
             ]}
           >
             <Input placeholder="请输入邮箱" />

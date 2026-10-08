@@ -1,8 +1,12 @@
 import 'reflect-metadata';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
+import { ArgumentMetadata, BadRequestException, ValidationPipe } from '@nestjs/common';
 import { LoginDto } from './login.dto';
 import { RegisterDto } from './register.dto';
+import { CreateUserDto } from '../../user/dto/create-user.dto';
+import { UpdateUserDto } from '../../user/dto/update-user.dto';
+import { globalValidationPipeOptions } from '../../../common/pipes/global-validation';
 import { ASCII_EMAIL_PATTERN } from './account-email.decorator';
 
 /**
@@ -32,12 +36,19 @@ const UNICODE_CI_EQUIVALENTS: Array<[string, string]> = [
   ['中间夹空格', 'ad min@cms.com'],
 ];
 
-async function emailErrors(cls: typeof LoginDto | typeof RegisterDto, email: unknown) {
-  const base =
-    cls === LoginDto
-      ? { password: 'Admin123!' }
-      : { username: 'someone', password: 'Admin123!', nickname: '某人' };
-  const dto = plainToInstance(cls, { ...base, email });
+type EmailDto = typeof LoginDto | typeof RegisterDto | typeof CreateUserDto | typeof UpdateUserDto;
+
+/** 各 DTO 除邮箱外的合法字段 */
+const BASE_FIELDS = new Map<EmailDto, Record<string, unknown>>([
+  [LoginDto, { password: 'Admin123!' }],
+  [RegisterDto, { username: 'someone', password: 'Admin123!', nickname: '某人' }],
+  [CreateUserDto, { username: 'someone', password: 'Admin123!' }],
+  [UpdateUserDto, { nickname: '某人' }],
+]);
+
+async function emailErrors(cls: EmailDto, email: unknown) {
+  const base = BASE_FIELDS.get(cls);
+  const dto = plainToInstance(cls as new () => { email?: string }, { ...base, email } as Record<string, unknown>);
   const errors = await validate(dto);
   return { dto, errors: errors.filter((e) => e.property === 'email') };
 }
@@ -45,7 +56,9 @@ async function emailErrors(cls: typeof LoginDto | typeof RegisterDto, email: unk
 describe.each([
   ['LoginDto', LoginDto],
   ['RegisterDto', RegisterDto],
-])('%s.email 只收 ASCII', (_name, cls) => {
+  ['CreateUserDto（后台新建用户）', CreateUserDto],
+  ['UpdateUserDto（后台编辑用户）', UpdateUserDto],
+])('%s.email 只收 ASCII', (_name, cls: EmailDto) => {
   it.each(UNICODE_CI_EQUIVALENTS)('%s → 拒绝', async (_label, email) => {
     const { errors } = await emailErrors(cls, email);
     expect(errors).toHaveLength(1);
@@ -59,12 +72,40 @@ describe.each([
 
   it.each([[undefined], [null], [42], [['admin@cms.com']], [{ $ne: '' }], ['']])('非字符串 / 空值 %j → 拒绝', async (email) => {
     const { errors } = await emailErrors(cls, email);
-    expect(errors).toHaveLength(1);
+    // 编辑用户时邮箱可以不传（只改昵称等），不传就不校验
+    const optional = cls === UpdateUserDto && (email === undefined || email === null);
+    expect(errors).toHaveLength(optional ? 0 : 1);
   });
 
   it('两条都不过时第一条提示是「请输入有效的邮箱地址」', async () => {
     const { errors } = await emailErrors(cls, 'ádmin@cms.com');
     expect(Object.values(errors[0].constraints ?? {})[0]).toBe('请输入有效的邮箱地址');
+  });
+});
+
+describe('后台新建 / 编辑用户经全局 ValidationPipe（whitelist + forbidNonWhitelisted）', () => {
+  const pipe = new ValidationPipe(globalValidationPipeOptions());
+  const body = (metatype: ArgumentMetadata['metatype']): ArgumentMetadata => ({ type: 'body', metatype, data: '' });
+
+  it.each([
+    ['CreateUserDto', CreateUserDto, { username: 'staff', password: 'Staff123!', email: 'staff@例子.中国' }],
+    ['UpdateUserDto', UpdateUserDto, { email: 'staff@例子.中国' }],
+    ['UpdateUserDto（带重音）', UpdateUserDto, { email: 'josé@example.com' }],
+  ])('%s 非 ASCII 邮箱 → 400「邮箱只能包含英文字母、数字和常用符号」或「请输入有效的邮箱地址」', async (_n, cls, payload) => {
+    await expect(pipe.transform(payload, body(cls))).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('ASCII 邮箱照常通过并归一化；编辑时不带邮箱也通过', async () => {
+    const created = await pipe.transform(
+      { username: 'staff', password: 'Staff123!', email: ' Staff@Example.COM ' },
+      body(CreateUserDto),
+    );
+    expect(created.email).toBe('staff@example.com');
+    const updated = await pipe.transform({ email: 'New.Mail@Example.com', isActive: true }, body(UpdateUserDto));
+    expect(updated.email).toBe('new.mail@example.com');
+    await expect(pipe.transform({ nickname: '某人' }, body(UpdateUserDto))).resolves.toEqual(
+      expect.objectContaining({ nickname: '某人' }),
+    );
   });
 });
 

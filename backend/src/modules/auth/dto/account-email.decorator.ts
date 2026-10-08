@@ -13,7 +13,8 @@ import { normalizeEmail } from '../../../common/utils/normalize-email';
 export const ASCII_EMAIL_PATTERN = /^[\x21-\x7E]+$/;
 
 /**
- * 登录 / 注册用的邮箱字段：去首尾空白并转小写，再要求是 ASCII 邮箱。
+ * 账号邮箱字段（登录、注册，以及后台新建 / 编辑用户的 CreateUserDto / UpdateUserDto）：
+ * 去首尾空白并转小写，再要求是 ASCII 邮箱。后台也用同一条规则，否则管理员能建出本人登录不上的账号。
  * IsEmail 先登记：两条都不过时，前端拿到的第一条提示是「请输入有效的邮箱地址」。
  */
 export function IsAccountEmail(): PropertyDecorator {
