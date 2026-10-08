@@ -75,23 +75,34 @@ chmod 644 nginx/ssl/fullchain.pem
 chmod 600 nginx/ssl/privkey.pem
 
 # ── 用 nginx-ssl.conf 模板生成带域名的配置，覆盖 nginx.conf ──────
+# 证书已在 nginx/ssl，渲染脚本会走 HTTPS 分支；之后每次 deploy.sh / CI 部署
+# 都会先还原 nginx.conf 再调用同一脚本重新生成，不会退回 HTTP 版
 log "生成 HTTPS nginx 配置..."
-sed "s/PRISM_DOMAIN/$DOMAIN/g" nginx/nginx-ssl.conf > nginx/nginx.conf
-log "nginx.conf 已更新（HTTP→HTTPS 强制跳转 + SSL）"
+bash scripts/render-nginx-conf.sh
 
 # ── 更新 .env.prod 的 DOMAIN 协议为 https ───────────────────────
+DOMAIN_CHANGED=false
 if grep -q "^DOMAIN=http://" .env.prod; then
   sed -i "s|^DOMAIN=http://|DOMAIN=https://|" .env.prod
+  DOMAIN_CHANGED=true
   log ".env.prod DOMAIN 已更新为 https://"
 fi
 
-# ── 重启 nginx ───────────────────────────────────────────────────
-log "重启 nginx..."
-docker compose -f docker-compose.prod.yml --env-file .env.prod up -d nginx
+# ── 启动 nginx；DOMAIN 变了则连带重建 backend / portal ──────────
+COMPOSE="docker compose -f docker-compose.prod.yml --env-file .env.prod"
+log "启动 nginx（容器 start 时会重新挂载新生成的 nginx.conf）..."
+$COMPOSE up -d nginx
+# NEXT_PUBLIC_API_BASE 是 portal 的构建期参数，CORS_ORIGIN 在 backend 容器创建时注入；
+# 不重建的话门户客户端仍请求 http:// API，会被浏览器按混合内容拦截（评论区失效）
+if $DOMAIN_CHANGED; then
+  log "DOMAIN 已变更，重建 backend / portal（期间站点可访问）..."
+  $COMPOSE up -d --build backend portal
+  $COMPOSE up -d --no-deps --force-recreate nginx   # 重新解析新容器 IP
+fi
 
 # 等待 nginx 启动
 sleep 3
-docker compose -f docker-compose.prod.yml --env-file .env.prod ps nginx
+$COMPOSE ps nginx
 
 # ── 配置自动续签（crontab）──────────────────────────────────────
 log "配置证书自动续签（每天凌晨 3 点检查）..."
@@ -110,7 +121,9 @@ RENEW
 chmod +x "$RENEW_SCRIPT"
 
 CRON_JOB="0 3 * * * $RENEW_SCRIPT >> $PROJECT_DIR/backup/ssl-renew.log 2>&1"
-(crontab -l 2>/dev/null | grep -v 'renew-ssl.sh'; echo "$CRON_JOB") | crontab -
+# || true：没有 crontab（或只剩本任务）时 crontab -l / grep -v 返回 1，
+# set -e + pipefail 下子 shell 会在 echo 之前退出
+(crontab -l 2>/dev/null | grep -v 'renew-ssl.sh' || true; echo "$CRON_JOB") | crontab -
 
 echo ""
 log "=== HTTPS 配置完成 ==="
