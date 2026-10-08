@@ -10,9 +10,13 @@
 #   bash scripts/deploy.sh               拉取最新代码并部署（手工部署用这个）
 #   bash scripts/deploy.sh --skip-pull   不拉代码，直接部署当前工作区：CI 先自己 git pull 再这样调用；
 #                                        本脚本被 git pull 更新后也会带这个参数重新执行新版
+# 环境变量：
+#   PRISM_NGINX_CONF_BACKUP   仅 --skip-pull 时读取：调用方（CI 内联脚本、docs/deploy.md 5.1 的手工命令、
+#                             本脚本 re-exec 前的自己）做过 nginx/nginx.conf 一次性迁移时传入备份路径，
+#                             nginx 在新 compose 上重建成功之前部署失败就把它拷回（见 on_exit）
 #
 # 流程：拉代码（脚本自身有更新则改跑新版）→ 生成 nginx/nginx.active.conf
-#   → 部署前 nginx -t（一次性容器，失败则中止，业务容器与线上 nginx 都不动）
+#   → 部署前 nginx -t（一次性容器；失败则中止，生效配置换回部署前的内容，容器都不动）
 #   → up -d --build → 等 backend → 部署后 nginx -t（真实网络）→ 重建 nginx（80/443 中断数秒）
 #   → 首次部署：建管理员 + 备份 crontab → 清理旧镜像
 # =================================================================
@@ -34,6 +38,68 @@ die()  { echo -e "${RED}[✗]${NC} $*" >&2; exit 1; }
 # 整个流程放在函数里、文件末尾才调用：bash 先读完全部函数定义再执行，
 # git pull 中途替换本文件也不会让正在运行的这一份读到新旧混杂的内容。
 
+# ── 失败兜底（EXIT trap，main 第一步装上）─────────────────────────────
+# 1) nginx/nginx.conf 一次性迁移的备份（NGINX_CONF_BACKUP，见 pull_code）：nginx 在新 compose 上重建成功
+#    之前，任何原因退出都把它拷回。旧版 compose 按路径挂载 ./nginx/nginx.conf，还在运行的旧 nginx 容器
+#    下次被 start（旧版续签脚本的 post-hook、dockerd / 宿主机重启）会重新挂载这个路径，而迁移已把它还原成
+#    HTTP 版：不拷回，那时 443 就没了（叠加 HSTS，老访客整站打不开）。拷回总是安全的：新 compose 不再
+#    挂载它，下次部署会再迁移一次。重建成功后清空 NGINX_CONF_BACKUP 即解除。
+#    路径同时导出为 PRISM_NGINX_CONF_BACKUP：pull_code 拉到本脚本新版本后 exec 的新进程（exec 不跑
+#    EXIT trap）、以及自己做了迁移再 --skip-pull 调用本脚本的 CI 内联脚本 / 手工命令，都靠它接上。
+# 2) 开始 up 之前任何原因退出，都把 nginx/nginx.active.conf 恢复成本次 render 之前的样子（原来没有就删掉）：
+#    此时容器一个都没动，运行中的 nginx 下次重启读到的仍是原配置，而不是这次没通过校验的。
+#    开始 up 之后 compose 可能已经用新配置重建了 nginx，就不再恢复。
+NGINX_CONF_BACKUP=""
+ACTIVE_GUARD=false   # render 前置为 true
+ACTIVE_PREV=""       # render 前 nginx.active.conf 的快照（mktemp）；为空表示 render 前它不存在
+UP_STARTED=false
+
+on_exit() {
+  local rc=$? ok=true touched=false
+  set +e
+  # 正常走完 main 时迁移备份已解除、UP_STARTED=true；否则就是中途退出（die、set -e、信号），按失败处理
+  if [ "$rc" -eq 0 ] && [ -z "$NGINX_CONF_BACKUP" ] && $UP_STARTED; then
+    [ -z "$ACTIVE_PREV" ] || rm -f "$ACTIVE_PREV"
+    return
+  fi
+
+  if [ -n "$NGINX_CONF_BACKUP" ]; then
+    touched=true
+    if cp -f "$NGINX_CONF_BACKUP" nginx/nginx.conf; then
+      warn "已把 nginx/nginx.conf 恢复为迁移前的内容（备份 $NGINX_CONF_BACKUP 保留，下次部署会再迁移一次）"
+    else
+      ok=false
+      echo -e "${RED}[✗]${NC} 恢复 nginx/nginx.conf 失败！立即手工执行：cd $PROJECT_DIR && cp -f $NGINX_CONF_BACKUP nginx/nginx.conf" >&2
+    fi
+  fi
+
+  if $ACTIVE_GUARD && ! $UP_STARTED; then
+    touched=true
+    if [ -n "$ACTIVE_PREV" ]; then
+      if mv -f "$ACTIVE_PREV" nginx/nginx.active.conf; then
+        ACTIVE_PREV=""
+      else
+        ok=false
+        echo -e "${RED}[✗]${NC} 恢复 nginx/nginx.active.conf 失败！部署前的内容在 $PROJECT_DIR/$ACTIVE_PREV，手工 mv 回去" >&2
+      fi
+    elif [ -f nginx/nginx.active.conf ]; then
+      rm -f nginx/nginx.active.conf || ok=false
+    fi
+  elif [ -n "$ACTIVE_PREV" ]; then
+    rm -f "$ACTIVE_PREV"
+  fi
+
+  if $UP_STARTED; then
+    warn "部署失败（退出码 $rc）：已执行过 up，部分容器可能已更新，查看：$COMPOSE ps；修好问题后重新部署"
+  elif ! $ok; then
+    warn "部署中止（退出码 $rc）：容器均未改动，但上面的文件恢复失败，务必先按提示手工处理"
+  elif $touched; then
+    warn "部署中止（退出码 $rc）：容器均未改动，nginx 配置文件已恢复为部署前的状态；修好问题后重新部署即可"
+  else
+    warn "部署中止（退出码 $rc）：容器均未改动"
+  fi
+}
+
 # ── 拉取最新代码 ─────────────────────────────────────────────────
 pull_code() {
   if ! git rev-parse --is-inside-work-tree &>/dev/null; then
@@ -44,11 +110,14 @@ pull_code() {
   # 一次性迁移：旧版 setup-ssl.sh / render-nginx-conf.sh 会把 HTTPS 配置写进受跟踪的
   # nginx/nginx.conf，留下本地改动，上游一改这个文件 git pull 就会中止。现在生效的是生成的
   # nginx/nginx.active.conf（HTTPS 由 nginx-ssl.conf 渲染），这些改动已不需要：备份后还原。
-  local backup=""
+  # 先登记备份再还原：从这里到 nginx 在新 compose 上重建成功，任何失败都由 on_exit 拷回。
   if ! git diff --quiet HEAD -- nginx/nginx.conf; then
+    local backup
     mkdir -p backup
     backup="backup/nginx.conf.local.$(date +%Y%m%d-%H%M%S)"
     cp nginx/nginx.conf "$backup"
+    NGINX_CONF_BACKUP=$backup
+    export PRISM_NGINX_CONF_BACKUP="$backup"
     git checkout HEAD -- nginx/nginx.conf
     warn "nginx/nginx.conf 有本地改动（多半是旧版 setup-ssl.sh 写入的 HTTPS 配置），已备份到 $backup 并还原；"
     warn "  生效配置现在是生成的 nginx/nginx.active.conf，不要再手改 nginx/ 下的文件"
@@ -57,16 +126,10 @@ pull_code() {
   local old_head
   old_head=$(git rev-parse HEAD)
   log "拉取最新代码..."
-  if ! git pull origin main; then
-    # pull 没成功，服务器仍是旧版本（旧版 compose 挂载的就是 nginx/nginx.conf），恢复原样
-    if [ -n "$backup" ]; then
-      cp -f "$backup" nginx/nginx.conf
-      warn "已把 nginx/nginx.conf 恢复为部署前的内容"
-    fi
-    die "git pull 失败，部署中止（未改动任何容器）"
-  fi
+  git pull origin main || die "git pull 失败，部署中止"
 
-  # 本脚本自身被更新了：改跑新版本，新逻辑在这一次部署就生效（不用再部署一次）
+  # 本脚本自身被更新了：改跑新版本，新逻辑在这一次部署就生效（不用再部署一次）。
+  # 迁移备份经导出的 PRISM_NGINX_CONF_BACKUP 交给新进程，失败兜底由它接着负责
   if ! git diff --quiet "$old_head" HEAD -- scripts/deploy.sh; then
     log "scripts/deploy.sh 本次有更新，改用新版本继续..."
     exec bash "$SCRIPT_DIR/deploy.sh" --skip-pull
@@ -87,6 +150,8 @@ post_check_nginx() {
 }
 
 main() {
+  trap on_exit EXIT
+
   local skip_pull=false arg
   for arg in "$@"; do
     case $arg in
@@ -94,6 +159,17 @@ main() {
       *) die "未知参数：$arg（用法见脚本头部注释）" ;;
     esac
   done
+
+  # 迁移备份只认 --skip-pull 的调用方传进来的（re-exec 前的自己、CI 内联脚本、5.1 手工命令）；
+  # 自己拉代码时由 pull_code 登记，不理会环境里残留的值
+  if $skip_pull && [ -n "${PRISM_NGINX_CONF_BACKUP:-}" ]; then
+    if [ -f "$PRISM_NGINX_CONF_BACKUP" ]; then
+      NGINX_CONF_BACKUP=$PRISM_NGINX_CONF_BACKUP
+      log "nginx/nginx.conf 迁移前的备份：$NGINX_CONF_BACKUP（nginx 在新 compose 上重建成功之前部署失败会把它拷回）"
+    else
+      warn "PRISM_NGINX_CONF_BACKUP 指向的 $PRISM_NGINX_CONF_BACKUP 不存在，忽略"
+    fi
+  fi
 
   # ── 前置检查 ──────────────────────────────────────────────────
   [ -f .env.prod ] || die ".env.prod 不存在！请先执行: cp .env.prod.example .env.prod 并填写配置"
@@ -111,9 +187,16 @@ main() {
     pull_code
   fi
 
-  # ── 生成 nginx 生效配置（失败时保留上一次的 nginx.active.conf）──────
-  bash scripts/render-nginx-conf.sh \
-    || die "生成 nginx 配置失败，部署中止（nginx/nginx.active.conf 保持原样，未改动任何容器）"
+  # ── 生成 nginx 生效配置 ───────────────────────────────────────
+  # 先给原来的 nginx.active.conf 留快照：开始 up 之前失败由 on_exit 恢复（render 自身失败时不动它）
+  if [ -f nginx/nginx.active.conf ]; then
+    local snap
+    snap=$(mktemp nginx/.nginx.active.conf.prev.XXXXXX)
+    cp -p nginx/nginx.active.conf "$snap"
+    ACTIVE_PREV=$snap
+  fi
+  ACTIVE_GUARD=true
+  bash scripts/render-nginx-conf.sh || die "生成 nginx 配置失败（见上方报错），部署中止"
 
   # ── 安全检查 ──────────────────────────────────────────────────
   if grep -Eq '^[[:space:]]*DB_SYNC[[:space:]]*=[[:space:]]*["'\'']?true' .env.prod; then
@@ -131,10 +214,11 @@ main() {
   # ── 部署前 nginx -t：一次性容器 + --add-host 占位，不依赖业务容器，首次部署也能跑 ──
   log "部署前校验 nginx 配置..."
   bash scripts/check-nginx-conf.sh \
-    || die "nginx 配置校验失败（见上方 nginx -t 输出），部署中止：业务容器与线上 nginx 均未改动。修正 nginx/ 下的配置后重新部署"
+    || die "nginx 配置校验失败（见上方 nginx -t 输出），部署中止。修正 nginx/ 下的配置后重新部署"
 
   # ── 构建并启动 ────────────────────────────────────────────────
   log "构建镜像并启动服务（可能需要几分钟）..."
+  UP_STARTED=true   # 从这里起容器可能被改动：失败时不再恢复 nginx.active.conf，也不再说「容器均未改动」
   $COMPOSE up -d --build --remove-orphans
 
   # ── 等待 backend（用 Node.js 内置 http 模块，无需 wget/curl）──────
@@ -168,6 +252,11 @@ main() {
   fi
   log "重建 nginx（80/443 会中断数秒）..."
   $COMPOSE up -d --no-deps --force-recreate nginx
+  # nginx 已在新 compose 上挂载 nginx.active.conf 跑起来，nginx/nginx.conf 不再被任何容器挂载：解除迁移兜底
+  if [ -n "$NGINX_CONF_BACKUP" ]; then
+    log "nginx 已改用生成的 nginx/nginx.active.conf；迁移前的 nginx/nginx.conf 备份保留在 $NGINX_CONF_BACKUP（不会自动清理）"
+    NGINX_CONF_BACKUP=""
+  fi
 
   # ── 首次部署：初始化管理员账号 + 配置自动备份 ──────────────────
   if $first_deploy; then

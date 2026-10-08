@@ -135,7 +135,7 @@ jobs:
             set -euo pipefail
             cd ${{ secrets.DEPLOY_PATH || '/opt/prism-cms' }}
 
-            # 一次性迁移（见 docs/deploy.md 第 7 节）：旧版 setup-ssl.sh 把 HTTPS 配置写进了受跟踪的
+            # 一次性迁移（见 docs/deploy.md 5.1 节）：旧版 setup-ssl.sh 把 HTTPS 配置写进了受跟踪的
             # nginx/nginx.conf；生效配置现在是生成的 nginx/nginx.active.conf，备份后还原它，否则 git pull 会中止
             BAK=""
             if ! git diff --quiet HEAD -- nginx/nginx.conf; then
@@ -146,14 +146,19 @@ jobs:
               echo "nginx/nginx.conf 有本地改动：已备份到 $BAK 并还原"
             fi
 
-            if ! git pull origin main; then
-              # pull 没成功：服务器仍是旧版本（旧版 compose 挂载的就是 nginx/nginx.conf）——恢复原样
-              if [ -n "$BAK" ]; then cp -f "$BAK" nginx/nginx.conf; fi
-              echo "git pull 失败，部署中止（未改动任何容器）"
-              exit 1
-            fi
+            # 还在运行的旧 nginx 容器（旧版 compose）按路径挂载 nginx/nginx.conf：nginx 在新 compose 上重建成功之前
+            # 任何失败都要把备份拷回，否则它下次被 start 时只剩 HTTP。deploy.sh 经 PRISM_NGINX_CONF_BACKUP 拿到备份
+            # 自己负责；这里兜住 pull 失败和 deploy.sh 没能处理的情况（拷回总是安全的：下次部署会再迁移一次）
+            restore_nginx_conf() {
+              if [ -n "$BAK" ] && git diff --quiet HEAD -- nginx/nginx.conf; then
+                if cp -f "$BAK" nginx/nginx.conf; then echo "已把 nginx/nginx.conf 恢复为迁移前的内容（备份 $BAK）"
+                else echo "恢复 nginx/nginx.conf 失败！立即手工执行：cp -f $BAK nginx/nginx.conf"; fi
+              fi
+            }
 
-            bash scripts/deploy.sh --skip-pull
+            git pull origin main || { restore_nginx_conf; echo "git pull 失败：部署中止，容器均未改动"; exit 1; }
+
+            PRISM_NGINX_CONF_BACKUP="$BAK" bash scripts/deploy.sh --skip-pull || { rc=$?; restore_nginx_conf; exit $rc; }
 
       - name: Notify on failure
         if: failure()

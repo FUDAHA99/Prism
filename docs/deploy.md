@@ -90,7 +90,7 @@ bash scripts/deploy.sh
 脚本会自动完成（手工部署与 CI 部署执行的是同一份脚本）：
 1. `git pull` 拉取最新代码；`scripts/deploy.sh` 自身有更新时，自动改用新版本继续（`--skip-pull` 跳过这一步）
 2. 生成 nginx 生效配置 `nginx/nginx.active.conf`（`scripts/render-nginx-conf.sh`；HTTP / HTTPS 模式见第 7 节）
-3. 部署前校验：在一次性容器里对生成的配置跑 `nginx -t`，不依赖业务容器；不通过则中止，业务容器与线上 nginx 都不动
+3. 部署前校验：在一次性容器里对生成的配置跑 `nginx -t`，不依赖业务容器；不通过则中止，`nginx/nginx.active.conf` 换回部署前的内容，容器一个都不动（运行中的 nginx 重启后仍是原配置）
 4. 检测是否首次部署（自动设置 `DB_SYNC=true` 建表）；`.env.prod` 里写着 `DB_SYNC=true` 时打印警告
 5. 构建三个业务镜像（backend / portal / frontend），启动全部 6 个容器
 6. 等待 backend 就绪后接到真实 Docker 网络再跑一次 `nginx -t`，通过后强制重建 nginx 容器（每次部署 80/443 中断数秒，见第 7 节「nginx 配置变更如何生效」）
@@ -218,18 +218,25 @@ SQL
 **② 第一次运行新的部署流程。** nginx 的生效配置改成了生成的 `nginx/nginx.active.conf`（第 7 节），`docker-compose.prod.yml` 挂载的是它，文件不存在时 nginx 容器会创建失败。
 
 - **CI 部署**：不需要手工操作。新的 workflow 会先把有本地改动的 `nginx/nginx.conf`（旧版 `setup-ssl.sh` 把 HTTPS 配置写进了这个受跟踪的文件）备份到 `backup/nginx.conf.local.<时间>` 并还原，再 `git pull`、运行新版 `deploy.sh`。
+- **失败时会把备份拷回**：还在运行的旧 nginx 容器是旧版 compose 建的，按路径挂载 `nginx/nginx.conf`；还原后这个文件是 HTTP 版，要是就此停在半路，它下次被 start（旧版续签脚本的 post-hook、dockerd 或宿主机重启）时就只剩 HTTP，443 不再监听，叠加 HSTS 老访客整站打不开。所以 nginx 在新 compose 上重建成功之前，任何一步失败（`git pull`、生成配置、部署前 `nginx -t`、镜像构建、等 backend 超时……）都会把备份拷回 `nginx/nginx.conf`。拷回总是安全的：新 compose 不挂载它，修好问题后重新部署会再迁移一次。`deploy.sh` 通过环境变量 `PRISM_NGINX_CONF_BACKUP` 拿到调用方做迁移时的备份路径；失败提示里的「容器均未改动」只在确实还没执行 `up` 时出现。
 - **手工部署**：服务器上现有的 `scripts/deploy.sh` 还是旧版，**不要直接运行它**——旧脚本不会生成 `nginx.active.conf`，HTTP 服务器上它 `up` 时会让 nginx 容器因挂载文件不存在而重建失败；HTTPS 服务器上它的 `git pull` 会因 `nginx/nginx.conf` 的本地改动中止。第一次按下面执行，之后照常 `bash scripts/deploy.sh`：
 
   ```bash
   cd /opt/prism-cms   # 项目目录
+  bak=""
   # 只有 nginx/nginx.conf 有本地改动（HTTPS 服务器）时才会备份并还原，否则什么也不做
-  git diff --quiet HEAD -- nginx/nginx.conf || { mkdir -p backup; cp nginx/nginx.conf backup/nginx.conf.local.bak; git checkout HEAD -- nginx/nginx.conf; }
-  git pull origin main
-  bash scripts/deploy.sh --skip-pull
+  if ! git diff --quiet HEAD -- nginx/nginx.conf; then
+    mkdir -p backup && bak=backup/nginx.conf.local.bak && cp nginx/nginx.conf "$bak" && git checkout HEAD -- nginx/nginx.conf
+  fi
+  # deploy.sh 经 PRISM_NGINX_CONF_BACKUP 拿到备份，nginx 重建成功之前失败会自己拷回；git pull 失败由最后的 || 拷回
+  git pull origin main && PRISM_NGINX_CONF_BACKUP="$bak" bash scripts/deploy.sh --skip-pull \
+    || { [ -n "$bak" ] && cp -f "$bak" nginx/nginx.conf; }
   ```
 
+  失败后 `nginx/nginx.conf` 又是原来的 HTTPS 版（`git status` 里显示为已修改），旧 nginx 容器重启后仍能提供 HTTPS；按提示修好问题后把上面几行原样再执行一次。
+
 - 已经误跑了旧脚本、nginx 起不来时：代码已经拉下来了，直接 `bash scripts/deploy.sh --skip-pull`，它会生成配置、校验并重建 nginx。
-- 从本版本起，`deploy.sh` 在 `git pull` 拉到自身更新时会自动改跑新版本，不再需要「连续执行两次」；本地改动的迁移也内置在 `deploy.sh` 里（备份同样放在 `backup/`，不会被自动清理）。
+- 从本版本起，`deploy.sh` 在 `git pull` 拉到自身更新时会自动改跑新版本，不再需要「连续执行两次」；本地改动的迁移也内置在 `deploy.sh` 里（备份同样放在 `backup/`，不会被自动清理；失败时同样自动拷回，拉到 `deploy.sh` 新版本、改跑新版之后也一样）。
 
 ---
 
@@ -299,7 +306,7 @@ bash scripts/setup-ssl.sh admin@example.com
 
 - **不要在服务器上手改** `nginx/` 下的任何文件：`nginx.active.conf` 每次部署都会重新生成；两份受跟踪的配置手改后，HTTP 模式会原样生效且让下次 `git pull` 可能中止。改动一律走仓库提交。
 - **部署时两道 `nginx -t`**：
-  1. 部署前（`scripts/check-nginx-conf.sh`）：一次性 `nginx:alpine` 容器，不接任何网络，upstream 主机名 `backend` / `portal` / `frontend` 用 `--add-host` 指到 127.0.0.1，只检查语法与语义（指令、正则、证书能否加载），不依赖业务容器是否在跑，首次部署也能用。不通过则部署中止，业务容器与线上 nginx 都不动。
+  1. 部署前（`scripts/check-nginx-conf.sh`）：一次性 `nginx:alpine` 容器，不接任何网络，upstream 主机名 `backend` / `portal` / `frontend` 用 `--add-host` 指到 127.0.0.1，只检查语法与语义（指令、正则、证书能否加载），不依赖业务容器是否在跑，首次部署也能用。不通过则部署中止，`nginx/nginx.active.conf` 换回部署前的内容，容器一个都不动。
   2. 部署后：`up -d --build` 之后，接到 `prism-backend` 所在的真实网络、挂载与 nginx 服务一致再跑一次，通过后 `up -d --no-deps --force-recreate nginx`。这一步失败几乎都是 `host not found in upstream "xxx"`——对应的业务容器没在运行，不是配置问题；此时脚本不重建 nginx（重建了也起不来），线上旧 nginx 可能还指向业务容器的旧 IP（502），修好业务容器后手工执行下面最后一条命令。
 - **每次部署都重建 nginx，80/443 会中断数秒（已接受）**：单文件 bind mount 绑定的是 inode，render 用 `mv` 换了文件后运行中的容器仍读旧内容；upstream 也只在启动时解析一次，业务容器重建换 IP 后必须重建 nginx 才能连上。代价是每次部署都有几秒不可用：旧容器收到 SIGQUIT 后立即停止监听，最多再排空 10 秒，更长的请求（大文件上传、`/uploads/` 下视频的 Range 流）会被切断。要做到零中断，需要改为挂载 `nginx/` 目录、upstream 用 `resolver 127.0.0.11` 加变量形式的 `proxy_pass`、部署时 `nginx -t && nginx -s reload`，目前未做。
 - 手工执行的等价命令：
