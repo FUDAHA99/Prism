@@ -101,9 +101,10 @@ services:
       REDIS_PASSWORD:    ${REDIS_PASSWORD}
       REDIS_DB:          0
 
-      JWT_SECRET:        ${JWT_SECRET}
+      # 缺失或为空时 compose 直接报错退出，不再以空串启动；backend 启动时还会拒绝示例值、短于 32 字符或两者相同的密钥
+      JWT_SECRET:        ${JWT_SECRET:?JWT_SECRET 未设置，请在 .env.prod 中用 openssl rand -hex 32 生成}
       JWT_EXPIRES_IN:    ${JWT_EXPIRES_IN:-2h}
-      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET 未设置，请在 .env.prod 中用 openssl rand -hex 32 另行生成}
       JWT_REFRESH_EXPIRES_IN: ${JWT_REFRESH_EXPIRES_IN:-7d}
 
       BCRYPT_SALT_ROUNDS: 12

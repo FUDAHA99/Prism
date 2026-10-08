@@ -25,6 +25,12 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
 
   async validate(request: any, payload: JwtPayload): Promise<AuthUser> {
     try {
+      // 只接受 access token。refresh token 用另一把密钥签名，到这里验签就会失败；
+      // 这一条兜住两把密钥被配成相同（非生产环境只告警）以及不带 type 的旧 token
+      if (payload?.type !== 'access') {
+        throw new UnauthorizedException('无效的token类型');
+      }
+
       // 检查token是否在黑名单中
       const token = this.extractTokenFromHeader(request);
       const isBlacklisted = await this.cacheManager.get(

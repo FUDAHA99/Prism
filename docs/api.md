@@ -81,18 +81,25 @@
 ---
 
 ### 1.3 刷新 Token
-`POST /auth/refresh`  🔒 需要 refreshToken
+`POST /auth/refresh`
 
-**请求头**: `Authorization: Bearer <refreshToken>`
+**请求体**：
+```json
+{ "refreshToken": "eyJ..." }
+```
 
-**响应** `200`：返回新的 accessToken 和 refreshToken
+**响应** `200`：返回新的 accessToken 和 refreshToken。refresh token 用独立密钥签名、只能用一次：
+换出新的一对之后旧的立即作废（再用得 `401`），也不能当 `Authorization: Bearer` 访问其他接口。
 
 ---
 
 ### 1.4 登出
 `POST /auth/logout`  🔒 需要认证
 
-将当前 accessToken 加入黑名单。
+将当前 accessToken 加入黑名单；请求体可选带上 refreshToken 一并吊销：
+```json
+{ "refreshToken": "eyJ..." }
+```
 
 ---
 

@@ -2,17 +2,21 @@ import {
   Injectable,
   UnauthorizedException,
   BadRequestException,
+  NotFoundException,
   Inject,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
+import { randomUUID } from 'crypto';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 import {
   accessBlacklistKey,
   refreshBlacklistKey,
 } from './token-blacklist.util';
+import { blacklistUntilExpiry } from './token-revocation';
+import { KeyedMutex } from '../../common/utils/keyed-mutex';
 
 import { SafeUser, toSafeUser } from '../user/user-fields';
 import { LoginDto } from './dto/login.dto';
@@ -21,6 +25,7 @@ import {
   JwtPayload,
   AuthTokens,
   LoginResponse,
+  RefreshTokenPayload,
 } from './interfaces/auth.interface';
 import { UserService } from '../user/user.service';
 import { RoleService } from '../role/role.service';
@@ -31,12 +36,18 @@ interface LoginAttemptData {
   userAgent?: string;
 }
 
+/** 未勾选「记住我」时 refresh token 最多活 24 小时（勾选则用满 JWT_REFRESH_EXPIRES_IN） */
+const SESSION_REFRESH_MAX_SEC = 24 * 60 * 60;
+
 @Injectable()
 export class AuthService {
   private readonly MAX_LOGIN_ATTEMPTS = 5;
   // cache-manager v5+ 的 TTL 一律以毫秒计（底层 Keyv）。
   // 此前写的是 15 * 60（被当作 900 毫秒），登录锁定实际只有 0.9 秒。
   private readonly LOGIN_BLOCK_TIME = 15 * 60 * 1000;
+
+  /** 同一个 refresh token 的「查黑名单 → 轮换」串行执行，并发刷新只有一个能成功 */
+  private readonly refreshLocks = new KeyedMutex();
 
   constructor(
     private readonly userService: UserService,
@@ -62,7 +73,7 @@ export class AuthService {
       throw new UnauthorizedException('邮箱或密码错误');
     }
 
-    const tokens = await this.generateTokens(user, rememberMe);
+    const tokens = await this.generateTokens(user, this.refreshLifetimeSec(rememberMe));
     await this.recordSuccessfulLogin(user, ip, userAgent);
     await this.userService.updateLastLogin(user.id);
 
@@ -91,7 +102,7 @@ export class AuthService {
     await this.roleService.assignDefaultRole(user.id);
 
     const freshUser = await this.userService.findOne(user.id);
-    const tokens = await this.generateTokens(freshUser, false);
+    const tokens = await this.generateTokens(freshUser, this.refreshLifetimeSec(false));
 
     await this.auditService.log({
       userId: user.id,
@@ -117,60 +128,63 @@ export class AuthService {
     };
   }
 
+  /**
+   * 用 refresh token 换一套新 token，并轮换：旧 refresh 立即拉黑到它自然过期，只能用一次。
+   *
+   * refresh token 用独立的 refresh 密钥签名、type 必须是 'refresh'；access token 拿到这里验签就会失败。
+   * 新 refresh 的有效期沿用旧的那一档（exp - iat），「记住我」与否在轮换中保持不变。
+   */
   async refreshToken(
     refreshToken: string,
     ip: string,
     userAgent?: string,
   ): Promise<AuthTokens> {
-    let payload: JwtPayload & { type?: string };
-    try {
-      payload = this.jwtService.verify(refreshToken);
-    } catch {
-      throw new UnauthorizedException('refresh token无效或已过期');
-    }
-
-    if (payload.type !== 'refresh') {
-      throw new UnauthorizedException('无效的token类型');
-    }
-
-    // 注意：目前没有任何地方写入 refresh 黑名单，此检查恒不命中。
-    // 保留并统一 key 构造，refresh 吊销待后续单独实现。
+    const payload = this.verifyRefreshToken(refreshToken);
     const blacklistKey = refreshBlacklistKey(refreshToken);
-    const isBlacklisted = await this.cacheManager.get(blacklistKey);
-    if (isBlacklisted) {
-      throw new UnauthorizedException('refresh token已失效');
-    }
 
-    const user = await this.userService.findOne(payload.sub);
-    if (!user || !user.isActive) {
-      throw new UnauthorizedException('用户不存在或已被禁用');
-    }
+    return this.refreshLocks.run(blacklistKey, async () => {
+      if (await this.cacheManager.get(blacklistKey)) {
+        throw new UnauthorizedException('refresh token已失效');
+      }
 
-    return this.generateTokens(user, false);
+      const user = await this.findActiveUser(payload.sub);
+      if (!user) {
+        throw new UnauthorizedException('用户不存在或已被禁用');
+      }
+
+      await blacklistUntilExpiry(this.cacheManager, blacklistKey, payload.exp);
+      return this.generateTokens(user, payload.exp - payload.iat);
+    });
   }
 
+  /**
+   * 注销：拉黑当前 access token；客户端一并交来 refresh token 时也拉黑它。
+   * refresh token 无效、已过期或不属于当前用户时忽略（注销本身总是成功）。
+   */
   async logout(
     userId: string,
-    accessToken: string,
+    accessToken: string | undefined,
+    refreshToken: string | undefined,
     ip: string,
     userAgent?: string,
   ): Promise<void> {
     if (accessToken) {
-      try {
-        const decoded = this.jwtService.decode(accessToken) as { exp?: number };
-        // JWT 的 exp 是秒级 Unix 时间戳，缓存 TTL 要毫秒，需换算
-        const ttlSec = decoded?.exp
-          ? decoded.exp - Math.floor(Date.now() / 1000)
-          : 7200;
-        if (ttlSec > 0) {
-          await this.cacheManager.set(
-            accessBlacklistKey(accessToken),
-            1,
-            ttlSec * 1000,
-          );
-        }
-      } catch {
-        // ignore decode errors — token may already be invalid
+      const decoded = this.jwtService.decode(accessToken) as { exp?: number } | null;
+      await blacklistUntilExpiry(
+        this.cacheManager,
+        accessBlacklistKey(accessToken),
+        decoded?.exp,
+      );
+    }
+
+    if (refreshToken) {
+      const payload = this.tryVerifyRefreshToken(refreshToken);
+      if (payload && payload.sub === userId) {
+        await blacklistUntilExpiry(
+          this.cacheManager,
+          refreshBlacklistKey(refreshToken),
+          payload.exp,
+        );
       }
     }
 
@@ -244,29 +258,95 @@ export class AuthService {
     return this.roleService.getUserPermissions(userId);
   }
 
+  /**
+   * 签发一对 token：
+   * - access：JwtModule 的密钥与有效期，type 'access'
+   * - refresh：独立的 refresh 密钥，type 'refresh'，载荷只有用户 ID
+   * 两者都带随机 jti，保证每个 token 唯一（黑名单按 token 哈希记，不能误伤同秒签发的另一个）。
+   */
   private async generateTokens(
     user: Pick<SafeUser, 'id' | 'email' | 'username' | 'roles'>,
-    rememberMe: boolean,
+    refreshLifetimeSec: number,
   ): Promise<AuthTokens> {
     const payload: JwtPayload = {
       sub: user.id,
       email: user.email,
       username: user.username,
       roles: user.roles,
+      type: 'access',
+      jti: randomUUID(),
     };
 
     const accessToken = this.jwtService.sign(payload);
     const refreshToken = this.jwtService.sign(
-      { ...payload, type: 'refresh' },
-      { expiresIn: rememberMe ? '7d' : '24h' },
+      { sub: user.id, type: 'refresh', jti: randomUUID() },
+      { secret: this.refreshSecret(), expiresIn: refreshLifetimeSec },
     );
+
+    // 按实际签出的 exp - iat 回报有效期，不再写死 7200 与配置脱节
+    const { exp, iat } = this.jwtService.decode(accessToken) as { exp: number; iat: number };
 
     return {
       accessToken,
       refreshToken,
-      expiresIn: 2 * 60 * 60,
+      expiresIn: exp - iat,
       tokenType: 'Bearer',
     };
+  }
+
+  /** refresh 密钥必须单独配置（config/jwt.ts 保证非空）；缺失时宁可报错也不回落到 access 密钥 */
+  private refreshSecret(): string {
+    const secret = this.configService.get<string>('app.jwt.refreshSecret');
+    if (!secret) {
+      throw new Error('app.jwt.refreshSecret 未配置');
+    }
+    return secret;
+  }
+
+  /** 登录签发的 refresh 有效期（秒）：记住我用满配置值，否则不超过 24 小时 */
+  private refreshLifetimeSec(rememberMe: boolean | undefined): number {
+    const configured = this.configService.get<number>('app.jwt.refreshExpiresIn');
+    if (typeof configured !== 'number' || !(configured > 0)) {
+      throw new Error('app.jwt.refreshExpiresIn 未配置');
+    }
+    return rememberMe ? configured : Math.min(configured, SESSION_REFRESH_MAX_SEC);
+  }
+
+  /** 校验 refresh token（独立密钥 + type + 必要声明），不合格一律 401 */
+  private verifyRefreshToken(token: string): RefreshTokenPayload {
+    const payload = this.tryVerifyRefreshToken(token);
+    if (!payload) {
+      throw new UnauthorizedException('refresh token无效或已过期');
+    }
+    return payload;
+  }
+
+  private tryVerifyRefreshToken(token: unknown): RefreshTokenPayload | null {
+    if (typeof token !== 'string' || token === '') return null;
+    const secret = this.refreshSecret();
+    let payload: Partial<RefreshTokenPayload>;
+    try {
+      payload = this.jwtService.verify(token, { secret });
+    } catch {
+      return null;
+    }
+    const valid =
+      payload?.type === 'refresh' &&
+      typeof payload.sub === 'string' &&
+      typeof payload.iat === 'number' &&
+      typeof payload.exp === 'number';
+    return valid ? (payload as RefreshTokenPayload) : null;
+  }
+
+  /** 按 ID 取仍启用的用户；不存在（含已删除）或已禁用返回 null */
+  private async findActiveUser(userId: string): Promise<SafeUser | null> {
+    try {
+      const user = await this.userService.findOne(userId);
+      return user && user.isActive ? user : null;
+    } catch (error) {
+      if (error instanceof NotFoundException) return null;
+      throw error;
+    }
   }
 
   private async checkLoginAttempts(email: string, ip: string): Promise<void> {

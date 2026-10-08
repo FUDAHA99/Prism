@@ -16,8 +16,9 @@ export async function register(data: {
   return res.data
 }
 
-export async function logout(): Promise<void> {
-  await apiClient.post('/auth/logout')
+/** 注销：后端拉黑当前 access token；带上 refresh token 时一并吊销 */
+export async function logout(refreshToken?: string | null): Promise<void> {
+  await apiClient.post('/auth/logout', refreshToken ? { refreshToken } : {})
 }
 
 export async function refreshToken(

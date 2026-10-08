@@ -1,4 +1,6 @@
+import { Logger } from '@nestjs/common';
 import { registerAs } from '@nestjs/config';
+import { resolveJwtConfig } from './jwt';
 
 export default registerAs('app', () => ({
   // 应用基础配置
@@ -7,13 +9,8 @@ export default registerAs('app', () => ({
   appPort: parseInt(process.env.APP_PORT, 10) || 3000,
   appUrl: process.env.APP_URL || 'http://localhost:3000',
   
-  // JWT配置
-  jwt: {
-    secret: process.env.JWT_SECRET || 'your-jwt-secret-key-change-this-in-production',
-    expiresIn: process.env.JWT_EXPIRES_IN || '2h',
-    refreshSecret: process.env.JWT_REFRESH_SECRET || 'your-jwt-refresh-secret-key-change-this-in-production',
-    refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
-  },
+  // JWT配置：生产环境密钥缺失 / 是示例值 / 过短时直接抛错拒绝启动，有效期统一解析成秒（见 config/jwt.ts）
+  jwt: resolveJwtConfig(process.env, (message) => new Logger('JwtConfig').warn(message)),
   
   // 安全配置
   security: {

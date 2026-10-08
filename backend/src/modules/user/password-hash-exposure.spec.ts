@@ -117,7 +117,9 @@ describe('密码哈希不出库：用户与关联查询只取安全字段', () =
       roleService,
       auditService,
       new JwtService({ secret: 'unit-test-secret', signOptions: { expiresIn: '2h' } }),
-      new ConfigService({}),
+      new ConfigService({
+        app: { jwt: { refreshSecret: 'unit-test-refresh-secret', refreshExpiresIn: 7 * 24 * 3600 } },
+      }),
       cache as any,
     );
     mediaService = new MediaService(ds.getRepository(MediaFile), auditService);

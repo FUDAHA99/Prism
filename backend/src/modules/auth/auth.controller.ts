@@ -16,6 +16,7 @@ import { ThrottlerGuard, Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
+import { LogoutDto, RefreshTokenDto } from './dto/refresh-token.dto';
 import { LoginResponse, AuthUser } from './interfaces/auth.interface';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Access } from '../../common/authz/access.decorator';
@@ -127,33 +128,40 @@ export class AuthController {
       },
     },
   })
-  @ApiResponse({ status: 401, description: 'refresh token无效或已过期' })
+  @ApiResponse({ status: 401, description: 'refresh token无效、已过期或已用过' })
   async refreshToken(
-    @Body('refreshToken') refreshToken: string,
+    @Body() dto: RefreshTokenDto,
     @Request() req: any,
   ) {
     const clientIp = this.getClientIp(req);
     const userAgent = req.headers['user-agent'];
-    
-    return this.authService.refreshToken(refreshToken, clientIp, userAgent);
+
+    return this.authService.refreshToken(dto.refreshToken, clientIp, userAgent);
   }
 
   @Post('logout')
   @Access('authenticated')
   @HttpCode(HttpStatus.OK)
   @ApiBearerAuth()
-  @ApiOperation({ summary: '用户登出' })
+  @ApiOperation({ summary: '用户登出（请求体可带 refreshToken 一并吊销）' })
   @ApiResponse({ status: 200, description: '登出成功' })
   @ApiResponse({ status: 401, description: '未授权' })
   async logout(
     @CurrentUser() user: AuthUser,
+    @Body() dto: LogoutDto,
     @Request() req: any,
   ): Promise<{ message: string }> {
     const accessToken = req.headers.authorization?.replace('Bearer ', '');
     const clientIp = this.getClientIp(req);
     const userAgent = req.headers['user-agent'];
-    
-    await this.authService.logout(user.id, accessToken, clientIp, userAgent);
+
+    await this.authService.logout(
+      user.id,
+      accessToken,
+      dto?.refreshToken,
+      clientIp,
+      userAgent,
+    );
     
     return { message: '登出成功' };
   }

@@ -40,6 +40,7 @@ import {
   PictureOutlined as PictureIcon,
   CloudDownloadOutlined,
 } from '@ant-design/icons'
+import { logout } from '../../api/auth'
 import { useAuthStore } from '../../stores/authStore'
 import { useTabsStore } from '../../stores/tabsStore'
 import TabBar from './TabBar'
@@ -195,7 +196,15 @@ export default function MainLayout() {
     navigate(key)
   }
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    // 先让后端吊销 access / refresh token，再清本地；此前只清 localStorage，token 在过期前一直有效。
+    // 必须 await：请求拦截器在发送时才读 localStorage 里的 token，先 clearAuth 就带不上了。
+    // 注销请求失败（如 token 已过期得 401）不阻塞本地退出
+    try {
+      await logout(localStorage.getItem('refresh_token'))
+    } catch {
+      // ignore
+    }
     clearAuth()
     navigate('/login')
   }
