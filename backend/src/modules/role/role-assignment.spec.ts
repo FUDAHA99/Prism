@@ -259,10 +259,12 @@ describe('角色分配：MySQL 安全 SQL、前后端路由一致、改角色立
       expect(stored.name).toBe(target().name);
     });
 
-    it('PATCH 只写 name / description：改不掉 isSystem，管理员权限不受影响', async () => {
-      await asAdmin(http().patch(`/roles/${adminRole.id}`))
+    it('PATCH 只接受 name / description：带 isSystem 整个请求 400（class DTO），管理员权限不受影响', async () => {
+      const res = await asAdmin(http().patch(`/roles/${adminRole.id}`))
         .send({ description: '超级管理员', isSystem: false })
-        .expect(200);
+        .expect(400);
+      expect(res.body.message).toBe('property isSystem should not exist');
+      await asAdmin(http().patch(`/roles/${adminRole.id}`)).send({ description: '超级管理员' }).expect(200);
       const stored = await ds.getRepository(Role).findOneByOrFail({ id: adminRole.id });
       expect(stored).toMatchObject({ name: 'admin', isSystem: true, description: '超级管理员' });
       await asAdmin(http().delete(`/roles/${adminRole.id}`)).expect(400);

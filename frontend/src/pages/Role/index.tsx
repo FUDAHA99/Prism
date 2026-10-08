@@ -283,7 +283,8 @@ export default function RolePage() {
             label="角色名称"
             rules={[{ required: true, message: '请输入角色名称' }]}
           >
-            <Input placeholder="如：editor、moderator" maxLength={50} />
+            {/* 新建 / 改名时后端要求：小写字母开头，只含小写字母、数字、_ 和 -，2–50 个字符；'user' 为保留名 */}
+            <Input placeholder="小写字母开头，可含数字、_ 和 -，如 reviewer" maxLength={50} />
           </Form.Item>
           <Form.Item name="description" label="描述">
             <Input.TextArea placeholder="角色用途说明（可选）" rows={3} maxLength={200} showCount />

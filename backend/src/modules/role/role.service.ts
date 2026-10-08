@@ -13,6 +13,14 @@ import { Cache } from 'cache-manager';
 import { Role } from './entities/role.entity';
 import { Permission } from './entities/permission.entity';
 import { ADMIN_ROLES, STAFF_ROLES } from '../../common/authz/access.decorator';
+import {
+  CreateRoleDto,
+  RESERVED_ROLE_MESSAGE,
+  RESERVED_ROLE_NAMES,
+  ROLE_NAME_MESSAGE,
+  ROLE_NAME_PATTERN,
+  UpdateRoleDto,
+} from './dto/role.dto';
 import { userCacheKey } from '../user/user-cache';
 
 /** 用户-角色关联表：User.userRoles 的 @JoinTable，复合主键 (user_id, role_id) */
@@ -31,6 +39,16 @@ export const SYSTEM_ROLE_NAMES: readonly string[] = Object.freeze([
 
 export function isSystemRole(role: Pick<Role, 'name' | 'isSystem'>): boolean {
   return !!role.isSystem || SYSTEM_ROLE_NAMES.includes(role.name);
+}
+
+/** 新建或改名时，新名字必须符合命名规则且不是保留名（见 dto/role.dto.ts） */
+function assertAssignableRoleName(name: string): void {
+  if (!ROLE_NAME_PATTERN.test(name)) {
+    throw new BadRequestException(ROLE_NAME_MESSAGE);
+  }
+  if (RESERVED_ROLE_NAMES.includes(name)) {
+    throw new BadRequestException(RESERVED_ROLE_MESSAGE);
+  }
 }
 
 function uniqueIds(ids: string[] | undefined): string[] {
@@ -65,23 +83,23 @@ export class RoleService {
     return role;
   }
 
-  async create(name: string, description?: string): Promise<Role> {
+  /** 逐字段写库：isSystem 只由 seed 设置，接口建的角色一律不是系统角色 */
+  async create(dto: CreateRoleDto): Promise<Role> {
+    const name = dto.name;
+    assertAssignableRoleName(name);
     const existing = await this.roleRepository.findOne({ where: { name } });
     if (existing) {
       throw new ConflictException(`角色名称已存在: ${name}`);
     }
 
-    const role = this.roleRepository.create({ name, description });
+    const role = this.roleRepository.create({ name, description: dto.description ?? null });
     return this.roleRepository.save(role);
   }
 
-  async update(
-    id: string,
-    data: { name?: string; description?: string },
-  ): Promise<Role> {
+  async update(id: string, data: UpdateRoleDto): Promise<Role> {
     const role = await this.findOne(id);
 
-    // 只取 name / description：body 还不是 class DTO（1-F-2 再换），
+    // 只取 name / description（请求体已是 class DTO，这里再逐字段挑一遍）：
     // 此前整个对象原样交给 repository.update，isSystem 等任意列都能写
     const patch: Partial<Pick<Role, 'name' | 'description'>> = {};
     if (data?.name !== undefined) patch.name = data.name;
@@ -95,6 +113,8 @@ export class RoleService {
       if (typeof patch.name !== 'string' || patch.name.trim() === '') {
         throw new BadRequestException('角色名称不能为空');
       }
+      // 命名规则与保留名只管「改成什么」：名字没变时（编辑弹窗原样回传旧名）不检查，规则上线前建的角色仍能改描述
+      assertAssignableRoleName(patch.name);
       const existing = await this.roleRepository.findOne({
         where: { name: patch.name },
       });
@@ -142,11 +162,11 @@ export class RoleService {
     permissionIds: string[],
   ): Promise<Role> {
     const role = await this.findOne(roleId);
-    const permissions = await this.permissionRepository.findBy({
-      id: In(permissionIds),
-    });
+    // 去重后再比数量：重复的 ID 此前会被误报「部分权限不存在」；空数组表示清空，不必查库
+    const ids = uniqueIds(permissionIds);
+    const permissions = ids.length > 0 ? await this.permissionRepository.findBy({ id: In(ids) }) : [];
 
-    if (permissions.length !== permissionIds.length) {
+    if (permissions.length !== ids.length) {
       throw new NotFoundException('部分权限不存在');
     }
 

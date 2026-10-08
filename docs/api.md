@@ -495,15 +495,18 @@
 ### 8.2 创建角色
 `POST /roles`
 ```json
-{ "name": "editor", "description": "编辑者" }
+{ "name": "reviewer", "description": "审核员" }
 ```
+`name` 须以小写字母开头，只含小写字母、数字、`_`、`-`，2–50 个字符；`user` 是注册用户的默认角色名，不能手工创建（400）；
+重名 409。只接受 `name` / `description`，带 `isSystem` 等其他字段 400；接口建的角色都不是系统角色。
 
 ### 8.3 更新角色
 `PATCH /roles/:id`
 ```json
 { "name": "reviewer", "description": "审核员" }
 ```
-只接受 `name` / `description`。系统角色（`admin`、`editor`）不能改名（400）。
+只接受 `name` / `description`（其他字段 400）。名字没变时不检查命名规则（规则上线前建的角色仍可改描述）；
+改名时新名字须符合 8.2 的规则。系统角色（`admin`、`editor`）不能改名（400）。
 
 ### 8.4 删除角色
 `DELETE /roles/:id`
@@ -515,6 +518,7 @@
 ```json
 { "permissionIds": ["uuid1", "uuid2"] }
 ```
+整组替换角色的权限：`permissionIds` 为 0–200 个权限 ID（空数组清空），有不存在的 ID 时 404。
 
 ---
 
