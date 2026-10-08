@@ -113,7 +113,8 @@ services:
       UPLOAD_MAX_SIZE:   10485760
       UPLOAD_DEST:       ./uploads
 
-      # DOMAIN_EXTRA 为空时不加逗号；非空示例："https://www.example.com"
+      # 生产三端经 nginx 同源访问，此项只影响跨域请求；逗号分隔，空项与非法项会被忽略，
+      # 实际生效值见 backend 启动日志 "[Bootstrap] CORS 白名单: ..."
       CORS_ORIGIN:       ${DOMAIN}
 
       LOG_LEVEL:         info

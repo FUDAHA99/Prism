@@ -1,5 +1,5 @@
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe } from '@nestjs/common';
+import { Logger, ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import * as cookieParser from 'cookie-parser';
@@ -8,6 +8,7 @@ import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
+import { parseCorsOrigins } from './common/utils/cors-origins';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
@@ -15,6 +16,7 @@ async function bootstrap() {
   const configService = app.get(ConfigService);
   const port = configService.get<number>('APP_PORT', 3000);
   const nodeEnv = configService.get<string>('NODE_ENV', 'development');
+  const logger = new Logger('Bootstrap');
 
   // 信任前置的 nginx 一层代理。
   // ThrottlerBehindProxyGuard 用 req.ips[0] 作限流 key，而 Express 只有在
@@ -44,7 +46,21 @@ async function bootstrap() {
   app.use(cookieParser());
   
   // CORS配置
-  const corsOrigins = configService.get<string>('CORS_ORIGIN', '').split(',');
+  // 生产环境三端经 nginx 同源访问，CORS 只影响跨域请求（如开发时 portal:3002 → backend:3001）。
+  // 白名单为空时 fail-closed：不下发 Access-Control-Allow-Origin。
+  // origin 必须始终传数组：cors 库在 options 缺省 origin 键时默认是 '*'。
+  const corsOrigins = parseCorsOrigins(
+    configService.get<string>('CORS_ORIGIN', ''),
+    (message) => logger.warn(message),
+  );
+  if (corsOrigins.length > 0) {
+    logger.log(`CORS 白名单: ${corsOrigins.join(', ')}`);
+  } else {
+    logger.warn(
+      'CORS 白名单为空（CORS_ORIGIN 未设置或全部无效）：所有跨域请求都拿不到 ' +
+        'Access-Control-Allow-Origin；经 nginx 的同源访问不受影响。',
+    );
+  }
   app.enableCors({
     origin: corsOrigins,
     credentials: true,

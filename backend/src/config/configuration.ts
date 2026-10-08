@@ -28,11 +28,6 @@ export default registerAs('app', () => ({
     dest: process.env.UPLOAD_DEST || './uploads',
   },
   
-  // CORS配置
-  cors: {
-    origin: (process.env.CORS_ORIGIN || 'http://localhost:5173').split(','),
-  },
-  
   // 日志配置
   log: {
     level: process.env.LOG_LEVEL || 'info',

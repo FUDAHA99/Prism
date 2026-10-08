@@ -82,7 +82,7 @@ DATABASE_TYPE=sqlite
 DATABASE_NAME=cms-dev.sqlite
 
 # CORS（允许的前端域名，逗号分隔）
-CORS_ORIGINS=http://localhost:3000,http://localhost:5173
+CORS_ORIGIN=http://localhost:5173,http://localhost:3002
 
 # 文件上传
 UPLOAD_DIR=uploads
