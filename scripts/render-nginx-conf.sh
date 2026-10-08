@@ -13,7 +13,10 @@
 #
 # 用法（可在任意目录执行）：
 #   bash scripts/render-nginx-conf.sh                  生成 nginx/nginx.active.conf
-#   bash scripts/render-nginx-conf.sh --print-domain   只打印从 .env.prod 解析出的主机名
+#   bash scripts/render-nginx-conf.sh --print-domain          只打印从 .env.prod 解析出的主机名
+#   bash scripts/render-nginx-conf.sh --print-domain-url      只打印 docker compose 读到的 DOMAIN 完整取值
+#   bash scripts/render-nginx-conf.sh --print-domain-lineno   只打印生效的 DOMAIN 在 .env.prod 的第几行
+#     后两个给 setup-ssl.sh 判断 / 改写 DOMAIN 的协议用，与生成配置用的是同一套解析
 # 调用方：scripts/deploy.sh、scripts/setup-ssl.sh、CI 的 nginx job
 # 不要在服务器上手改 nginx.active.conf：每次部署都会重新生成。
 # =================================================================
@@ -24,30 +27,32 @@ ACTIVE=nginx/nginx.active.conf
 
 err() { echo "[render-nginx] $*" >&2; exit 1; }
 
-# 打印 .env.prod 里 DOMAIN 的主机名。取值规则与 docker compose 读 --env-file 一致，
+# 解析 .env.prod 里生效的 DOMAIN，取值规则与 docker compose 读 --env-file 一致，
 # 否则 compose / CORS / portal 正常而这里解析出另一个值（或报错）：
 #   - 多行 DOMAIN= 取最后一行；允许 "export " 前缀和 = 两侧空白
 #   - 加引号的值取引号内的内容
 #   - 不加引号的值：从第一个「空格 + #」起是行内注释；再去掉首尾空白（含 tab、CR）
-# 然后去掉 scheme（https:// 等）和路径，只接受主机名字符：结果会进 sed 替换串与 server_name。
-domain_host() {
+# 结果放进 DOMAIN_RAW（= 右边的原文）、DOMAIN_VALUE（compose 读到的值）、DOMAIN_LINENO（第几行）。
+parse_domain() {
   [ -f .env.prod ] || err "找不到 .env.prod"
-  local line raw="" found=false v q
+  local line n=0 v q
+  DOMAIN_RAW="" DOMAIN_LINENO=0
   while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
     line=${line%$'\r'}
     if [[ $line =~ ^[[:space:]]*(export[[:space:]]+)?DOMAIN[[:space:]]*=(.*)$ ]]; then
-      raw=${BASH_REMATCH[2]}
-      found=true
+      DOMAIN_RAW=${BASH_REMATCH[2]}
+      DOMAIN_LINENO=$n
     fi
   done < .env.prod
-  $found || err ".env.prod 中没有 DOMAIN="
+  [ "$DOMAIN_LINENO" -gt 0 ] || err ".env.prod 中没有 DOMAIN="
 
-  v=${raw#"${raw%%[![:space:]]*}"}            # 去前导空白
+  v=${DOMAIN_RAW#"${DOMAIN_RAW%%[![:space:]]*}"}   # 去前导空白
   case $v in
     \"*|\'*)
       q=${v:0:1}
       v=${v:1}
-      [[ $v == *"$q"* ]] || err ".env.prod 中 DOMAIN 的引号没有闭合：DOMAIN=$raw"
+      [[ $v == *"$q"* ]] || err ".env.prod 中 DOMAIN 的引号没有闭合：DOMAIN=$DOMAIN_RAW"
       v=${v%%"$q"*}
       ;;
     *)
@@ -55,18 +60,27 @@ domain_host() {
       v=${v%"${v##*[![:space:]]}"}              # 去尾随空白
       ;;
   esac
+  DOMAIN_VALUE=$v
+}
 
+# 打印 DOMAIN 的主机名：去掉 scheme（https:// 等）和路径，只接受主机名字符——结果会进 sed 替换串与 server_name。
+domain_host() {
+  local v
+  parse_domain
+  v=$DOMAIN_VALUE
   case $v in *://*) v=${v#*://} ;; esac
   v=${v%%/*}
   [ -n "$v" ] || err ".env.prod 中 DOMAIN 为空"
   if ! [[ $v =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
-    err ".env.prod 中 DOMAIN 解析出的主机名不合法：'$v'（原值 DOMAIN=$raw；不支持端口与 IPv6）"
+    err ".env.prod 中 DOMAIN 解析出的主机名不合法：'$v'（原值 DOMAIN=$DOMAIN_RAW；不支持端口与 IPv6）"
   fi
   printf '%s\n' "$v"
 }
 
 case "${1:-}" in
   --print-domain) domain_host; exit 0 ;;
+  --print-domain-url) parse_domain; printf '%s\n' "$DOMAIN_VALUE"; exit 0 ;;
+  --print-domain-lineno) parse_domain; printf '%s\n' "$DOMAIN_LINENO"; exit 0 ;;
   "") ;;
   *) err "未知参数：$1（用法见脚本头部注释）" ;;
 esac

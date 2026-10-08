@@ -286,7 +286,7 @@ bash scripts/setup-ssl.sh admin@example.com
 4. 将证书复制到 `nginx/ssl/`
 5. 调用 `scripts/render-nginx-conf.sh`，由 `nginx/nginx-ssl.conf` 模板生成 `nginx/nginx.active.conf`，再用 `scripts/check-nginx-conf.sh` 在一次性容器里 `nginx -t`
 6. 重建并启动 nginx
-7. 将 `.env.prod` 的 `DOMAIN` 改为 `https://`；改了则自动重建 backend / portal（portal 构建期写入 API 地址，backend 创建时注入 CORS 白名单），再重建 nginx
+7. 将 `.env.prod` 的 `DOMAIN` 改为 `https://`；改了则自动重建 backend / portal（portal 构建期写入 API 地址，backend 创建时注入 CORS 白名单），再重建 nginx。判断和改写用的是与生成 nginx 配置同一套解析（同 docker compose）：加引号、`export` 前缀、`=` 两侧空白、行内注释的写法都认，只改生效的那一行（多行时是最后一行），改写后统一成 `DOMAIN=https://...`（不带引号、`export` 和注释）。取值含空白、引号、`#`、`$` 等没法安全改写时，脚本会红字报警、给出手工修改与重建的命令，并以退出码 1 结束（HTTPS 本身已生效，不回滚）
 8. 将自动续签任务写入 crontab（每天凌晨 3:00 检查）
 
 停掉 nginx 之后（第 3～6 步）任何一步失败，脚本都会恢复原来的 `nginx/nginx.active.conf`、撤回本次复制进 `nginx/ssl/` 的证书（原件仍在 `/etc/letsencrypt`），再把 nginx 启动回来，站点保持 HTTP 可用；修好问题后重跑即可。
@@ -295,7 +295,7 @@ bash scripts/setup-ssl.sh admin@example.com
 
 - **生效配置是生成物**：nginx 容器挂载的是 `nginx/nginx.active.conf`（未跟踪，已 gitignore），由 `scripts/render-nginx-conf.sh` 生成。HTTP 模式下它是 `nginx/nginx.conf` 的副本；HTTPS 模式（判断依据：`nginx/ssl/fullchain.pem` 存在，即跑过 `setup-ssl.sh`）下由 `nginx/nginx-ssl.conf` 填入 `DOMAIN` 的主机名生成。写入是原子的，生成失败时保留上一次的文件。仓库里受跟踪的两份配置从不被改写，`git pull` 不会再因它们中止。
 - **compose 不会替你建这个文件**：`docker-compose.prod.yml` 用长语法加 `create_host_path: false` 挂载它，文件不存在时 `up` 直接报错（`bind source path does not exist`），而不是让 Docker 在宿主机上建一个同名空目录。手工 `up` 前先跑 `bash scripts/render-nginx-conf.sh`。
-- **`DOMAIN` 的解析规则与 docker compose 读 `.env.prod` 一致**：多行时取最后一行；加引号的取引号内的值；不加引号的值从第一个「空格 + `#`」起是行内注释，再去掉首尾空白（含 tab、CR）。之后去掉 `https://` 和路径，只接受主机名（不支持端口）。`bash scripts/render-nginx-conf.sh --print-domain` 打印解析结果。
+- **`DOMAIN` 的解析规则与 docker compose 读 `.env.prod` 一致**：多行时取最后一行；加引号的取引号内的值；不加引号的值从第一个「空格 + `#`」起是行内注释，再去掉首尾空白（含 tab、CR）。之后去掉 `https://` 和路径，只接受主机名（不支持端口）。`bash scripts/render-nginx-conf.sh --print-domain` 打印解析出的主机名，`--print-domain-url` 打印 compose 读到的完整取值，`--print-domain-lineno` 打印生效的是第几行。
 - **两份配置必须同步修改**：`nginx/nginx.conf` 是 HTTP 版，`nginx/nginx-ssl.conf` 是 HTTPS 模板，**只改 `nginx.conf` 的改动在 HTTPS 环境会丢失**（反之亦然）。除 HTTPS 专属部分（80→443 跳转 server、`listen 443`、`ssl_*`、HSTS）外，两份必须逐行一致：http 块之外的顶层指令、http 块里 server 之外的部分（限流 zone、upstream 等），以及主站点 server 的全部内容（server 级安全头 `add_header`、`if` 规则、全部 location）。提交前在仓库根目录跑一遍镜像校验，输出 `MIRROR_OK` 才算一致（不一致时打印 diff、退出码 1）；CI 的 `nginx` job 也会跑它：
 
   ```bash
