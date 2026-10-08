@@ -1,6 +1,7 @@
 import React from 'react'
 import { Button, Form, Input, message, Tabs } from 'antd'
 import { LockOutlined, UserOutlined } from '@ant-design/icons'
+import { useNavigate } from 'react-router-dom'
 import { changePassword } from '../../api/auth'
 import { updateUser } from '../../api/user'
 import PageHeader from '../../components/common/PageHeader'
@@ -101,6 +102,8 @@ function ProfileTab() {
 function PasswordTab() {
   const [form] = Form.useForm<PasswordFormValues>()
   const [loading, setLoading] = React.useState(false)
+  const clearAuth = useAuthStore((s) => s.clearAuth)
+  const navigate = useNavigate()
 
   const handleSubmit = async () => {
     const values = await form.validateFields()
@@ -118,16 +121,15 @@ function PasswordTab() {
         currentPassword: values.currentPassword,
         newPassword: values.newPassword,
       })
+      // 改密成功后后端已吊销本账号此前签发的全部 token（含当前这个），直接回登录页
       message.success('密码修改成功，请重新登录')
       form.resetFields()
+      clearAuth()
+      navigate('/login')
     } catch (err: unknown) {
-      const axiosErr = err as { response?: { data?: { message?: string } } }
-      const msg = axiosErr?.response?.data?.message
-      if (msg) {
-        message.error(msg)
-      } else {
-        message.error('密码修改失败，请检查当前密码是否正确')
-      }
+      // apiClient 的响应拦截器已把后端的 message 包成 Error.message（如「当前密码错误」）
+      const msg = err instanceof Error ? err.message : ''
+      message.error(msg || '密码修改失败，请检查当前密码是否正确')
     } finally {
       setLoading(false)
     }
@@ -153,11 +155,20 @@ function PasswordTab() {
         rules={[
           { required: true, message: '请输入新密码' },
           { min: 8, message: '密码长度不能少于 8 位' },
+          { pattern: /[A-Za-z]/, message: '新密码必须包含字母' },
+          { pattern: /\d/, message: '新密码必须包含数字' },
+          {
+            // 与后端一致：bcrypt 只取前 72 字节
+            validator: (_, value?: string) =>
+              !value || new TextEncoder().encode(value).length <= 72
+                ? Promise.resolve()
+                : Promise.reject(new Error('新密码过长（不能超过 72 字节）')),
+          },
         ]}
       >
         <Input.Password
           prefix={<LockOutlined />}
-          placeholder="至少 8 位"
+          placeholder="至少 8 位，包含字母和数字"
           autoComplete="new-password"
         />
       </Form.Item>

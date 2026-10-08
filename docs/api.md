@@ -114,10 +114,13 @@
 **请求体**：
 ```json
 {
-  "oldPassword": "旧密码",
+  "currentPassword": "当前密码",
   "newPassword": "新密码"
 }
 ```
+
+新密码至少 8 位、同时包含字母和数字、不超过 72 字节（bcrypt 上限）。当前密码错误返回 `400`。
+成功后本账号此前签发的全部 access / refresh token 立即作废，需要重新登录。
 
 ---
 

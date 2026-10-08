@@ -17,6 +17,7 @@ import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { LogoutDto, RefreshTokenDto } from './dto/refresh-token.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import { LoginResponse, AuthUser } from './interfaces/auth.interface';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Access } from '../../common/authz/access.decorator';
@@ -195,17 +196,15 @@ export class AuthController {
 
   @Post('change-password')
   @Access('authenticated')
+  @HttpCode(HttpStatus.OK)
   @ApiBearerAuth()
-  @ApiOperation({ summary: '修改密码' })
+  @ApiOperation({ summary: '修改密码（成功后本人已签发的全部 token 作废，需重新登录）' })
   @ApiResponse({ status: 200, description: '密码修改成功' })
-  @ApiResponse({ status: 400, description: '旧密码错误' })
+  @ApiResponse({ status: 400, description: '当前密码错误，或新密码不符合要求' })
   @ApiResponse({ status: 401, description: '未授权' })
   async changePassword(
     @CurrentUser() user: AuthUser,
-    @Body() changePasswordDto: {
-      oldPassword: string;
-      newPassword: string;
-    },
+    @Body() changePasswordDto: ChangePasswordDto,
     @Request() req: any,
   ): Promise<{ message: string }> {
     const clientIp = this.getClientIp(req);
@@ -213,7 +212,7 @@ export class AuthController {
 
     await this.authService.changePassword(
       user.id,
-      changePasswordDto.oldPassword,
+      changePasswordDto.currentPassword,
       changePasswordDto.newPassword,
       clientIp,
       userAgent,

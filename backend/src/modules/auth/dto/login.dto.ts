@@ -15,11 +15,13 @@ export class LoginDto {
     description: '用户密码',
     required: true,
     minLength: 8,
-    maxLength: 50,
+    maxLength: 128,
   })
   @IsString({ message: '密码必须是字符串' })
   @MinLength(8, { message: '密码长度不能少于8个字符' })
-  @MaxLength(50, { message: '密码长度不能超过50个字符' })
+  // 不能比改密策略更严：新密码允许到 72 字节（72 个英文字符），此前上限 50 字符会让这样的密码永远登不上。
+  // 这里只防离谱的超长输入，bcrypt 本身只比对前 72 字节
+  @MaxLength(128, { message: '密码长度不能超过128个字符' })
   password: string;
 
   @ApiProperty({

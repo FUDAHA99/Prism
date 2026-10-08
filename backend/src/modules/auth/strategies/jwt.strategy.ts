@@ -7,6 +7,7 @@ import { AuthService } from '../auth.service';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 import { accessBlacklistKey } from '../token-blacklist.util';
+import { isIssuedBeforeRevocation } from '../token-revocation';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
@@ -38,6 +39,11 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       );
       if (isBlacklisted) {
         throw new UnauthorizedException('Token已被注销');
+      }
+
+      // 改密 / 管理员重置密码之前签发的 token 一律作废
+      if (await isIssuedBeforeRevocation(this.cacheManager, payload.sub, payload.iat)) {
+        throw new UnauthorizedException('Token已失效，请重新登录');
       }
 
       // 验证用户状态

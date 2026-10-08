@@ -18,6 +18,7 @@ import { QueryUserDto } from './dto/query-user.dto';
 import { RoleService } from '../role/role.service';
 import { AuditService } from '../audit/audit.service';
 import { SafeUser, toSafeUser } from './user-fields';
+import { revokeTokensIssuedBefore } from '../auth/token-revocation';
 
 @Injectable()
 export class UserService {
@@ -170,10 +171,12 @@ export class UserService {
       .getOne();
   }
 
+  /** 改密码的唯一落库入口之一（另一处是 update 的管理员重置分支）：写完即吊销该用户之前签发的全部 token */
   async updatePassword(id: string, newPassword: string): Promise<void> {
     const passwordHash = await this.hashPassword(newPassword);
     await this.userRepository.update(id, { passwordHash });
     await this.clearUserCache(id);
+    await revokeTokensIssuedBefore(this.cacheManager, id);
   }
 
   async update(
@@ -205,6 +208,10 @@ export class UserService {
 
     await this.userRepository.update(id, updateData);
     await this.clearUserCache(id);
+    if ((updateData as any).passwordHash) {
+      // 管理员重置密码：该用户已签发的 token（可能已经泄露）一并作废
+      await revokeTokensIssuedBefore(this.cacheManager, id);
+    }
 
     await this.auditService.log({
       userId: currentUserId,

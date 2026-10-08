@@ -165,8 +165,8 @@ describe('认证核心安全行为', () => {
     await h?.app.close();
   });
 
-  async function login(who = ADMIN, extra: Record<string, unknown> = {}) {
-    const res = await h.http().post('/auth/login').send({ ...who, ...extra });
+  async function login(who: { email: string; password: string } = ADMIN, extra: Record<string, unknown> = {}) {
+    const res = await h.http().post('/auth/login').send({ email: who.email, password: who.password, ...extra });
     expect(res.status).toBe(200);
     return res.body as {
       user: { id: string; roles: string[] };
@@ -344,6 +344,130 @@ describe('认证核心安全行为', () => {
 
     it('未登录 401', async () => {
       expect((await h.http().post('/auth/logout').send({})).status).toBe(401);
+    });
+  });
+
+  describe('POST /auth/change-password', () => {
+    let seq = 0;
+    /** 每个用例用独立账号，改密不影响其他用例 */
+    async function freshUser(password = 'Start123!') {
+      seq += 1;
+      const email = `changer${seq}@cms.test`;
+      const user = await h.userService.create({ username: `changer${seq}`, email, password } as any);
+      return { id: user.id, email, password };
+    }
+    const change = (token: string | undefined, body: Record<string, unknown>) => {
+      const req = h.http().post('/auth/change-password');
+      if (token) req.set('Authorization', `Bearer ${token}`);
+      return req.send(body);
+    };
+
+    it('接受 admin 前端的字段名 currentPassword / newPassword，改完新密码可登录', async () => {
+      const u = await freshUser();
+      const { tokens } = await login(u);
+      const res = await change(tokens.accessToken, { currentPassword: u.password, newPassword: 'Changed2026' });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ message: '密码修改成功' });
+
+      expect((await h.http().post('/auth/login').send({ email: u.email, password: u.password })).status).toBe(401);
+      // 紧接着（多半与改密同一秒）用新密码登录，新 token 不能被吊销标记误伤
+      const relogin = await login({ email: u.email, password: 'Changed2026' });
+      expect((await me(relogin.tokens.accessToken)).status).toBe(200);
+      expect((await refresh(relogin.tokens.refreshToken)).status).toBe(200);
+    });
+
+    it('改密后本人此前签发的全部 access / refresh token 作废（含发起请求的这个与其他会话），别人的不受影响', async () => {
+      const u = await freshUser();
+      const sessionA = await login(u);
+      const sessionB = await login(u, { rememberMe: true });
+      const bystander = await login(OTHER);
+
+      await change(sessionA.tokens.accessToken, { currentPassword: u.password, newPassword: 'Changed2026' }).expect(200);
+
+      for (const s of [sessionA, sessionB]) {
+        expect((await me(s.tokens.accessToken)).status).toBe(401);
+        expect((await refresh(s.tokens.refreshToken)).status).toBe(401);
+      }
+      expect((await me(bystander.tokens.accessToken)).status).toBe(200);
+    });
+
+    it('当前密码错误 → 400（不是 500，也不是会让前端登出的 401），密码不变', async () => {
+      const u = await freshUser();
+      const { tokens } = await login(u);
+      const res = await change(tokens.accessToken, { currentPassword: 'Wrong1234', newPassword: 'Changed2026' });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toBe('当前密码错误');
+      expect((await me(tokens.accessToken)).status).toBe(200);
+      await login(u);
+    });
+
+    it('新旧密码相同 → 400', async () => {
+      const u = await freshUser('Same12345');
+      const { tokens } = await login(u);
+      const res = await change(tokens.accessToken, { currentPassword: 'Same12345', newPassword: 'Same12345' });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toBe('新密码不能与当前密码相同');
+    });
+
+    it.each([
+      ['旧字段名 oldPassword', { oldPassword: 'Start123!', newPassword: 'Changed2026' }],
+      ['缺少 currentPassword', { newPassword: 'Changed2026' }],
+      ['缺少 newPassword', { currentPassword: 'Start123!' }],
+      ['newPassword 为空串', { currentPassword: 'Start123!', newPassword: '' }],
+      ['短于 8 位', { currentPassword: 'Start123!', newPassword: 'Ab1' }],
+      ['没有数字', { currentPassword: 'Start123!', newPassword: 'OnlyLetters' }],
+      ['没有字母', { currentPassword: 'Start123!', newPassword: '1234567890' }],
+      ['超过 72 字节（ASCII）', { currentPassword: 'Start123!', newPassword: 'a1'.repeat(36) + 'x' }],
+      ['超过 72 字节（汉字 3 字节）', { currentPassword: 'Start123!', newPassword: '密码'.repeat(12) + 'a1' }],
+      ['newPassword 不是字符串', { currentPassword: 'Start123!', newPassword: { $gt: '' } }],
+    ])('%s → 400，密码不变', async (_name, body) => {
+      const u = await freshUser();
+      const { tokens } = await login(u);
+      expect((await change(tokens.accessToken, body)).status).toBe(400);
+      await login(u);
+    });
+
+    it('恰好 72 字节的新密码可以设置，并且能用它登录（LoginDto 上限不比改密策略更严）', async () => {
+      const u = await freshUser();
+      const { tokens } = await login(u);
+      const longPassword = 'a1'.repeat(36);
+      expect(Buffer.byteLength(longPassword)).toBe(72);
+      await change(tokens.accessToken, { currentPassword: u.password, newPassword: longPassword }).expect(200);
+      await login({ email: u.email, password: longPassword });
+    });
+
+    it('未登录 → 401', async () => {
+      expect((await change(undefined, { currentPassword: 'Start123!', newPassword: 'Changed2026' })).status).toBe(401);
+    });
+
+    it('管理员重置密码（UserService.update 的 password 分支）同样吊销该用户的 token', async () => {
+      const u = await freshUser();
+      const { tokens } = await login(u);
+      await h.userService.update(u.id, { password: 'Reset2026x' } as any, h.adminId);
+      expect((await me(tokens.accessToken)).status).toBe(401);
+      expect((await refresh(tokens.refreshToken)).status).toBe(401);
+      await login({ email: u.email, password: 'Reset2026x' });
+    });
+  });
+
+  describe('登录返回角色', () => {
+    it('登录响应与 access token 都带角色名；/auth/me 的形状不变', async () => {
+      const { user, tokens } = await login();
+      expect(user.roles).toEqual(['admin']);
+      expect(accessJwt.verify(tokens.accessToken).roles).toEqual(['admin']);
+
+      const profile = await h.http().get('/auth/me').set('Authorization', `Bearer ${tokens.accessToken}`);
+      expect(profile.status).toBe(200);
+      expect(Object.keys(profile.body).sort()).toEqual(
+        ['avatarUrl', 'email', 'id', 'isActive', 'nickname', 'permissions', 'roles', 'username'].sort(),
+      );
+      expect(profile.body.roles).toEqual(['admin']);
+    });
+
+    it('没有任何角色的用户得到空数组（不是 undefined）', async () => {
+      const { user, tokens } = await login(OTHER);
+      expect(user.roles).toEqual([]);
+      expect(accessJwt.verify(tokens.accessToken).roles).toEqual([]);
     });
   });
 });

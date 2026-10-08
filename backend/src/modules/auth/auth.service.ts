@@ -15,7 +15,11 @@ import {
   accessBlacklistKey,
   refreshBlacklistKey,
 } from './token-blacklist.util';
-import { blacklistUntilExpiry } from './token-revocation';
+import {
+  blacklistUntilExpiry,
+  isIssuedBeforeRevocation,
+  waitUntilIssuable,
+} from './token-revocation';
 import { KeyedMutex } from '../../common/utils/keyed-mutex';
 
 import { SafeUser, toSafeUser } from '../user/user-fields';
@@ -67,11 +71,18 @@ export class AuthService {
 
     await this.checkLoginAttempts(email, ip);
 
-    const user = await this.validateUser(email, password, { ip, userAgent });
-    if (!user) {
+    const validated = await this.validateUser(email, password, { ip, userAgent });
+    if (!validated) {
       await this.recordFailedLogin(email, ip);
       throw new UnauthorizedException('邮箱或密码错误');
     }
+
+    // validateUser 走带口令哈希的查询，不填充角色；登录响应与 access token 里的 roles 在这里补上
+    // （此前恒为 undefined）。鉴权本身仍以 JwtStrategy 每次从库里加载的角色为准
+    const user: SafeUser = {
+      ...validated,
+      roles: await this.roleService.getUserRoleNames(validated.id),
+    };
 
     const tokens = await this.generateTokens(user, this.refreshLifetimeSec(rememberMe));
     await this.recordSuccessfulLogin(user, ip, userAgent);
@@ -146,6 +157,9 @@ export class AuthService {
       if (await this.cacheManager.get(blacklistKey)) {
         throw new UnauthorizedException('refresh token已失效');
       }
+      if (await isIssuedBeforeRevocation(this.cacheManager, payload.sub, payload.iat)) {
+        throw new UnauthorizedException('refresh token已失效，请重新登录');
+      }
 
       const user = await this.findActiveUser(payload.sub);
       if (!user) {
@@ -198,9 +212,13 @@ export class AuthService {
     });
   }
 
+  /**
+   * 修改本人密码。当前密码错误返回 400（不是 401：admin 前端遇 401 会直接登出），
+   * 成功后 updatePassword 吊销该用户此前签发的全部 token（含发起本次请求的这个），需重新登录。
+   */
   async changePassword(
     userId: string,
-    oldPassword: string,
+    currentPassword: string,
     newPassword: string,
     ip: string,
     userAgent?: string,
@@ -210,9 +228,13 @@ export class AuthService {
       throw new UnauthorizedException('用户不存在');
     }
 
-    const isOldPasswordValid = await bcrypt.compare(oldPassword, user.passwordHash);
-    if (!isOldPasswordValid) {
-      throw new BadRequestException('旧密码错误');
+    const isCurrentPasswordValid = await bcrypt.compare(currentPassword, user.passwordHash);
+    if (!isCurrentPasswordValid) {
+      throw new BadRequestException('当前密码错误');
+    }
+
+    if (currentPassword === newPassword) {
+      throw new BadRequestException('新密码不能与当前密码相同');
     }
 
     await this.userService.updatePassword(userId, newPassword);
@@ -268,6 +290,8 @@ export class AuthService {
     user: Pick<SafeUser, 'id' | 'email' | 'username' | 'roles'>,
     refreshLifetimeSec: number,
   ): Promise<AuthTokens> {
+    await waitUntilIssuable(this.cacheManager, user.id);
+
     const payload: JwtPayload = {
       sub: user.id,
       email: user.email,
