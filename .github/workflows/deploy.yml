@@ -52,13 +52,12 @@ jobs:
           NEXT_PUBLIC_API_BASE: http://localhost
           NEXT_PUBLIC_SITE_NAME: Prism
 
-      # 单元测试（含评论公开接口 PII 回归：backend comment.service.spec.ts）
-      # 目前只对 backend 启用：frontend 的 test 脚本是 vitest，但仓库里还没有任何
-      # 测试文件，vitest 会报 "No test files found" 并以退出码 1 失败；portal 没有
-      # test 脚本（--if-present 下为空操作）。frontend 补上测试后可去掉 if。
+      # 单元测试（含评论公开接口 PII 回归：backend comment.service.spec.ts；
+      # frontend 退出登录在后台吊销 token 的回归：src/api/auth.test.ts，vitest 在 CI 下以 run 模式执行）。
+      # portal 没有 test 脚本（--if-present 下为空操作），这里直接跳过。
       # 不要加 --coverage：backend package.json 的全局 80% 覆盖率阈值会让它失败。
       - name: Test
-        if: matrix.project == 'backend'
+        if: matrix.project != 'portal'
         working-directory: ${{ matrix.project }}
         run: npm test --if-present
 

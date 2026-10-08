@@ -196,17 +196,17 @@ export default function MainLayout() {
     navigate(key)
   }
 
-  const handleLogout = async () => {
-    // 先让后端吊销 access / refresh token，再清本地；此前只清 localStorage，token 在过期前一直有效。
-    // 必须 await：请求拦截器在发送时才读 localStorage 里的 token，先 clearAuth 就带不上了。
-    // 注销请求失败（如 token 已过期得 401）不阻塞本地退出
-    try {
-      await logout(localStorage.getItem('refresh_token'))
-    } catch {
-      // ignore
-    }
+  const handleLogout = () => {
+    // 先取出两个 token，再立即清本地状态并跳转：退出不等后端（此前先 await 注销请求，后端无响应时要卡 15 秒）。
+    const accessToken = localStorage.getItem('access_token')
+    const refreshToken = localStorage.getItem('refresh_token')
     clearAuth()
     navigate('/login')
+    // 后台通知后端拉黑 access token、吊销 refresh token（否则它们在过期前一直有效）。
+    // logout 显式带 Authorization、3 秒超时；失败（如 token 已过期得 401、后端无响应）一律忽略
+    if (accessToken) {
+      logout(accessToken, refreshToken).catch(() => undefined)
+    }
   }
 
   const handleFullscreen = async () => {
