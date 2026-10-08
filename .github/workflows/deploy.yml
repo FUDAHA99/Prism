@@ -63,12 +63,48 @@ jobs:
         run: npm test --if-present
 
   # ─────────────────────────────────────────────────────────────
-  # 部署：仅在 verify 全绿、且是推送到 main 时执行
+  # nginx 配置门禁：两份配置镜像一致，且两种模式渲染出的生效配置都能通过 nginx -t
+  # 用的就是部署时跑的同一组脚本（render / check-nginx-conf / check-nginx-mirror），
+  # 配置写错在这里就红，而不是等到服务器上部署时才发现
+  # ─────────────────────────────────────────────────────────────
+  nginx:
+    name: Nginx config
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # nginx.conf 与 nginx-ssl.conf 除 HTTPS 专属指令外必须一致（含 server 级安全头与全部 location）
+      - name: 镜像校验
+        run: bash scripts/check-nginx-mirror.sh
+
+      - name: HTTP 模式：渲染 + nginx -t
+        run: |
+          bash scripts/render-nginx-conf.sh
+          cmp nginx/nginx.active.conf nginx/nginx.conf
+          bash scripts/check-nginx-conf.sh
+
+      # 临时自签证书让 render 走 HTTPS 分支，并让 nginx -t 真正加载证书与私钥
+      - name: HTTPS 模式：渲染 + nginx -t（临时自签证书）
+        run: |
+          mkdir -p nginx/ssl
+          openssl req -x509 -nodes -newkey rsa:2048 -days 1 -subj "/CN=example.test" \
+            -keyout nginx/ssl/privkey.pem -out nginx/ssl/fullchain.pem
+          printf 'DOMAIN=https://example.test\n' > .env.prod
+          test "$(bash scripts/render-nginx-conf.sh --print-domain)" = example.test
+          bash scripts/render-nginx-conf.sh
+          grep -q 'server_name example.test;' nginx/nginx.active.conf
+          if grep -q PRISM_DOMAIN nginx/nginx.active.conf; then echo "::error::生成结果里还有 PRISM_DOMAIN 占位符"; exit 1; fi
+          bash scripts/check-nginx-conf.sh
+
+  # ─────────────────────────────────────────────────────────────
+  # 部署：仅在 verify 与 nginx 全绿、且是推送到 main 时执行
   # 未配置 SSH secrets 时优雅跳过（而非红叉），避免 CI 长期挂红
   # ─────────────────────────────────────────────────────────────
   deploy:
     name: SSH Deploy
-    needs: verify
+    needs: [verify, nginx]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20

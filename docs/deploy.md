@@ -289,13 +289,13 @@ bash scripts/setup-ssl.sh admin@example.com
 - **生效配置是生成物**：nginx 容器挂载的是 `nginx/nginx.active.conf`（未跟踪，已 gitignore），由 `scripts/render-nginx-conf.sh` 生成。HTTP 模式下它是 `nginx/nginx.conf` 的副本；HTTPS 模式（判断依据：`nginx/ssl/fullchain.pem` 存在，即跑过 `setup-ssl.sh`）下由 `nginx/nginx-ssl.conf` 填入 `DOMAIN` 的主机名生成。写入是原子的，生成失败时保留上一次的文件。仓库里受跟踪的两份配置从不被改写，`git pull` 不会再因它们中止。
 - **compose 不会替你建这个文件**：`docker-compose.prod.yml` 用长语法加 `create_host_path: false` 挂载它，文件不存在时 `up` 直接报错（`bind source path does not exist`），而不是让 Docker 在宿主机上建一个同名空目录。手工 `up` 前先跑 `bash scripts/render-nginx-conf.sh`。
 - **`DOMAIN` 的解析规则与 docker compose 读 `.env.prod` 一致**：多行时取最后一行；加引号的取引号内的值；不加引号的值从第一个「空格 + `#`」起是行内注释，再去掉首尾空白（含 tab、CR）。之后去掉 `https://` 和路径，只接受主机名（不支持端口）。`bash scripts/render-nginx-conf.sh --print-domain` 打印解析结果。
-- **两份配置必须同步修改**：`nginx/nginx.conf` 是 HTTP 版，`nginx/nginx-ssl.conf` 是 HTTPS 模板，**只改 `nginx.conf` 的改动在 HTTPS 环境会丢失**。除 HSTS 与 80→443 跳转 server 外，两份的 http 块和全部 location 必须一致。提交前在仓库根目录用 bash 跑一遍镜像校验，输出 `HTTP_BLOCK_OK` 和 `LOCATIONS_OK` 才算一致：
+- **两份配置必须同步修改**：`nginx/nginx.conf` 是 HTTP 版，`nginx/nginx-ssl.conf` 是 HTTPS 模板，**只改 `nginx.conf` 的改动在 HTTPS 环境会丢失**（反之亦然）。除 HTTPS 专属部分（80→443 跳转 server、`listen 443`、`ssl_*`、HSTS）外，两份必须逐行一致：http 块之外的顶层指令、http 块里 server 之外的部分（限流 zone、upstream 等），以及主站点 server 的全部内容（server 级安全头 `add_header`、`if` 规则、全部 location）。提交前在仓库根目录跑一遍镜像校验，输出 `MIRROR_OK` 才算一致（不一致时打印 diff、退出码 1）；CI 的 `nginx` job 也会跑它：
 
   ```bash
-  norm(){ sed -e 's/[[:space:]]*#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]\+/ /g' "$1" | grep -v '^$'; }
-  diff <(norm nginx/nginx.conf | sed -n '/^http {/,/^upstream frontend/p') <(norm nginx/nginx-ssl.conf | sed -n '/^http {/,/^upstream frontend/p') && echo HTTP_BLOCK_OK
-  diff <(norm nginx/nginx.conf | sed -n '/^location \/api\//,$p') <(norm nginx/nginx-ssl.conf | sed -n '/^location \/api\//,$p') && echo LOCATIONS_OK
+  bash scripts/check-nginx-mirror.sh
   ```
+
+- **CI 的 `nginx` job**：每次 push / PR 都会跑镜像校验，并用部署时同一组脚本把 HTTP 模式、HTTPS 模式（临时自签证书 + `DOMAIN=https://example.test`）各渲染一次、跑 `scripts/check-nginx-conf.sh`。它和构建门禁 `verify` 都通过后才会执行 `deploy`，配置写错会在 CI 里变红，而不是等到服务器上部署时才发现。
 
 - **不要在服务器上手改** `nginx/` 下的任何文件：`nginx.active.conf` 每次部署都会重新生成；两份受跟踪的配置手改后，HTTP 模式会原样生效且让下次 `git pull` 可能中止。改动一律走仓库提交。
 - **部署时两道 `nginx -t`**：
@@ -329,7 +329,7 @@ bash scripts/setup-ssl.sh admin@example.com
 | `SSH_PORT` | SSH 端口，默认 22（可省略） |
 | `DEPLOY_PATH` | 项目在服务器上的绝对路径（如 `/opt/prism-cms`） |
 
-配置完成后，每次 `git push origin main` 在构建门禁通过后都会自动：
+配置完成后，每次 `git push origin main` 在构建门禁 `verify` 与 nginx 配置门禁 `nginx`（第 7 节）都通过后，会自动：
 1. SSH 登录服务器，进入 `DEPLOY_PATH`
 2. `nginx/nginx.conf` 有本地改动时（旧版 `setup-ssl.sh` 留下的）备份到 `backup/` 并还原，见第 5.1 节；pull 失败时恢复原样
 3. `git pull origin main`
