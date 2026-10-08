@@ -345,9 +345,11 @@ describe('密码哈希不出库：用户与关联查询只取安全字段', () =
       }
     });
 
-    it('仪表盘 recentUsers 不含邮箱与哈希（editor 也能看仪表盘）', async () => {
+    it('仪表盘只有计数，不含任何用户行（editor 也能看仪表盘）', async () => {
       const stats = await statsService.getDashboardStats();
-      expect(stats.recentUsers.map((u) => u.username)).toEqual(expect.arrayContaining(['admin', 'editor']));
+      expect(Object.keys(stats).sort()).toEqual(['comment', 'content', 'media', 'user']);
+      expect(stats.user.total).toBeGreaterThanOrEqual(2);
+      expect(JSON.stringify(stats)).not.toMatch(/admin|editor/);
       expectNoHash(stats);
       expectNoEmail(stats);
     });

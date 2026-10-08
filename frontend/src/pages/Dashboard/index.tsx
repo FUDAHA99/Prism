@@ -299,16 +299,23 @@ export default function Dashboard() {
               <Descriptions.Item label="操作系统">
                 <DesktopOutlined /> {sys.system.platform} ({sys.system.arch})
               </Descriptions.Item>
-              <Descriptions.Item label="主机名">{sys.system.hostname}</Descriptions.Item>
-              <Descriptions.Item label="Node 版本">
-                <Tag color="green">{sys.system.nodeVersion}</Tag>
-              </Descriptions.Item>
+              {/* 主机名、Node 版本、CPU 型号只返回给 admin：editor 看不到这几项，整行不显示 */}
+              {sys.system.hostname !== undefined ? (
+                <Descriptions.Item label="主机名">{sys.system.hostname}</Descriptions.Item>
+              ) : null}
+              {sys.system.nodeVersion !== undefined ? (
+                <Descriptions.Item label="Node 版本">
+                  <Tag color="green">{sys.system.nodeVersion}</Tag>
+                </Descriptions.Item>
+              ) : null}
               <Descriptions.Item label="CPU 核心">
                 {sys.system.cpu.cores} 核
               </Descriptions.Item>
-              <Descriptions.Item label="CPU 型号" span={2}>
-                <Text style={{ fontSize: 12 }}>{sys.system.cpu.model}</Text>
-              </Descriptions.Item>
+              {sys.system.cpu.model !== undefined ? (
+                <Descriptions.Item label="CPU 型号" span={2}>
+                  <Text style={{ fontSize: 12 }}>{sys.system.cpu.model}</Text>
+                </Descriptions.Item>
+              ) : null}
               <Descriptions.Item label="系统运行">
                 <ClockCircleOutlined /> {fmtUptime(sys.system.uptimeSec)}
               </Descriptions.Item>

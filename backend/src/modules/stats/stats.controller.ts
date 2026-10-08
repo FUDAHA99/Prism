@@ -7,6 +7,7 @@ import {
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import { StatsService } from './stats.service';
 import { Access } from '../../common/authz/access.decorator';
+import { CurrentViewer, isAdmin, Viewer } from '../../common/authz/viewer';
 
 @ApiTags('统计数据')
 @Access('staff')
@@ -24,10 +25,11 @@ export class StatsController {
     return stats;
   }
 
+  /** admin 与 editor 都能看；主机名、Node 版本、CPU 型号只返回给 admin */
   @Get('system')
-  @ApiOperation({ summary: '获取系统信息（CPU/内存/影音内容数量/7日新增）' })
+  @ApiOperation({ summary: '获取系统信息（CPU/内存/影音内容数量/7日新增；主机名、Node 版本、CPU 型号仅 admin）' })
   @HttpCode(HttpStatus.OK)
-  async getSystem() {
-    return this.statsService.getSystemInfo();
+  async getSystem(@CurrentViewer() viewer: Viewer) {
+    return this.statsService.getSystemInfo({ includeHostDetails: isAdmin(viewer) });
   }
 }

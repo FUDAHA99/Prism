@@ -203,6 +203,7 @@ export interface SiteSetting {
 }
 
 // ─── 仪表盘统计 ───────────────────────────────────────────
+/** GET /stats/dashboard：只有计数（与 backend StatsService.getDashboardStats 一致） */
 export interface DashboardStats {
   content: {
     total: number
@@ -213,29 +214,16 @@ export interface DashboardStats {
   user: {
     total: number
     active: number
-    newToday: number
   }
   comment: {
     total: number
     pending: number
     approved: number
-    spam: number
   }
   media: {
     total: number
     totalSize: number
   }
-  recentContents: Array<{
-    id: string
-    title: string
-    status: string
-    createdAt: string
-  }>
-  recentUsers: Array<{
-    id: string
-    username: string
-    createdAt: string
-  }>
 }
 
 export interface LoginResult {

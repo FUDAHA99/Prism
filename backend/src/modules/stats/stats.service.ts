@@ -30,8 +30,14 @@ export interface DashboardStats {
     pending: number;
     approved: number;
   };
-  recentContents: Partial<Content>[];
-  recentUsers: Partial<User>[];
+}
+
+/**
+ * 系统信息里的主机指纹（主机名、Node 版本、CPU 型号）：只给 admin。editor 也能看仪表盘（Access('staff')），
+ * 但这些信息只对运维有用，对外泄露则方便针对性攻击（按 Node 版本找已知漏洞、按主机名摸内网命名）。
+ */
+export interface SystemInfoOptions {
+  includeHostDetails: boolean;
 }
 
 @Injectable()
@@ -54,9 +60,9 @@ export class StatsService {
   ) {}
 
   /**
-   * 系统信息（CPU/内存/平台/Node 版本/影音内容数量 + 7 日新增）
+   * 系统信息（CPU/内存/平台/影音内容数量 + 7 日新增）；主机名、Node 版本、CPU 型号只在 includeHostDetails 时返回
    */
-  async getSystemInfo() {
+  async getSystemInfo(options: SystemInfoOptions = { includeHostDetails: false }) {
     const totalMem = os.totalmem();
     const freeMem = os.freemem();
     const usedMem = totalMem - freeMem;
@@ -111,16 +117,19 @@ export class StatsService {
       count: newContents.filter((c) => c.createdAt.toISOString().slice(0, 10) === day).length,
     }));
 
+    const hostDetails = options.includeHostDetails
+      ? { hostname: os.hostname(), nodeVersion: process.version }
+      : {};
+
     return {
       system: {
         platform: os.platform(),
         arch: os.arch(),
-        hostname: os.hostname(),
-        nodeVersion: process.version,
+        ...hostDetails,
         uptimeSec: Math.floor(os.uptime()),
         processUptimeSec: Math.floor(process.uptime()),
         cpu: {
-          model: cpus[0]?.model ?? 'unknown',
+          ...(options.includeHostDetails ? { model: cpus[0]?.model ?? 'unknown' } : {}),
           cores: cpus.length,
           loadAvg,
         },
@@ -188,22 +197,8 @@ export class StatsService {
       ? parseInt(mediaSizeResult.totalSize, 10)
       : 0;
 
-    const recentContents = await this.contentRepository
-      .createQueryBuilder('content')
-      .select(['content.id', 'content.title', 'content.status', 'content.createdAt'])
-      .where('content.deletedAt IS NULL')
-      .orderBy('content.createdAt', 'DESC')
-      .limit(5)
-      .getMany();
-
-    // 仪表盘对 editor 也开放，不带邮箱（后台没有任何地方展示这里的邮箱）
-    const recentUsers = await this.userRepository
-      .createQueryBuilder('user')
-      .select(['user.id', 'user.username', 'user.createdAt'])
-      .where('user.deletedAt IS NULL')
-      .orderBy('user.createdAt', 'DESC')
-      .limit(5)
-      .getMany();
+    // 此前还返回 recentContents（最近 5 篇内容的标题与状态，含草稿标题）与 recentUsers（最近 5 个用户名），
+    // 后台仪表盘从未渲染它们（只用下面这些计数）；仪表盘对 editor 也开放，不再查也不再返回
 
     return {
       content: {
@@ -225,8 +220,6 @@ export class StatsService {
         pending: commentPending,
         approved: commentApproved,
       },
-      recentContents,
-      recentUsers,
     };
   }
 }

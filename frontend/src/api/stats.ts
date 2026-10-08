@@ -11,11 +11,12 @@ export interface SystemInfo {
   system: {
     platform: string
     arch: string
-    hostname: string
-    nodeVersion: string
+    /** 主机名、Node 版本、CPU 型号只返回给 admin（editor 也能看首页，但拿不到这些主机指纹） */
+    hostname?: string
+    nodeVersion?: string
     uptimeSec: number
     processUptimeSec: number
-    cpu: { model: string; cores: number; loadAvg: number[] }
+    cpu: { model?: string; cores: number; loadAvg: number[] }
     memory: { total: number; used: number; free: number; percent: number }
   }
   counts: {
