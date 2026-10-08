@@ -127,7 +127,7 @@
 
 ## 二、内容模块 `/contents`
 
-🔒 写操作需要认证
+🔒 写操作需要后台角色（admin / editor）
 
 ### 2.1 获取内容列表
 `GET /contents`（可选登录：后台与门户共用）
@@ -194,7 +194,7 @@
 ---
 
 ### 2.3 创建内容
-`POST /contents`  🔒 需要认证
+`POST /contents`  🔒 后台角色（admin / editor）
 
 **请求体**：
 ```json
@@ -213,27 +213,44 @@
 }
 ```
 
+只接受上面这些字段，其余字段（`authorId`、`author`、`viewCount`、`isPublished`、`id`、时间戳等）一律 `400`。
+作者是当前登录用户；`status` 只能是 `draft`（默认）或 `published`，为 `published` 时 `isPublished` 与 `publishedAt` 一并写上（`publishedAt` 缺省为当前时间）。
+
+| 字段 | 规则 |
+|------|------|
+| `title` | 必填，非空，≤ 500 字符 |
+| `slug` | 必填，只含小写字母、数字、连字符，≤ 500；与任何内容（含已删除的）重复返回 `409` |
+| `body` / `excerpt` | `body` 必填非空；两者均 ≤ 65535 字节（TEXT 列）|
+| `featuredImageUrl` | 空串、`http(s)://` 地址或站内路径（`/uploads/...`），≤ 500 |
+| `metaTitle` / `metaDescription` | ≤ 200 / ≤ 300 字符 |
+| `categoryId` | UUID |
+| `publishedAt` | ISO 8601 |
+
+可选字段可以为 `null`（清空）。
+
 ---
 
 ### 2.4 更新内容
-`PATCH /contents/:id`  🔒 需要认证
+`PATCH /contents/:id`  🔒 后台角色（admin / editor）；editor 只能改自己创建的内容
 
-请求体同创建，所有字段可选。
+字段与校验规则同创建，全部可选；`title` / `slug` / `body` / `contentType` 不能为 `null`。
+`status` 只接受 `published`（后台「保存并发布」）：与「发布内容」接口一样同时写 `isPublished` 与 `publishedAt`
+（优先用本次提交的 `publishedAt`，其次保留原发布时间）；取消发布请用 2.7。`publishedAt` 为 `null` 视为不改。
 
 ---
 
 ### 2.5 删除内容（软删除）
-`DELETE /contents/:id`  🔒 需要认证
+`DELETE /contents/:id`  🔒 后台角色（admin / editor）；editor 只能删自己创建的内容
 
 ---
 
 ### 2.6 发布内容
-`PATCH /contents/:id/publish`  🔒 需要认证
+`POST /contents/:id/publish`  🔒 后台角色（admin / editor）
 
 ---
 
 ### 2.7 取消发布
-`PATCH /contents/:id/unpublish`  🔒 需要认证
+`POST /contents/:id/unpublish`  🔒 后台角色（admin / editor）
 
 ---
 

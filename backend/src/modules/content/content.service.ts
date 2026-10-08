@@ -5,7 +5,8 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, IsNull, SelectQueryBuilder } from 'typeorm';
+import { Repository, SelectQueryBuilder } from 'typeorm';
+import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { Content, ContentStatus, ContentType } from './entities/content.entity';
 import { AuditService } from '../audit/audit.service';
 import { changedAuditFields } from '../audit/audit-summary';
@@ -17,32 +18,40 @@ import {
   CONTENT_PUBLIC_MAX_LIMIT,
   QueryContentDto,
 } from './dto/query-content.dto';
+import { CreateContentDto } from './dto/create-content.dto';
+import { UpdateContentDto } from './dto/update-content.dto';
 
-export interface CreateContentDto {
-  title: string;
-  slug: string;
-  body: string;
-  contentType?: ContentType;
-  categoryId?: string;
-  featuredImageUrl?: string;
-  excerpt?: string;
-  metaTitle?: string;
-  metaDescription?: string;
-  status?: ContentStatus;
-  publishedAt?: string;
+/**
+ * 新建 / 编辑时从请求体里取的列 —— 只有这些。不再把 dto 整体展开进 repository.create / update：
+ * 那样请求体里的任何键（authorId、author、viewCount、isPublished、id、createdAt……）都会写进库。
+ * 作者取自登录身份；状态、isPublished、publishedAt 由服务端按状态流转决定（见 publishedState）。
+ */
+const EDITABLE_FIELDS = [
+  'title',
+  'slug',
+  'body',
+  'contentType',
+  'categoryId',
+  'featuredImageUrl',
+  'excerpt',
+  'metaTitle',
+  'metaDescription',
+] as const;
+
+type EditableField = (typeof EDITABLE_FIELDS)[number];
+
+/** 按白名单逐字段挑出请求体里提交了的列（undefined 视为没提交；null 照常写入，用于清空可空列） */
+function pickEditable(dto: Partial<Record<EditableField, unknown>>): QueryDeepPartialEntity<Content> {
+  const out: Record<string, unknown> = {};
+  for (const key of EDITABLE_FIELDS) {
+    if (dto[key] !== undefined) out[key] = dto[key];
+  }
+  return out as QueryDeepPartialEntity<Content>;
 }
 
-export interface UpdateContentDto {
-  title?: string;
-  slug?: string;
-  body?: string;
-  contentType?: ContentType;
-  categoryId?: string;
-  featuredImageUrl?: string;
-  excerpt?: string;
-  metaTitle?: string;
-  metaDescription?: string;
-  status?: ContentStatus;
+/** 「已发布」三列一起写：此前编辑页 PATCH status=published 只改 status，isPublished / publishedAt 不同步 */
+function publishedState(publishedAt: Date) {
+  return { status: ContentStatus.PUBLISHED, isPublished: true, publishedAt };
 }
 
 /** 文章作者的公开资料：不含用户 ID（此前 author.id 让匿名者拿到发文管理员的 UUID） */
@@ -129,25 +138,42 @@ export class ContentService {
     private readonly auditService: AuditService,
   ) {}
 
+  /**
+   * slug 是否已被占用 —— 包括已软删除的内容：库里的唯一索引也覆盖它们，
+   * 此前查重排除了软删除行，复用这类 slug 时查重通过、INSERT / UPDATE 撞唯一索引返回 500。
+   */
+  private async assertSlugAvailable(slug: string, exceptId?: string): Promise<void> {
+    const existing = await this.contentRepository.findOne({
+      where: { slug },
+      withDeleted: true,
+      select: { id: true },
+    });
+    if (existing && existing.id !== exceptId) {
+      throw new ConflictException(`slug已存在: ${slug}`);
+    }
+  }
+
+  /**
+   * 新建内容（仅后台角色）。作者是当前登录用户（authorId 参数来自 req.user，请求体里没有这个字段）；
+   * status 只能是 draft（默认）或 published，published 时 isPublished / publishedAt 一并写上，
+   * publishedAt 优先用编辑页「定时发布」提交的时间。
+   */
   async create(
     dto: CreateContentDto,
     authorId: string,
   ): Promise<Content> {
-    const existing = await this.contentRepository.findOne({
-      where: { slug: dto.slug, deletedAt: IsNull() },
-    });
-    if (existing) {
-      throw new ConflictException(`slug已存在: ${dto.slug}`);
-    }
+    await this.assertSlugAvailable(dto.slug);
+
+    const requestedAt = dto.publishedAt ? new Date(dto.publishedAt) : undefined;
+    const state = dto.status === ContentStatus.PUBLISHED
+      ? publishedState(requestedAt ?? new Date())
+      : { status: ContentStatus.DRAFT, isPublished: false, publishedAt: requestedAt };
 
     const content = this.contentRepository.create({
-      ...dto,
+      ...(pickEditable(dto) as Partial<Content>),
+      contentType: dto.contentType ?? ContentType.ARTICLE,
       authorId,
-      status: dto.status ?? ContentStatus.DRAFT,
-      isPublished: dto.status === ContentStatus.PUBLISHED,
-      publishedAt: dto.status === ContentStatus.PUBLISHED
-        ? (dto.publishedAt ? new Date(dto.publishedAt) : new Date())
-        : (dto.publishedAt ? new Date(dto.publishedAt) : undefined),
+      ...state,
     });
     const saved = await this.contentRepository.save(content);
 
@@ -261,15 +287,22 @@ export class ContentService {
     }
 
     if (dto.slug && dto.slug !== content.slug) {
-      const existing = await this.contentRepository.findOne({
-        where: { slug: dto.slug, deletedAt: IsNull() },
-      });
-      if (existing && existing.id !== id) {
-        throw new ConflictException(`slug已存在: ${dto.slug}`);
-      }
+      await this.assertSlugAvailable(dto.slug, id);
     }
 
-    await this.contentRepository.update(id, dto);
+    // 显式白名单：即使有调用方绕过 ValidationPipe 传进别的键，也只会写这几列
+    const patch = pickEditable(dto);
+    const requestedAt = dto.publishedAt ? new Date(dto.publishedAt) : undefined;
+    if (dto.status === ContentStatus.PUBLISHED) {
+      // 编辑页「保存并发布」：与 POST /:id/publish 同样三列一起写；已有发布时间的（重新保存已发布文章）保留原值
+      Object.assign(patch, publishedState(requestedAt ?? content.publishedAt ?? new Date()));
+    } else if (requestedAt) {
+      patch.publishedAt = requestedAt;
+    }
+
+    if (Object.keys(patch).length > 0) {
+      await this.contentRepository.update(id, patch);
+    }
 
     // 只记变更字段名：此前记录整个 dto，草稿正文全文进审计表，超过 TEXT 64KB 时还会让已提交的更新返回 500
     await this.auditService.log({
@@ -279,7 +312,7 @@ export class ContentService {
       resourceId: id,
       ipAddress: 'system',
       userAgent: 'system',
-      newValues: { changedFields: changedAuditFields(content, dto) },
+      newValues: { changedFields: changedAuditFields(content, patch) },
     });
 
     return this.findOne(id);
@@ -296,11 +329,7 @@ export class ContentService {
       throw new ForbiddenException('只有编辑或管理员可以发布内容');
     }
 
-    await this.contentRepository.update(id, {
-      status: ContentStatus.PUBLISHED,
-      isPublished: true,
-      publishedAt: new Date(),
-    });
+    await this.contentRepository.update(id, publishedState(new Date()));
 
     await this.auditService.log({
       userId: currentUserId,

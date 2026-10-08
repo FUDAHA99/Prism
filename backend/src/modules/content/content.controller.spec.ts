@@ -82,10 +82,11 @@ type Who = 'anonymous' | 'plain' | 'editor' | 'admin';
 // 只建 SQLite 表、签 token，不跑 bcrypt；CI 机器比本地慢，留足余量
 jest.setTimeout(60_000);
 
-describe('内容模块 HTTP：公开读过滤', () => {
+describe('内容模块 HTTP', () => {
   let app: NestExpressApplication;
   let ds: DataSource;
   let contents: Repository<Content>;
+  let service: ContentService;
   const jwt = new JwtService({ secret: ACCESS_SECRET });
   const ids = { plain: '', editor: '', admin: '' };
   let categoryId = '';
@@ -123,10 +124,13 @@ describe('内容模块 HTTP：公开读过滤', () => {
     });
   }
 
-  function get(path: string, who: Who): request.Test {
-    const req = http().get(path);
+  function as(req: request.Test, who: Who): request.Test {
     return who === 'anonymous' ? req : req.set('Authorization', `Bearer ${tokenFor(ids[who])}`);
   }
+
+  const get = (path: string, who: Who) => as(http().get(path), who);
+  const post = (path: string, who: Who, body: object) => as(http().post(path), who).send(body);
+  const patch = (path: string, who: Who, body: object) => as(http().patch(path), who).send(body);
 
   async function createUser(name: string, roles: Array<'editor' | 'admin'>, roleIds: Record<string, string>) {
     const user = await ds.getRepository(User).save({
@@ -189,6 +193,7 @@ describe('内容模块 HTTP：公开读过滤', () => {
 
     ds = moduleRef.get(DataSource);
     contents = ds.getRepository(Content);
+    service = moduleRef.get(ContentService);
     const roleIds = {
       admin: (await ds.getRepository(Role).save({ name: 'admin', isSystem: true })).id,
       editor: (await ds.getRepository(Role).save({ name: 'editor', isSystem: true })).id,
@@ -438,6 +443,234 @@ describe('内容模块 HTTP：公开读过滤', () => {
     it('游客 401、无角色用户 403', async () => {
       await get(`/contents/${contentIds.draft}`, 'anonymous').expect(401);
       await get(`/contents/${contentIds.draft}`, 'plain').expect(403);
+    });
+  });
+
+  /**
+   * 写接口（仅后台角色）：请求体是 class DTO，服务端逐字段挑列写库。
+   * payload 与后台编辑页 ContentForm.tsx handleSubmit 组装的一致。
+   */
+  describe('POST / PATCH /contents（批量赋值）', () => {
+    const SCHEDULED_AT = '2026-12-01T02:30:00.000Z';
+    const rowBySlug = (slug: string) => contents.findOne({ where: { slug }, withDeleted: true });
+
+    /** ContentForm.tsx handleSubmit：编辑与新建共用；undefined 字段经 JSON 序列化后不会发出去 */
+    function formPayload(values: Record<string, unknown>, publish: boolean) {
+      return JSON.parse(
+        JSON.stringify({
+          title: values.title,
+          slug: values.slug,
+          body: values.body,
+          contentType: values.contentType,
+          categoryId: values.categoryId,
+          excerpt: values.excerpt,
+          featuredImageUrl: values.featuredImageUrl,
+          metaTitle: values.metaTitle,
+          metaDescription: values.metaDescription,
+          ...(publish ? { status: 'published' } : {}),
+          ...(values.publishAt ? { publishedAt: values.publishAt } : {}),
+        }),
+      );
+    }
+
+    it('admin「立即发布」（含定时）：201，作者是当前登录者，状态三列同步', async () => {
+      const payload = formPayload(
+        {
+          title: '立即发布',
+          slug: 'write-publish-now',
+          body: '正文',
+          contentType: 'article',
+          categoryId,
+          excerpt: '摘要',
+          featuredImageUrl: '/uploads/cover.png',
+          metaTitle: 'SEO',
+          metaDescription: '描述',
+          publishAt: SCHEDULED_AT,
+        },
+        true,
+      );
+      const res = await post('/contents', 'admin', payload).expect(201);
+      expect(res.body).toMatchObject({ authorId: ids.admin, status: 'published', isPublished: true, viewCount: 0 });
+      const row = await rowBySlug('write-publish-now');
+      expect(row).toMatchObject({
+        authorId: ids.admin,
+        status: ContentStatus.PUBLISHED,
+        isPublished: true,
+        viewCount: 0,
+        categoryId,
+        featuredImageUrl: '/uploads/cover.png',
+      });
+      expect(row!.publishedAt!.toISOString()).toBe(SCHEDULED_AT);
+      // 游客立刻能在列表里看到
+      expect(slugsOf((await get('/contents?limit=50', 'anonymous').expect(200)).body.data)).toContain(
+        'write-publish-now',
+      );
+    });
+
+    it('editor「保存草稿」（只填必填项）：201，作者是 editor，草稿不对游客可见', async () => {
+      const payload = formPayload({ title: '草稿', slug: 'write-draft', body: '正文', contentType: 'page' }, false);
+      await post('/contents', 'editor', payload).expect(201);
+      expect(await rowBySlug('write-draft')).toMatchObject({
+        authorId: ids.editor,
+        status: ContentStatus.DRAFT,
+        isPublished: false,
+        publishedAt: null,
+        contentType: ContentType.PAGE,
+      });
+      await get('/contents/slug/write-draft', 'anonymous').expect(404);
+    });
+
+    it.each<[string, (plainId: string) => unknown]>([
+      ['authorId', (plainId) => plainId],
+      ['author', (plainId) => ({ id: plainId })],
+      ['viewCount', () => 99999],
+      ['isPublished', () => true],
+      ['id', () => '00000000-0000-4000-8000-000000000001'],
+      ['createdAt', () => '2020-01-01T00:00:00.000Z'],
+    ])('POST 带伪造的 %s → 400，什么都不写', async (key, forge) => {
+      const slug = `forged-create-${key.toLowerCase()}`;
+      const res = await post('/contents', 'admin', {
+        ...formPayload({ title: 't', slug, body: 'b', contentType: 'article' }, true),
+        [key]: forge(ids.plain),
+      }).expect(400);
+      expect(JSON.stringify(res.body)).toContain(key);
+      expect(await rowBySlug(slug)).toBeNull();
+    });
+
+    it('POST status=archived → 400（新建只能是草稿或立即发布）', async () => {
+      await post('/contents', 'admin', { title: 't', slug: 'create-archived', body: 'b', status: 'archived' }).expect(400);
+      expect(await rowBySlug('create-archived')).toBeNull();
+    });
+
+    it('编辑页回填后原样保存（可选列为 null）：200，作者、阅读数、状态都不变', async () => {
+      const created = await contents.save({
+        title: '待编辑',
+        slug: 'write-edit-nulls',
+        body: '旧正文',
+        status: ContentStatus.DRAFT,
+        authorId: ids.editor,
+        viewCount: 3,
+      });
+      // 与 ContentForm.tsx 一样：先 GET /contents/:id 回填表单，再按表单值组装 payload
+      const loaded = (await get(`/contents/${created.id}`, 'admin').expect(200)).body;
+      expect(loaded.categoryId).toBeNull();
+      const res = await patch(`/contents/${created.id}`, 'admin', formPayload({ ...loaded, body: '新正文' }, false)).expect(
+        200,
+      );
+      expect(res.body).toMatchObject({ body: '新正文', authorId: ids.editor, viewCount: 3, status: 'draft' });
+    });
+
+    it('编辑页「保存并发布」（带定时）：status / isPublished / publishedAt 一起写（此前只改 status）', async () => {
+      const created = await contents.save({
+        title: '要发布',
+        slug: 'write-save-and-publish',
+        body: '正文',
+        status: ContentStatus.DRAFT,
+        authorId: ids.admin,
+      });
+      const loaded = (await get(`/contents/${created.id}`, 'admin').expect(200)).body;
+      await patch(`/contents/${created.id}`, 'admin', formPayload({ ...loaded, publishAt: SCHEDULED_AT }, true)).expect(200);
+      const row = await rowBySlug('write-save-and-publish');
+      expect(row).toMatchObject({ status: ContentStatus.PUBLISHED, isPublished: true });
+      expect(row!.publishedAt!.toISOString()).toBe(SCHEDULED_AT);
+      await get('/contents/slug/write-save-and-publish', 'anonymous').expect(200);
+    });
+
+    it('重新「保存并发布」已发布的文章：保留原发布时间', async () => {
+      const original = new Date('2026-09-01T00:00:00.000Z');
+      const created = await contents.save({
+        title: '已发布',
+        slug: 'write-republish',
+        body: '正文',
+        status: ContentStatus.PUBLISHED,
+        isPublished: true,
+        publishedAt: original,
+        authorId: ids.admin,
+      });
+      await patch(`/contents/${created.id}`, 'admin', { title: '改个标题', status: 'published' }).expect(200);
+      const row = await rowBySlug('write-republish');
+      expect(row!.title).toBe('改个标题');
+      expect(row!.publishedAt!.toISOString()).toBe(original.toISOString());
+    });
+
+    it.each<[string, string, (plainId: string) => unknown]>([
+      ['authorId', 'author', (plainId) => plainId],
+      ['viewCount', 'views', () => 99999],
+      ['isPublished', 'is-published', () => true],
+      ['id', 'id', () => '00000000-0000-4000-8000-000000000002'],
+      ['status', 'status-draft', () => 'draft'],
+      ['status', 'status-archived', () => 'archived'],
+      ['title', 'title-null', () => null],
+      ['body', 'body-null', () => null],
+    ])('PATCH 带非法的 %s（%s）→ 400，内容不变', async (key, label, forge) => {
+      const created = await contents.save({
+        title: '不该被改',
+        slug: `forged-update-${label}`,
+        body: '正文',
+        status: ContentStatus.PUBLISHED,
+        isPublished: true,
+        authorId: ids.admin,
+        viewCount: 1,
+      });
+      const before = await contents.findOneByOrFail({ id: created.id });
+      const res = await patch(`/contents/${created.id}`, 'admin', { excerpt: '改了', [key]: forge(ids.plain) }).expect(
+        400,
+      );
+      expect(JSON.stringify(res.body)).toContain(key);
+      expect(await contents.findOneByOrFail({ id: created.id })).toEqual(before);
+    });
+
+    it('纵深防御：绕过 ValidationPipe 直接调用 service，多余的键也写不进库', async () => {
+      const created = await service.create(
+        {
+          title: '直调',
+          slug: 'service-direct',
+          body: 'b',
+          authorId: ids.plain,
+          author: { id: ids.plain },
+          viewCount: 42,
+          isPublished: true,
+          id: '00000000-0000-4000-8000-000000000003',
+          deletedAt: new Date(),
+        } as never,
+        ids.editor,
+      );
+      expect(created.id).not.toBe('00000000-0000-4000-8000-000000000003');
+      expect(await contents.findOneByOrFail({ id: created.id })).toMatchObject({
+        authorId: ids.editor,
+        viewCount: 0,
+        isPublished: false,
+        status: ContentStatus.DRAFT,
+        deletedAt: null,
+      });
+
+      await service.update(
+        created.id,
+        { title: '直调改', authorId: ids.plain, viewCount: 99, isPublished: true, status: 'archived' } as never,
+        ids.admin,
+        ['admin'],
+      );
+      expect(await contents.findOneByOrFail({ id: created.id })).toMatchObject({
+        title: '直调改',
+        authorId: ids.editor,
+        viewCount: 0,
+        isPublished: false,
+        status: ContentStatus.DRAFT,
+      });
+    });
+
+    it('slug 被已删除的内容占用：409 而不是撞唯一索引 500（新建与改 slug 都是）', async () => {
+      await post('/contents', 'admin', { title: 't', slug: slugs.deletedPublished, body: 'b' }).expect(409);
+      await patch(`/contents/${contentIds.archived}`, 'admin', { slug: slugs.deletedPublished }).expect(409);
+      await post('/contents', 'admin', { title: 't', slug: slugs.draft, body: 'b' }).expect(409);
+    });
+
+    it('游客 401、无角色用户 403（写接口仅后台角色）', async () => {
+      await post('/contents', 'anonymous', { title: 't', slug: 'anon-write', body: 'b' }).expect(401);
+      await post('/contents', 'plain', { title: 't', slug: 'plain-write', body: 'b' }).expect(403);
+      await patch(`/contents/${contentIds.draft}`, 'plain', { title: 'x' }).expect(403);
+      expect(await rowBySlug('anon-write')).toBeNull();
+      expect(await rowBySlug('plain-write')).toBeNull();
     });
   });
 });

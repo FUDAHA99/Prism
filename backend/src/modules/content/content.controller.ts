@@ -12,11 +12,9 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 
-import {
-  ContentService,
-  CreateContentDto,
-  UpdateContentDto,
-} from './content.service';
+import { ContentService } from './content.service';
+import { CreateContentDto } from './dto/create-content.dto';
+import { UpdateContentDto } from './dto/update-content.dto';
 import { QueryContentDto } from './dto/query-content.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthUser } from '../auth/interfaces/auth.interface';
