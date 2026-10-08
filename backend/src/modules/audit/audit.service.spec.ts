@@ -359,10 +359,11 @@ describe('AuditService 脱敏、截断与列表字段', () => {
       expect(JSON.parse(ep.newValues!)).toEqual({ changedFields: ['url'] });
       expect(ep.newValues).not.toContain('EP-SECRET');
 
-      const novelRepo = { findOne: async () => ({ id: 'n-1', title: 'n', slug: 'n', description: 'x' }), update: jest.fn() };
+      const novelRepo = { findOne: async () => ({ id: 'n-1', title: 'n', slug: 'n', intro: 'x' }), update: jest.fn() };
       const novelSvc = new NovelService(novelRepo as any, {} as any, auditService);
-      await novelSvc.update('n-1', { description: '长简介'.repeat(3000), title: 'n' } as any, adminId);
-      expect(JSON.parse((await lastRaw('NOVEL_UPDATE')).newValues!)).toEqual({ changedFields: ['description'] });
+      // chapters 不是小说的可写列（章节走专用接口），不会出现在变更字段里
+      await novelSvc.update('n-1', { intro: '长简介'.repeat(3000), title: 'n', chapters: [{}] } as any, adminId);
+      expect(JSON.parse((await lastRaw('NOVEL_UPDATE')).newValues!)).toEqual({ changedFields: ['intro'] });
 
       const comicRepo = { findOne: async () => ({ id: 'c-1', title: 'c', slug: 'c' }), update: jest.fn() };
       const comicSvc = new ComicService(comicRepo as any, {} as any, auditService);

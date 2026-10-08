@@ -127,6 +127,7 @@ describe('小说模块 HTTP', () => {
   let ds: DataSource;
   let novels: Repository<Novel>;
   let chapters: Repository<NovelChapter>;
+  let service: NovelService;
   const sql = new QueryRecorder();
   const jwt = new JwtService({ secret: ACCESS_SECRET });
   const ids = { plain: '', editor: '', admin: '' };
@@ -270,6 +271,7 @@ describe('小说模块 HTTP', () => {
     ds = moduleRef.get(DataSource);
     novels = ds.getRepository(Novel);
     chapters = ds.getRepository(NovelChapter);
+    service = moduleRef.get(NovelService);
     const roleIds = {
       admin: (await ds.getRepository(Role).save({ name: 'admin', isSystem: true })).id,
       editor: (await ds.getRepository(Role).save({ name: 'editor', isSystem: true })).id,
@@ -709,4 +711,289 @@ describe('小说模块 HTTP', () => {
       expect(text).toContain(publishedText('featured', 2));
     },
   );
+
+  /**
+   * 写接口（仅后台角色）：请求体是 class DTO，服务端逐字段挑列写库，章节的归属只取路径参数。
+   * payload 与后台 NovelForm.tsx（handleSubmit）和 NovelChapters.tsx 章节弹窗提交的一致。
+   */
+  describe('POST / PATCH /novels 及章节（批量赋值）', () => {
+    const post = (path: string, who: Who, body: object) => as(http().post(path), who).send(body);
+    const patch = (path: string, who: Who, body: object) => as(http().patch(path), who).send(body);
+    const rowBySlug = (slug: string) => novels.findOne({ where: { slug }, withDeleted: true });
+    const rowById = (id: string) => novels.findOne({ where: { id }, withDeleted: true });
+
+    /** NovelForm 的全部表单项（validateFields() 返回的键） */
+    const FORM_FIELDS = [
+      'title', 'author', 'slug', 'subType', 'serialStatus', 'intro', 'metaTitle', 'metaKeywords', 'metaDescription',
+      'coverUrl', 'score', 'isFeatured', 'isVip',
+    ] as const;
+
+    /** NovelForm.tsx handleSubmit：{ ...表单值, ...(publish ? { status: 'published' } : {}) }，undefined 经 JSON 丢掉 */
+    function formPayload(values: Record<string, unknown>, publish: boolean) {
+      const picked: Record<string, unknown> = {};
+      for (const key of FORM_FIELDS) picked[key] = values[key];
+      return JSON.parse(JSON.stringify({ ...picked, ...(publish ? { status: 'published' } : {}) }));
+    }
+
+    /** 新建页：initialValues + 填了的项 */
+    const newForm = (extra: Record<string, unknown>) => ({
+      serialStatus: 'ongoing', isFeatured: false, isVip: false, score: 0, ...extra,
+    });
+
+    /** 章节弹窗：initialValues { isVip: false, isPublished: true } + 填写的项 */
+    const chapterForm = (extra: Record<string, unknown>) => ({ isVip: false, isPublished: true, ...extra });
+
+    /** 记下这一次请求发出的 SQL */
+    async function sqlOf(run: () => Promise<unknown>): Promise<string[]> {
+      const start = sql.queries.length;
+      await run();
+      return sql.queries.slice(start);
+    }
+
+    it('admin「保存草稿」（只填必填项）：201，状态 / 计数 / 采集字段都是服务端默认值，游客看不到', async () => {
+      const res = await post('/novels', 'admin', formPayload(newForm({ title: '新书', slug: 'write-draft' }), false)).expect(201);
+      expect(res.body).toMatchObject({ slug: 'write-draft', status: 'draft' });
+      expect(await rowBySlug('write-draft')).toMatchObject({
+        status: NovelStatus.DRAFT,
+        publishedAt: null,
+        viewCount: 0,
+        favoriteCount: 0,
+        wordCount: 0,
+        chapterCount: 0,
+        collectSource: null,
+        collectExternalId: null,
+        serialStatus: 'ongoing',
+      });
+      await get('/novels/slug/write-draft', 'anonymous').expect(404);
+    });
+
+    it('editor「立即发布」（全部字段）：201，publishedAt 一并写上，游客立刻能看到', async () => {
+      const values = newForm({
+        title: '全字段',
+        slug: 'write-publish-now',
+        author: '作者乙',
+        subType: '都市',
+        serialStatus: 'finished',
+        intro: '简介',
+        metaTitle: 'SEO',
+        metaKeywords: 'a,b',
+        metaDescription: '描述',
+        coverUrl: '/uploads/cover.jpg',
+        score: 9.1,
+        isFeatured: true,
+        isVip: true,
+      });
+      await post('/novels', 'editor', formPayload(values, true)).expect(201);
+      const row = await rowBySlug('write-publish-now');
+      expect(row).toMatchObject({
+        status: NovelStatus.PUBLISHED,
+        author: '作者乙',
+        subType: '都市',
+        serialStatus: 'finished',
+        coverUrl: '/uploads/cover.jpg',
+        score: 9.1,
+        isFeatured: true,
+        isVip: true,
+        metaKeywords: 'a,b',
+      });
+      expect(row!.publishedAt).toBeInstanceOf(Date);
+      const pub = await get('/novels/slug/write-publish-now', 'anonymous').expect(200);
+      expect(pub.body.title).toBe('全字段');
+    });
+
+    it.each<[string, unknown]>([
+      ['viewCount', 999],
+      ['favoriteCount', 999],
+      ['wordCount', 1],
+      ['chapterCount', 1],
+      ['collectSource', 'forged-source'],
+      ['collectExternalId', 'forged-ext'],
+      ['deletedAt', null],
+    ])('新建 / 编辑带 %s：400，库里一列不变', async (key, value) => {
+      const slug = `forged-${key.toLowerCase()}`;
+      await post('/novels', 'admin', { ...newForm({ title: 'x', slug }), [key]: value }).expect(400);
+      expect(await rowBySlug(slug)).toBeNull();
+      const before = await rowById(novelIds.published);
+      await patch(`/novels/${novelIds.published}`, 'admin', { title: '改名', [key]: value }).expect(400);
+      expect(await rowById(novelIds.published)).toEqual(before);
+    });
+
+    it('新建带已有小说的 id：400，那本书不会被覆盖（此前 save 会变成 UPDATE）', async () => {
+      const before = await rowById(novelIds.featured);
+      await post('/novels', 'admin', { ...newForm({ title: '覆盖', slug: 'overwrite-attempt' }), id: novelIds.featured }).expect(400);
+      expect(await rowById(novelIds.featured)).toEqual(before);
+      expect(await rowBySlug('overwrite-attempt')).toBeNull();
+    });
+
+    it('新建带 chapters（cascade 关系）：400，别的书的章节不会被改挂过来', async () => {
+      const stolen = chapterIds.featured.pub1;
+      await post('/novels', 'admin', {
+        ...newForm({ title: '抢章节', slug: 'steal-chapters' }),
+        chapters: [{ id: stolen, title: 'x', content: 'x' }],
+      }).expect(400);
+      expect((await chapters.findOne({ where: { id: stolen } }))!.novelId).toBe(novelIds.featured);
+      await patch(`/novels/${novelIds.published}`, 'admin', { chapters: [{ id: stolen }] }).expect(400);
+      expect((await chapters.findOne({ where: { id: stolen } }))!.novelId).toBe(novelIds.featured);
+    });
+
+    it('直调 service 塞多余键（绕过 ValidationPipe）也写不进库', async () => {
+      const created = await service.create(
+        {
+          ...newForm({ title: '绕过管道', slug: 'bypass-pipe' }),
+          viewCount: 999,
+          collectSource: 'forged',
+          chapters: [{ id: chapterIds.featured.pub2, title: 'x', content: 'x' }],
+        } as never,
+        ids.admin,
+      );
+      expect(await rowById(created.id)).toMatchObject({ viewCount: 0, collectSource: null, chapterCount: 0 });
+      expect((await chapters.findOne({ where: { id: chapterIds.featured.pub2 } }))!.novelId).toBe(novelIds.featured);
+      await service.update(created.id, { title: '绕过管道 2', wordCount: 5, collectExternalId: 'x', id: randomUUID() } as never, ids.admin);
+      expect(await rowById(created.id)).toMatchObject({ id: created.id, title: '绕过管道 2', wordCount: 0, collectExternalId: null });
+    });
+
+    it('编辑页回填采集来的书原样保存（null、字符串评分、长简介）：200，采集字段与计数原封不动', async () => {
+      const longIntro = '采集来的长简介'.repeat(500);
+      const id = (await novels.save({
+        title: '采集书',
+        slug: 'c-abcdef12-555',
+        status: NovelStatus.PUBLISHED,
+        intro: longIntro,
+        coverUrl: 'https://img.example.com/vod/555.jpg',
+        score: 8.5,
+        viewCount: 321,
+        favoriteCount: 4,
+        wordCount: 9999,
+        chapterCount: 42,
+        collectSource: COLLECT_SOURCE_ID,
+        collectExternalId: '555',
+        publishedAt: new Date('2026-09-01T00:00:00.000Z'),
+      } as Partial<Novel>)).id;
+      const before = await rowById(id);
+      const loaded = (await get(`/novels/${id}`, 'editor').expect(200)).body;
+      // MySQL 把 DECIMAL 读成字符串，编辑页回填后原样提交
+      await patch(`/novels/${id}`, 'editor', formPayload({ ...loaded, score: String(loaded.score) }, false)).expect(200);
+      const after = await rowById(id);
+      expect({ ...after, updatedAt: undefined }).toEqual({ ...before, updatedAt: undefined });
+      // 「保存并发布」已发布的书：保留原发布时间
+      await patch(`/novels/${id}`, 'editor', formPayload({ ...loaded, score: String(loaded.score) }, true)).expect(200);
+      expect((await rowById(id))!.publishedAt).toEqual(new Date('2026-09-01T00:00:00.000Z'));
+    });
+
+    it('编辑页「保存并发布」草稿：status 与 publishedAt 一起写上（此前只改 status）', async () => {
+      const created = (await post('/novels', 'admin', formPayload(newForm({ title: '待发', slug: 'publish-via-patch' }), false)).expect(201)).body;
+      expect(created.publishedAt).toBeNull();
+      await patch(`/novels/${created.id}`, 'admin', formPayload({ ...created, title: '待发 2' }, true)).expect(200);
+      const row = await rowById(created.id);
+      expect(row).toMatchObject({ status: NovelStatus.PUBLISHED, title: '待发 2' });
+      expect(row!.publishedAt).toBeInstanceOf(Date);
+      await get('/novels/slug/publish-via-patch', 'anonymous').expect(200);
+    });
+
+    it.each(['draft', 'archived'])('PATCH status=%s：400（取消发布走专用接口）', async (status) => {
+      await patch(`/novels/${novelIds.published}`, 'admin', { status }).expect(400);
+      expect((await rowById(novelIds.published))!.status).toBe(NovelStatus.PUBLISHED);
+    });
+
+    it('空 PATCH：200，不发 UPDATE（不白白刷新 updatedAt）', async () => {
+      const queries = await sqlOf(() => patch(`/novels/${novelIds.archived}`, 'admin', {}).expect(200));
+      expect(queries.filter((q) => /^UPDATE "novels"/.test(q))).toEqual([]);
+    });
+
+    it('slug 与已软删除的小说重复：409（此前查重放过、撞唯一索引 500）', async () => {
+      const res = await post('/novels', 'admin', newForm({ title: 'x', slug: slugs.deletedPublished })).expect(409);
+      expect(res.body.message).toBe(`slug已存在: ${slugs.deletedPublished}`);
+      await patch(`/novels/${novelIds.archived}`, 'admin', { slug: slugs.deletedPublished }).expect(409);
+      await patch(`/novels/${novelIds.archived}`, 'admin', { slug: slugs.published }).expect(409);
+      // 保留自己的 slug 不算重复
+      await patch(`/novels/${novelIds.archived}`, 'admin', { slug: slugs.archived }).expect(200);
+    });
+
+    it('游客 401、无角色用户 403', async () => {
+      const body = newForm({ title: 'x', slug: 'who-can-write' });
+      await post('/novels', 'anonymous', body).expect(401);
+      await post('/novels', 'plain', body).expect(403);
+      await patch(`/novels/${novelIds.published}`, 'anonymous', { title: 'x' }).expect(401);
+      await patch(`/novels/${novelIds.published}`, 'plain', { title: 'x' }).expect(403);
+      await post(`/novels/${novelIds.published}/chapters`, 'plain', chapterForm({ title: 'x', content: 'x' })).expect(403);
+      await patch(`/novels/chapters/${chapterIds.published.pub1}`, 'plain', { title: 'x' }).expect(403);
+    });
+
+    describe('章节弹窗', () => {
+      let novelId = '';
+      beforeAll(async () => {
+        novelId = (await post('/novels', 'admin', formPayload(newForm({ title: '章节书', slug: 'chapter-book' }), true))).body.id;
+      });
+
+      it('新建章节：序号留空按 1、字数按正文算，书的章节数与字数随之累加；未发布章节游客看不到', async () => {
+        const res = await post(`/novels/${novelId}/chapters`, 'editor', chapterForm({ title: '第一章', content: '一二三四五' })).expect(201);
+        expect(res.body).toMatchObject({ novelId, chapterNumber: 1, wordCount: 5, isPublished: true, viewCount: 0 });
+        const cleared = await post(`/novels/${novelId}/chapters`, 'editor', chapterForm({ chapterNumber: null, title: '序章', content: '' })).expect(201);
+        expect(cleared.body.chapterNumber).toBe(1);
+        const hidden = await post(`/novels/${novelId}/chapters`, 'admin', chapterForm({ chapterNumber: 2, title: '第二章', content: '机密的第二章', isPublished: false, isVip: true })).expect(201);
+        expect(await rowById(novelId)).toMatchObject({ chapterCount: 3, wordCount: 5 + '机密的第二章'.length });
+        await get(`/novels/chapters/${hidden.body.id}`, 'anonymous').expect(404);
+        const list = await get(`/novels/${novelId}/chapters`, 'anonymous').expect(200);
+        expect(list.body.data.map((c: NovelChapter) => c.title).sort()).toEqual(['序章', '第一章']);
+      });
+
+      it.each<[string, unknown]>([
+        ['novelId', randomUUID()],
+        ['id', randomUUID()],
+        ['wordCount', 1],
+        ['viewCount', 999],
+        ['collectExternalId', 'x'],
+      ])('新建章节带 %s：400，什么都没写', async (key, value) => {
+        const before = await chapters.count();
+        await post(`/novels/${novelId}/chapters`, 'admin', chapterForm({ title: 'x', content: 'x', [key]: value })).expect(400);
+        expect(await chapters.count()).toBe(before);
+      });
+
+      it('编辑章节（回填后保存）：只改提交的列，字数重算并把差值同步到书的总字数', async () => {
+        const ch = (await post(`/novels/${novelId}/chapters`, 'admin', chapterForm({ chapterNumber: 3, title: '第三章', content: '1234567890' })).expect(201)).body;
+        const novelBefore = (await rowById(novelId))!.wordCount;
+        const full = (await get(`/novels/chapters/${ch.id}`, 'admin').expect(200)).body;
+        const res = await patch(`/novels/chapters/${ch.id}`, 'admin', {
+          chapterNumber: full.chapterNumber,
+          title: '第三章（修订）',
+          content: '123',
+          isVip: full.isVip,
+          isPublished: false,
+        }).expect(200);
+        expect(res.body).toMatchObject({ id: ch.id, novelId, title: '第三章（修订）', content: '123', wordCount: 3, isPublished: false });
+        expect((await rowById(novelId))!.wordCount).toBe(novelBefore - 7);
+      });
+
+      it('PATCH 章节带 novelId：400，章节仍在原书下、两边计数不变（此前能把章节挪到别的书）', async () => {
+        const target = chapterIds.published.pub1;
+        const fromBefore = await rowById(novelIds.published);
+        const toBefore = await rowById(novelId);
+        await patch(`/novels/chapters/${target}`, 'admin', { title: '挪走', novelId }).expect(400);
+        await patch(`/novels/chapters/${target}`, 'admin', { viewCount: 0, wordCount: 1 }).expect(400);
+        const row = await chapters.findOne({ where: { id: target } });
+        expect(row).toMatchObject({ novelId: novelIds.published, title: '第1章 published' });
+        expect(await rowById(novelIds.published)).toEqual(fromBefore);
+        expect(await rowById(novelId)).toEqual(toBefore);
+      });
+
+      it('直调 service 带 novelId / viewCount（绕过 ValidationPipe）也挪不动章节', async () => {
+        const target = chapterIds.featured.pub1;
+        await service.updateChapter(target, { title: '第1章 featured', novelId, viewCount: 999, id: randomUUID() } as never, ids.admin);
+        expect(await chapters.findOne({ where: { id: target } })).toMatchObject({ novelId: novelIds.featured, viewCount: expect.any(Number) });
+        expect((await chapters.findOne({ where: { id: target } }))!.viewCount).not.toBe(999);
+        const added = await service.addChapter(novelId, { title: 'x', content: 'x', novelId: novelIds.featured, viewCount: 5 } as never, ids.admin);
+        expect(await chapters.findOne({ where: { id: added.id } })).toMatchObject({ novelId, viewCount: 0 });
+      });
+
+      it('编辑章节时清空序号：400（中文原因），而不是写库 500', async () => {
+        const res = await patch(`/novels/chapters/${chapterIds.published.pub2}`, 'admin', { chapterNumber: null }).expect(400);
+        expect(JSON.stringify(res.body)).toContain('章节序号');
+      });
+
+      it('空 PATCH 章节：200，不发 UPDATE', async () => {
+        const queries = await sqlOf(() => patch(`/novels/chapters/${chapterIds.archived.pub1}`, 'admin', {}).expect(200));
+        expect(queries.filter((q) => /^UPDATE "novel_chapters"/.test(q))).toEqual([]);
+      });
+    });
+  });
 });

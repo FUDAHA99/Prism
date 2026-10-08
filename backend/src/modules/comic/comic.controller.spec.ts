@@ -127,6 +127,7 @@ describe('漫画模块 HTTP', () => {
   let ds: DataSource;
   let comics: Repository<Comic>;
   let chapters: Repository<ComicChapter>;
+  let service: ComicService;
   const sql = new QueryRecorder();
   const jwt = new JwtService({ secret: ACCESS_SECRET });
   const ids = { plain: '', editor: '', admin: '' };
@@ -261,6 +262,7 @@ describe('漫画模块 HTTP', () => {
     ds = moduleRef.get(DataSource);
     comics = ds.getRepository(Comic);
     chapters = ds.getRepository(ComicChapter);
+    service = moduleRef.get(ComicService);
     const roleIds = {
       admin: (await ds.getRepository(Role).save({ name: 'admin', isSystem: true })).id,
       editor: (await ds.getRepository(Role).save({ name: 'editor', isSystem: true })).id,
@@ -665,5 +667,229 @@ describe('漫画模块 HTTP', () => {
     expect(leaked).toEqual([]);
     // 已发布漫画的已发布章节照常能读到（门户阅读页）
     expect(text).toContain(pagesOf('featured', 2)[0]);
+  });
+
+  /**
+   * 写接口（仅后台角色）：请求体是 class DTO，服务端逐字段挑列写库，章节的归属只取路径参数。
+   * payload 与后台 ComicForm.tsx（handleSubmit）和 ComicChapters.tsx 章节弹窗提交的一致。
+   */
+  describe('POST / PATCH /comics 及章节（批量赋值）', () => {
+    const post = (path: string, who: Who, body: object) => as(http().post(path), who).send(body);
+    const patch = (path: string, who: Who, body: object) => as(http().patch(path), who).send(body);
+    const rowBySlug = (slug: string) => comics.findOne({ where: { slug }, withDeleted: true });
+    const rowById = (id: string) => comics.findOne({ where: { id }, withDeleted: true });
+
+    /** ComicForm 的全部表单项（validateFields() 返回的键） */
+    const FORM_FIELDS = [
+      'title', 'author', 'slug', 'subType', 'serialStatus', 'intro', 'metaTitle', 'metaKeywords', 'metaDescription',
+      'coverUrl', 'score', 'isFeatured', 'isVip',
+    ] as const;
+
+    /** ComicForm.tsx handleSubmit：{ ...表单值, ...(publish ? { status: 'published' } : {}) }，undefined 经 JSON 丢掉 */
+    function formPayload(values: Record<string, unknown>, publish: boolean) {
+      const picked: Record<string, unknown> = {};
+      for (const key of FORM_FIELDS) picked[key] = values[key];
+      return JSON.parse(JSON.stringify({ ...picked, ...(publish ? { status: 'published' } : {}) }));
+    }
+
+    const newForm = (extra: Record<string, unknown>) => ({
+      serialStatus: 'ongoing', isFeatured: false, isVip: false, score: 0, ...extra,
+    });
+
+    /** ComicChapterModal：onSubmit({ ...form.validateFields(), pageUrls: pages })，initialValues { isVip: false, isPublished: true } */
+    const chapterForm = (extra: Record<string, unknown>) => ({ isVip: false, isPublished: true, pageUrls: [], ...extra });
+
+    async function sqlOf(run: () => Promise<unknown>): Promise<string[]> {
+      const start = sql.queries.length;
+      await run();
+      return sql.queries.slice(start);
+    }
+
+    it('admin「保存草稿」：201，状态 / 计数 / 采集字段都是服务端默认值，游客看不到', async () => {
+      const res = await post('/comics', 'admin', formPayload(newForm({ title: '新漫画', slug: 'write-draft' }), false)).expect(201);
+      expect(res.body).toMatchObject({ slug: 'write-draft', status: 'draft' });
+      expect(await rowBySlug('write-draft')).toMatchObject({
+        status: ComicStatus.DRAFT,
+        publishedAt: null,
+        viewCount: 0,
+        favoriteCount: 0,
+        chapterCount: 0,
+        collectSource: null,
+        collectExternalId: null,
+      });
+      await get('/comics/slug/write-draft', 'anonymous').expect(404);
+    });
+
+    it('editor「立即发布」（全部字段）：201，publishedAt 一并写上，游客立刻能看到', async () => {
+      await post('/comics', 'editor', formPayload(newForm({
+        title: '全字段',
+        slug: 'write-publish-now',
+        author: '作者乙',
+        subType: '少年',
+        serialStatus: 'paused',
+        intro: '简介',
+        coverUrl: 'https://img.example.com/c.jpg',
+        score: 9.4,
+        isFeatured: true,
+        isVip: true,
+      }), true)).expect(201);
+      const row = await rowBySlug('write-publish-now');
+      expect(row).toMatchObject({ status: ComicStatus.PUBLISHED, serialStatus: 'paused', score: 9.4, isFeatured: true });
+      expect(row!.publishedAt).toBeInstanceOf(Date);
+      await get('/comics/slug/write-publish-now', 'anonymous').expect(200);
+    });
+
+    it.each<[string, unknown]>([
+      ['id', randomUUID()],
+      ['viewCount', 999],
+      ['favoriteCount', 999],
+      ['chapterCount', 1],
+      ['collectSource', 'forged-source'],
+      ['collectExternalId', 'forged-ext'],
+      ['deletedAt', null],
+      ['chapters', [{ title: 'x' }]],
+    ])('新建 / 编辑带 %s：400，库里一列不变', async (key, value) => {
+      const slug = `forged-${key.toLowerCase()}`;
+      await post('/comics', 'admin', { ...newForm({ title: 'x', slug }), [key]: value }).expect(400);
+      expect(await rowBySlug(slug)).toBeNull();
+      const before = await rowById(comicIds.published);
+      await patch(`/comics/${comicIds.published}`, 'admin', { title: '改名', [key]: value }).expect(400);
+      expect(await rowById(comicIds.published)).toEqual(before);
+    });
+
+    it('直调 service 塞多余键（绕过 ValidationPipe）也写不进库', async () => {
+      const created = await service.create(
+        { ...newForm({ title: '绕过管道', slug: 'bypass-pipe' }), id: comicIds.featured, viewCount: 999, collectSource: 'x' } as never,
+        ids.admin,
+      );
+      expect(created.id).not.toBe(comicIds.featured);
+      expect(await rowById(created.id)).toMatchObject({ viewCount: 0, collectSource: null });
+      expect((await rowById(comicIds.featured))!.title).toBe(`漫画 ${slugs.featured}`);
+      await service.update(created.id, { title: '绕过管道 2', chapterCount: 7, deletedAt: new Date() } as never, ids.admin);
+      expect(await rowById(created.id)).toMatchObject({ title: '绕过管道 2', chapterCount: 0, deletedAt: null });
+    });
+
+    it('编辑页回填采集来的漫画原样保存：200，采集字段与计数原封不动；保存并发布保留原发布时间', async () => {
+      const id = (await comics.save({
+        title: '采集漫画',
+        slug: 'c-abcdef12-666',
+        status: ComicStatus.PUBLISHED,
+        intro: '采集来的长简介'.repeat(500),
+        score: 7.5,
+        viewCount: 321,
+        chapterCount: 12,
+        collectSource: COLLECT_SOURCE_ID,
+        collectExternalId: '666',
+        publishedAt: new Date('2026-09-01T00:00:00.000Z'),
+      } as Partial<Comic>)).id;
+      const before = await rowById(id);
+      const loaded = (await get(`/comics/${id}`, 'admin').expect(200)).body;
+      await patch(`/comics/${id}`, 'admin', formPayload({ ...loaded, score: String(loaded.score) }, false)).expect(200);
+      expect({ ...(await rowById(id)), updatedAt: undefined }).toEqual({ ...before, updatedAt: undefined });
+      await patch(`/comics/${id}`, 'admin', formPayload({ ...loaded, score: String(loaded.score) }, true)).expect(200);
+      expect((await rowById(id))!.publishedAt).toEqual(new Date('2026-09-01T00:00:00.000Z'));
+    });
+
+    it('PATCH status=draft：400；空 PATCH 不发 UPDATE', async () => {
+      await patch(`/comics/${comicIds.published}`, 'admin', { status: 'draft' }).expect(400);
+      const queries = await sqlOf(() => patch(`/comics/${comicIds.archived}`, 'admin', {}).expect(200));
+      expect(queries.filter((q) => /^UPDATE "comics"/.test(q))).toEqual([]);
+    });
+
+    it('slug 与已软删除的漫画重复：409', async () => {
+      await post('/comics', 'admin', newForm({ title: 'x', slug: slugs.deletedPublished })).expect(409);
+      await patch(`/comics/${comicIds.archived}`, 'admin', { slug: slugs.deletedPublished }).expect(409);
+    });
+
+    it('游客 401、无角色用户 403', async () => {
+      await post('/comics', 'anonymous', newForm({ title: 'x', slug: 'who' })).expect(401);
+      await post('/comics', 'plain', newForm({ title: 'x', slug: 'who' })).expect(403);
+      await post(`/comics/${comicIds.published}/chapters`, 'plain', chapterForm({ title: 'x' })).expect(403);
+      await patch(`/comics/chapters/${chapterIds.published.pub1}`, 'anonymous', { title: 'x' }).expect(401);
+    });
+
+    describe('章节弹窗', () => {
+      let comicId = '';
+      const pages = ['/uploads/new-p1.jpg', '/uploads/new-p2.jpg', 'https://cdn.example.com/new-p3.webp'];
+      beforeAll(async () => {
+        comicId = (await post('/comics', 'admin', formPayload(newForm({ title: '章节漫画', slug: 'chapter-comic' }), true))).body.id;
+      });
+
+      it('新建章节：页数按 pageUrls 算、序号留空按 1，漫画章节数累加；后台目录带 pageUrls，游客目录不带', async () => {
+        const res = await post(`/comics/${comicId}/chapters`, 'editor', chapterForm({ title: '第1话', pageUrls: pages })).expect(201);
+        expect(res.body).toMatchObject({ comicId, chapterNumber: 1, pageCount: 3, pageUrls: pages, isPublished: true, viewCount: 0 });
+        const empty = await post(`/comics/${comicId}/chapters`, 'editor', chapterForm({ chapterNumber: null, title: '空白话' })).expect(201);
+        expect(empty.body).toMatchObject({ chapterNumber: 1, pageCount: 0 });
+        const hidden = await post(`/comics/${comicId}/chapters`, 'admin', chapterForm({ chapterNumber: 2, title: '未发布', pageUrls: ['/uploads/secret.jpg'], isPublished: false })).expect(201);
+        expect((await rowById(comicId))!.chapterCount).toBe(3);
+        const staffList = await get(`/comics/${comicId}/chapters?page=1&limit=20`, 'admin').expect(200);
+        expect(staffList.body.data.find((c: ComicChapter) => c.id === hidden.body.id).pageUrls).toEqual(['/uploads/secret.jpg']);
+        const anonList = await get(`/comics/${comicId}/chapters`, 'anonymous').expect(200);
+        expect(anonList.body.meta.total).toBe(2);
+        expect(JSON.stringify(anonList.body)).not.toContain('/uploads/');
+        await get(`/comics/chapters/${hidden.body.id}`, 'anonymous').expect(404);
+        const page1 = await get(`/comics/chapters/${res.body.id}`, 'anonymous').expect(200);
+        expect(page1.body.pageUrls).toEqual(pages);
+      });
+
+      it.each<[string, unknown]>([
+        ['comicId', randomUUID()],
+        ['id', randomUUID()],
+        ['pageCount', 99],
+        ['viewCount', 999],
+        ['collectExternalId', 'x'],
+      ])('新建章节带 %s：400，什么都没写', async (key, value) => {
+        const before = await chapters.count();
+        await post(`/comics/${comicId}/chapters`, 'admin', chapterForm({ title: 'x', [key]: value })).expect(400);
+        expect(await chapters.count()).toBe(before);
+      });
+
+      it.each<[string, unknown]>([
+        ['pageUrls', '/uploads/p.jpg'],
+        ['pageUrls', ['javascript:alert(1)']],
+        ['pageUrls', [123]],
+      ])('新建章节 %s = %p：400（此前字符串会被当成页数）', async (key, value) => {
+        await post(`/comics/${comicId}/chapters`, 'admin', chapterForm({ title: 'x', [key]: value })).expect(400);
+      });
+
+      it('编辑章节（调整页序、删一页）：页数重算，其余列不变', async () => {
+        const ch = (await post(`/comics/${comicId}/chapters`, 'admin', chapterForm({ chapterNumber: 3, title: '第3话', pageUrls: pages })).expect(201)).body;
+        const listed = (await get(`/comics/${comicId}/chapters?page=1&limit=20`, 'admin').expect(200)).body.data.find((c: ComicChapter) => c.id === ch.id);
+        const res = await patch(`/comics/chapters/${ch.id}`, 'admin', {
+          chapterNumber: listed.chapterNumber,
+          title: listed.title,
+          isVip: listed.isVip,
+          isPublished: listed.isPublished,
+          pageUrls: [pages[2], pages[0]],
+        }).expect(200);
+        expect(res.body).toMatchObject({ id: ch.id, comicId, pageUrls: [pages[2], pages[0]], pageCount: 2, title: '第3话' });
+      });
+
+      it('PATCH 章节带 comicId：400，章节仍在原漫画下（此前能把章节挪到别的漫画）', async () => {
+        const target = chapterIds.published.pub1;
+        await patch(`/comics/chapters/${target}`, 'admin', { title: '挪走', comicId }).expect(400);
+        await patch(`/comics/chapters/${target}`, 'admin', { pageCount: 99 }).expect(400);
+        expect(await chapters.findOne({ where: { id: target } })).toMatchObject({
+          comicId: comicIds.published,
+          title: '第1话 published',
+          pageCount: 3,
+        });
+      });
+
+      it('直调 service 带 comicId / pageCount（绕过 ValidationPipe）也挪不动章节', async () => {
+        const target = chapterIds.featured.pub1;
+        await service.updateChapter(target, { title: '第1话 featured', comicId, pageCount: 99 } as never, ids.admin);
+        expect(await chapters.findOne({ where: { id: target } })).toMatchObject({ comicId: comicIds.featured, pageCount: 3 });
+        const added = await service.addChapter(comicId, { title: 'x', comicId: comicIds.featured, viewCount: 5 } as never, ids.admin);
+        expect(await chapters.findOne({ where: { id: added.id } })).toMatchObject({ comicId, viewCount: 0, pageCount: 0 });
+      });
+
+      it('编辑章节时清空序号：400（中文原因）；空 PATCH 不发 UPDATE', async () => {
+        const res = await patch(`/comics/chapters/${chapterIds.published.pub2}`, 'admin', { chapterNumber: null }).expect(400);
+        expect(JSON.stringify(res.body)).toContain('章节序号');
+        const queries = await sqlOf(() => patch(`/comics/chapters/${chapterIds.archived.pub1}`, 'admin', {}).expect(200));
+        expect(queries.filter((q) => /^UPDATE "comic_chapters"/.test(q))).toEqual([]);
+      });
+    });
   });
 });

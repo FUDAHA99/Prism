@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, IsNull } from 'typeorm';
+import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { Novel, NovelStatus, NovelSerialStatus } from './entities/novel.entity';
 import { NovelChapter } from './entities/novel-chapter.entity';
 import { AuditService } from '../audit/audit.service';
@@ -20,40 +21,44 @@ import {
   QueryNovelChaptersDto,
   QueryNovelDto,
 } from './dto/query-novel.dto';
+import { CreateNovelChapterDto, CreateNovelDto } from './dto/create-novel.dto';
+import { UpdateNovelChapterDto, UpdateNovelDto } from './dto/update-novel.dto';
 
-export interface CreateNovelDto {
-  title: string;
-  slug: string;
-  author?: string;
-  categoryId?: string;
-  subType?: string;
-  coverUrl?: string;
-  intro?: string;
-  serialStatus?: NovelSerialStatus;
-  status?: NovelStatus;
-  isFeatured?: boolean;
-  isVip?: boolean;
-  score?: number;
-  metaTitle?: string;
-  metaKeywords?: string;
-  metaDescription?: string;
-  collectSource?: string;
-  collectExternalId?: string;
-  publishedAt?: string;
+/**
+ * 新建 / 编辑时从请求体里取的小说列 —— 只有这些。不再把 dto 整体展开进 repository.create / update：
+ * 那样请求体里的任何键（id、viewCount、favoriteCount、chapterCount、wordCount、collectSource、collectExternalId、
+ * deletedAt，以及 cascade 的 chapters……）都会写进库。状态与 publishedAt 由服务端按状态流转决定，
+ * 采集字段只由采集任务写，计数由章节接口维护。
+ */
+const NOVEL_EDITABLE_FIELDS = [
+  'title',
+  'slug',
+  'author',
+  'categoryId',
+  'subType',
+  'coverUrl',
+  'intro',
+  'serialStatus',
+  'isFeatured',
+  'isVip',
+  'score',
+  'metaTitle',
+  'metaKeywords',
+  'metaDescription',
+] as const;
+
+/** 章节可写的列：所属小说（novelId）只来自路径参数，请求体改不了；字数（wordCount）由服务端按正文计算 */
+const CHAPTER_EDITABLE_FIELDS = ['chapterNumber', 'title', 'content', 'isVip', 'isPublished'] as const;
+
+/** 按白名单逐字段挑出提交了的列（undefined 视为没提交；null 照常写入，用于清空可空列） */
+function pickFields<K extends string>(dto: object, fields: readonly K[]): Partial<Record<K, unknown>> {
+  const source = dto as Partial<Record<K, unknown>>;
+  const out: Partial<Record<K, unknown>> = {};
+  for (const key of fields) {
+    if (source[key] !== undefined) out[key] = source[key];
+  }
+  return out;
 }
-
-export type UpdateNovelDto = Partial<CreateNovelDto>;
-
-export interface CreateNovelChapterDto {
-  chapterNumber?: number;
-  title: string;
-  content: string;
-  isVip?: boolean;
-  isPublished?: boolean;
-  collectExternalId?: string;
-}
-
-export type UpdateNovelChapterDto = Partial<CreateNovelChapterDto>;
 
 /**
  * 游客（及非后台角色）看到的小说：显式白名单，逐字段构造 —— 实体将来新增列也不会顺带公开。
@@ -172,26 +177,36 @@ export class NovelService {
     private readonly auditService: AuditService,
   ) {}
 
-  async create(dto: CreateNovelDto, userId: string): Promise<Novel> {
-    const dup = await this.novelRepo.findOne({
-      where: { slug: dto.slug, deletedAt: IsNull() },
+  /**
+   * slug 是否已被占用 —— 包括已软删除的小说：库里的唯一索引也覆盖它们，
+   * 此前查重排除了软删除行，复用这类 slug 时查重通过、INSERT / UPDATE 撞唯一索引返回 500。
+   */
+  private async assertSlugAvailable(slug: string, exceptId?: string): Promise<void> {
+    const existing = await this.novelRepo.findOne({
+      where: { slug },
+      withDeleted: true,
+      select: { id: true },
     });
-    if (dup) throw new ConflictException(`slug已存在: ${dto.slug}`);
+    if (existing && existing.id !== exceptId) {
+      throw new ConflictException(`slug已存在: ${slug}`);
+    }
+  }
 
-    const { publishedAt, ...rest } = dto;
-    const novel = this.novelRepo.create({
-      ...rest,
-      status: dto.status ?? NovelStatus.DRAFT,
-      publishedAt:
-        dto.status === NovelStatus.PUBLISHED
-          ? publishedAt
-            ? new Date(publishedAt)
-            : new Date()
-          : publishedAt
-            ? new Date(publishedAt)
-            : undefined,
+  /**
+   * 新建小说（仅后台角色）。列按 NOVEL_EDITABLE_FIELDS 逐个挑；status 只能是 draft（默认）或 published，
+   * published 时 publishedAt 缺省为当前时间。
+   */
+  async create(dto: CreateNovelDto, userId: string): Promise<Novel> {
+    await this.assertSlugAvailable(dto.slug);
+
+    const requestedAt = dto.publishedAt ? new Date(dto.publishedAt) : undefined;
+    const published = dto.status === NovelStatus.PUBLISHED;
+    const entity = this.novelRepo.create({
+      ...(pickFields(dto, NOVEL_EDITABLE_FIELDS) as Partial<Novel>),
+      status: published ? NovelStatus.PUBLISHED : NovelStatus.DRAFT,
+      publishedAt: published ? (requestedAt ?? new Date()) : requestedAt,
     });
-    const saved = await this.novelRepo.save(novel);
+    const saved = await this.novelRepo.save(entity);
 
     await this.auditService.log({
       userId,
@@ -274,24 +289,33 @@ export class NovelService {
     return toPublicNovel(novel);
   }
 
+  /**
+   * 编辑小说（仅后台角色）。只写 NOVEL_EDITABLE_FIELDS 里提交了的列：即便有调用方绕过 ValidationPipe，
+   * 请求体里的 id / 计数 / 采集字段 / chapters 也写不进库（此前 {...rest} 原样交给 repository.update）。
+   *
+   * status=published（编辑页「保存并发布」）与 POST /:id/publish 一样把 publishedAt 一起写上：优先本次提交的时间，
+   * 其次保留原发布时间（此前只改 status，从编辑页发布的小说 publishedAt 一直是空的）。
+   */
   async update(id: string, dto: UpdateNovelDto, userId: string): Promise<Novel> {
-    const novel = await this.findOne(id);
+    const existing = await this.findOne(id);
 
-    if (dto.slug && dto.slug !== novel.slug) {
-      const dup = await this.novelRepo.findOne({
-        where: { slug: dto.slug, deletedAt: IsNull() },
-      });
-      if (dup && dup.id !== id) {
-        throw new ConflictException(`slug已存在: ${dto.slug}`);
-      }
+    if (dto.slug && dto.slug !== existing.slug) {
+      await this.assertSlugAvailable(dto.slug, id);
     }
 
-    const { publishedAt, ...rest } = dto;
-    const patch: Partial<Novel> = { ...rest };
-    if (publishedAt !== undefined) {
-      patch.publishedAt = publishedAt ? new Date(publishedAt) : undefined;
+    const patch = pickFields(dto, NOVEL_EDITABLE_FIELDS) as QueryDeepPartialEntity<Novel>;
+    const requestedAt = dto.publishedAt ? new Date(dto.publishedAt) : undefined;
+    if (dto.status === NovelStatus.PUBLISHED) {
+      patch.status = NovelStatus.PUBLISHED;
+      patch.publishedAt = requestedAt ?? existing.publishedAt ?? new Date();
+    } else if (requestedAt) {
+      patch.publishedAt = requestedAt;
     }
-    await this.novelRepo.update(id, patch);
+
+    // 什么都没提交时不发 UPDATE：否则 TypeORM 仍会把 updatedAt 刷成当前时间
+    if (Object.keys(patch).length > 0) {
+      await this.novelRepo.update(id, patch);
+    }
 
     // 只记实际写入的变更字段名，不记请求体原文
     await this.auditService.log({
@@ -301,7 +325,7 @@ export class NovelService {
       resourceId: id,
       ipAddress: 'system',
       userAgent: 'system',
-      newValues: { changedFields: changedAuditFields(novel, patch) },
+      newValues: { changedFields: changedAuditFields(existing, patch) },
     });
     return this.findOne(id);
   }
@@ -438,13 +462,17 @@ export class NovelService {
     return toPublicNovelChapter(ch, true);
   }
 
+  /**
+   * 给小说加一章（仅后台角色）：所属小说只取路径参数，列逐个挑（请求体里的 novelId / id / viewCount 等进不来，
+   * DTO 层已 400）；字数按正文计算，同时累加小说的章节数与字数。
+   */
   async addChapter(
     novelId: string,
     dto: CreateNovelChapterDto,
     userId: string,
   ): Promise<NovelChapter> {
     await this.findOne(novelId);
-    const wordCount = dto.content?.length ?? 0;
+    const wordCount = dto.content.length;
     const ch = this.chapterRepo.create({
       novelId,
       chapterNumber: dto.chapterNumber ?? 1,
@@ -453,11 +481,10 @@ export class NovelService {
       wordCount,
       isVip: dto.isVip ?? false,
       isPublished: dto.isPublished ?? true,
-      collectExternalId: dto.collectExternalId,
     });
     const saved = await this.chapterRepo.save(ch);
 
-    // Update novel aggregates
+    // 小说的聚合计数
     await this.novelRepo.increment({ id: novelId }, 'chapterCount', 1);
     if (wordCount > 0) {
       await this.novelRepo.increment({ id: novelId }, 'wordCount', wordCount);
@@ -475,26 +502,30 @@ export class NovelService {
     return saved;
   }
 
+  /**
+   * 编辑一章（仅后台角色）：只写 CHAPTER_EDITABLE_FIELDS 里提交了的列。此前 {...dto} 原样交给 repository.update，
+   * 带 novelId 就能把章节挪到另一本书下（两边的章节数、字数都不修正），带 viewCount / wordCount / id 也照写。
+   * 改了正文就重算字数，并把差值同步到小说的总字数。
+   */
   async updateChapter(
     chapterId: string,
     dto: UpdateNovelChapterDto,
     userId: string,
   ): Promise<NovelChapter> {
     const ch = await this.getChapter(chapterId);
-    const patch: Partial<NovelChapter> = { ...dto };
-    if (dto.content !== undefined) {
-      patch.wordCount = dto.content.length;
-      // Adjust novel.wordCount delta
-      const delta = dto.content.length - (ch.wordCount ?? 0);
-      if (delta !== 0) {
-        if (delta > 0) {
-          await this.novelRepo.increment({ id: ch.novelId }, 'wordCount', delta);
-        } else {
-          await this.novelRepo.decrement({ id: ch.novelId }, 'wordCount', -delta);
-        }
-      }
+    const patch = pickFields(dto, CHAPTER_EDITABLE_FIELDS) as QueryDeepPartialEntity<NovelChapter>;
+    const delta = typeof dto.content === 'string' ? dto.content.length - (ch.wordCount ?? 0) : 0;
+    if (typeof dto.content === 'string') patch.wordCount = dto.content.length;
+
+    if (Object.keys(patch).length > 0) {
+      await this.chapterRepo.update(chapterId, patch);
     }
-    await this.chapterRepo.update(chapterId, patch);
+    if (delta > 0) {
+      await this.novelRepo.increment({ id: ch.novelId }, 'wordCount', delta);
+    } else if (delta < 0) {
+      await this.novelRepo.decrement({ id: ch.novelId }, 'wordCount', -delta);
+    }
+
     await this.auditService.log({
       userId,
       action: 'NOVEL_CHAPTER_UPDATE',
@@ -502,6 +533,7 @@ export class NovelService {
       resourceId: chapterId,
       ipAddress: 'system',
       userAgent: 'system',
+      newValues: { changedFields: changedAuditFields(ch, patch) },
     });
     return this.getChapter(chapterId);
   }

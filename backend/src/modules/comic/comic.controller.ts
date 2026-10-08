@@ -17,13 +17,9 @@ import {
   ApiBearerAuth,
 } from '@nestjs/swagger';
 
-import {
-  ComicService,
-  CreateComicDto,
-  UpdateComicDto,
-  CreateComicChapterDto,
-  UpdateComicChapterDto,
-} from './comic.service';
+import { ComicService } from './comic.service';
+import { CreateComicChapterDto, CreateComicDto } from './dto/create-comic.dto';
+import { UpdateComicChapterDto, UpdateComicDto } from './dto/update-comic.dto';
 import { QueryComicChaptersDto, QueryComicDto } from './dto/query-comic.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthUser } from '../auth/interfaces/auth.interface';

@@ -17,13 +17,9 @@ import {
   ApiBearerAuth,
 } from '@nestjs/swagger';
 
-import {
-  NovelService,
-  CreateNovelDto,
-  UpdateNovelDto,
-  CreateNovelChapterDto,
-  UpdateNovelChapterDto,
-} from './novel.service';
+import { NovelService } from './novel.service';
+import { CreateNovelChapterDto, CreateNovelDto } from './dto/create-novel.dto';
+import { UpdateNovelChapterDto, UpdateNovelDto } from './dto/update-novel.dto';
 import { QueryNovelChaptersDto, QueryNovelDto } from './dto/query-novel.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthUser } from '../auth/interfaces/auth.interface';

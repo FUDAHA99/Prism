@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, IsNull } from 'typeorm';
+import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { Comic, ComicStatus, ComicSerialStatus } from './entities/comic.entity';
 import { ComicChapter } from './entities/comic-chapter.entity';
 import { AuditService } from '../audit/audit.service';
@@ -20,40 +21,44 @@ import {
   QueryComicChaptersDto,
   QueryComicDto,
 } from './dto/query-comic.dto';
+import { CreateComicChapterDto, CreateComicDto } from './dto/create-comic.dto';
+import { UpdateComicChapterDto, UpdateComicDto } from './dto/update-comic.dto';
 
-export interface CreateComicDto {
-  title: string;
-  slug: string;
-  author?: string;
-  categoryId?: string;
-  subType?: string;
-  coverUrl?: string;
-  intro?: string;
-  serialStatus?: ComicSerialStatus;
-  status?: ComicStatus;
-  isFeatured?: boolean;
-  isVip?: boolean;
-  score?: number;
-  metaTitle?: string;
-  metaKeywords?: string;
-  metaDescription?: string;
-  collectSource?: string;
-  collectExternalId?: string;
-  publishedAt?: string;
+/**
+ * 新建 / 编辑时从请求体里取的漫画列 —— 只有这些。不再把 dto 整体展开进 repository.create / update：
+ * 那样请求体里的任何键（id、viewCount、favoriteCount、chapterCount、collectSource、collectExternalId、
+ * deletedAt，以及 cascade 的 chapters……）都会写进库。状态与 publishedAt 由服务端按状态流转决定，
+ * 采集字段只由采集任务写，计数由章节接口维护。
+ */
+const COMIC_EDITABLE_FIELDS = [
+  'title',
+  'slug',
+  'author',
+  'categoryId',
+  'subType',
+  'coverUrl',
+  'intro',
+  'serialStatus',
+  'isFeatured',
+  'isVip',
+  'score',
+  'metaTitle',
+  'metaKeywords',
+  'metaDescription',
+] as const;
+
+/** 章节可写的列：所属漫画（comicId）只来自路径参数，请求体改不了；页数（pageCount）由服务端按 pageUrls 计算 */
+const CHAPTER_EDITABLE_FIELDS = ['chapterNumber', 'title', 'pageUrls', 'isVip', 'isPublished'] as const;
+
+/** 按白名单逐字段挑出提交了的列（undefined 视为没提交；null 照常写入，用于清空可空列） */
+function pickFields<K extends string>(dto: object, fields: readonly K[]): Partial<Record<K, unknown>> {
+  const source = dto as Partial<Record<K, unknown>>;
+  const out: Partial<Record<K, unknown>> = {};
+  for (const key of fields) {
+    if (source[key] !== undefined) out[key] = source[key];
+  }
+  return out;
 }
-
-export type UpdateComicDto = Partial<CreateComicDto>;
-
-export interface CreateComicChapterDto {
-  chapterNumber?: number;
-  title: string;
-  pageUrls?: string[];
-  isVip?: boolean;
-  isPublished?: boolean;
-  collectExternalId?: string;
-}
-
-export type UpdateComicChapterDto = Partial<CreateComicChapterDto>;
 
 /**
  * 游客（及非后台角色）看到的漫画：显式白名单，逐字段构造 —— 实体将来新增列也不会顺带公开。
@@ -170,26 +175,36 @@ export class ComicService {
     private readonly auditService: AuditService,
   ) {}
 
-  async create(dto: CreateComicDto, userId: string): Promise<Comic> {
-    const dup = await this.comicRepo.findOne({
-      where: { slug: dto.slug, deletedAt: IsNull() },
+  /**
+   * slug 是否已被占用 —— 包括已软删除的漫画：库里的唯一索引也覆盖它们，
+   * 此前查重排除了软删除行，复用这类 slug 时查重通过、INSERT / UPDATE 撞唯一索引返回 500。
+   */
+  private async assertSlugAvailable(slug: string, exceptId?: string): Promise<void> {
+    const existing = await this.comicRepo.findOne({
+      where: { slug },
+      withDeleted: true,
+      select: { id: true },
     });
-    if (dup) throw new ConflictException(`slug已存在: ${dto.slug}`);
+    if (existing && existing.id !== exceptId) {
+      throw new ConflictException(`slug已存在: ${slug}`);
+    }
+  }
 
-    const { publishedAt, ...rest } = dto;
-    const comic = this.comicRepo.create({
-      ...rest,
-      status: dto.status ?? ComicStatus.DRAFT,
-      publishedAt:
-        dto.status === ComicStatus.PUBLISHED
-          ? publishedAt
-            ? new Date(publishedAt)
-            : new Date()
-          : publishedAt
-            ? new Date(publishedAt)
-            : undefined,
+  /**
+   * 新建漫画（仅后台角色）。列按 COMIC_EDITABLE_FIELDS 逐个挑；status 只能是 draft（默认）或 published，
+   * published 时 publishedAt 缺省为当前时间。
+   */
+  async create(dto: CreateComicDto, userId: string): Promise<Comic> {
+    await this.assertSlugAvailable(dto.slug);
+
+    const requestedAt = dto.publishedAt ? new Date(dto.publishedAt) : undefined;
+    const published = dto.status === ComicStatus.PUBLISHED;
+    const entity = this.comicRepo.create({
+      ...(pickFields(dto, COMIC_EDITABLE_FIELDS) as Partial<Comic>),
+      status: published ? ComicStatus.PUBLISHED : ComicStatus.DRAFT,
+      publishedAt: published ? (requestedAt ?? new Date()) : requestedAt,
     });
-    const saved = await this.comicRepo.save(comic);
+    const saved = await this.comicRepo.save(entity);
 
     await this.auditService.log({
       userId,
@@ -272,24 +287,33 @@ export class ComicService {
     return toPublicComic(comic);
   }
 
+  /**
+   * 编辑漫画（仅后台角色）。只写 COMIC_EDITABLE_FIELDS 里提交了的列：即便有调用方绕过 ValidationPipe，
+   * 请求体里的 id / 计数 / 采集字段 / chapters 也写不进库（此前 {...rest} 原样交给 repository.update）。
+   *
+   * status=published（编辑页「保存并发布」）与 POST /:id/publish 一样把 publishedAt 一起写上：优先本次提交的时间，
+   * 其次保留原发布时间（此前只改 status，从编辑页发布的漫画 publishedAt 一直是空的）。
+   */
   async update(id: string, dto: UpdateComicDto, userId: string): Promise<Comic> {
-    const comic = await this.findOne(id);
+    const existing = await this.findOne(id);
 
-    if (dto.slug && dto.slug !== comic.slug) {
-      const dup = await this.comicRepo.findOne({
-        where: { slug: dto.slug, deletedAt: IsNull() },
-      });
-      if (dup && dup.id !== id) {
-        throw new ConflictException(`slug已存在: ${dto.slug}`);
-      }
+    if (dto.slug && dto.slug !== existing.slug) {
+      await this.assertSlugAvailable(dto.slug, id);
     }
 
-    const { publishedAt, ...rest } = dto;
-    const patch: Partial<Comic> = { ...rest };
-    if (publishedAt !== undefined) {
-      patch.publishedAt = publishedAt ? new Date(publishedAt) : undefined;
+    const patch = pickFields(dto, COMIC_EDITABLE_FIELDS) as QueryDeepPartialEntity<Comic>;
+    const requestedAt = dto.publishedAt ? new Date(dto.publishedAt) : undefined;
+    if (dto.status === ComicStatus.PUBLISHED) {
+      patch.status = ComicStatus.PUBLISHED;
+      patch.publishedAt = requestedAt ?? existing.publishedAt ?? new Date();
+    } else if (requestedAt) {
+      patch.publishedAt = requestedAt;
     }
-    await this.comicRepo.update(id, patch);
+
+    // 什么都没提交时不发 UPDATE：否则 TypeORM 仍会把 updatedAt 刷成当前时间
+    if (Object.keys(patch).length > 0) {
+      await this.comicRepo.update(id, patch);
+    }
 
     // 只记实际写入的变更字段名，不记请求体原文
     await this.auditService.log({
@@ -299,7 +323,7 @@ export class ComicService {
       resourceId: id,
       ipAddress: 'system',
       userAgent: 'system',
-      newValues: { changedFields: changedAuditFields(comic, patch) },
+      newValues: { changedFields: changedAuditFields(existing, patch) },
     });
     return this.findOne(id);
   }
@@ -427,22 +451,24 @@ export class ComicService {
     return toPublicComicChapter(ch, true);
   }
 
+  /**
+   * 给漫画加一话（仅后台角色）：所属漫画只取路径参数，列逐个挑（请求体里的 comicId / id / viewCount 等进不来，
+   * DTO 层已 400）；页数按 pageUrls 计算，同时累加漫画的章节数。
+   */
   async addChapter(
     comicId: string,
     dto: CreateComicChapterDto,
     userId: string,
   ): Promise<ComicChapter> {
     await this.findOne(comicId);
-    const pageCount = dto.pageUrls?.length ?? 0;
     const ch = this.chapterRepo.create({
       comicId,
       chapterNumber: dto.chapterNumber ?? 1,
       title: dto.title,
-      pageUrls: dto.pageUrls,
-      pageCount,
+      pageUrls: dto.pageUrls ?? undefined,
+      pageCount: dto.pageUrls?.length ?? 0,
       isVip: dto.isVip ?? false,
       isPublished: dto.isPublished ?? true,
-      collectExternalId: dto.collectExternalId,
     });
     const saved = await this.chapterRepo.save(ch);
 
@@ -460,17 +486,23 @@ export class ComicService {
     return saved;
   }
 
+  /**
+   * 编辑一话（仅后台角色）：只写 CHAPTER_EDITABLE_FIELDS 里提交了的列。此前 {...dto} 原样交给 repository.update，
+   * 带 comicId 就能把章节挪到另一部漫画下（章节数不修正），带 viewCount / pageCount / id 也照写；
+   * pageUrls 传字符串时 pageCount 记成字符串长度。改了 pageUrls 就重算页数。
+   */
   async updateChapter(
     chapterId: string,
     dto: UpdateComicChapterDto,
     userId: string,
   ): Promise<ComicChapter> {
-    await this.getChapter(chapterId);
-    const patch: Partial<ComicChapter> = { ...dto };
-    if (dto.pageUrls !== undefined) {
-      patch.pageCount = dto.pageUrls.length;
+    const ch = await this.getChapter(chapterId);
+    const patch = pickFields(dto, CHAPTER_EDITABLE_FIELDS) as QueryDeepPartialEntity<ComicChapter>;
+    if (dto.pageUrls !== undefined) patch.pageCount = dto.pageUrls?.length ?? 0;
+
+    if (Object.keys(patch).length > 0) {
+      await this.chapterRepo.update(chapterId, patch);
     }
-    await this.chapterRepo.update(chapterId, patch);
     await this.auditService.log({
       userId,
       action: 'COMIC_CHAPTER_UPDATE',
@@ -478,6 +510,7 @@ export class ComicService {
       resourceId: chapterId,
       ipAddress: 'system',
       userAgent: 'system',
+      newValues: { changedFields: changedAuditFields(ch, patch) },
     });
     return this.getChapter(chapterId);
   }

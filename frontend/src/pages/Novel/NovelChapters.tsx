@@ -71,6 +71,8 @@ export default function NovelChaptersPage() {
       setEditing(null)
       refresh()
     },
+    // 此前失败时没有任何提示；后端校验失败（400）时把具体原因显示出来
+    onError: (e: Error) => message.error(e.message ? `添加失败：${e.message}` : '添加失败'),
   })
 
   const updateMut = useMutation({
@@ -87,6 +89,7 @@ export default function NovelChaptersPage() {
       setEditing(null)
       refresh()
     },
+    onError: (e: Error) => message.error(e.message ? `更新失败：${e.message}` : '更新失败'),
   })
 
   const delMut = useMutation({

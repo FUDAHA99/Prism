@@ -68,7 +68,8 @@ export default function NovelForm() {
       qc.invalidateQueries({ queryKey: ['novels'] })
       navigate(`/novels/${n.id}/edit`)
     },
-    onError: () => message.error('创建失败'),
+    // 后端校验失败（400）时 message 是具体原因（如封面地址不合法），拦截器已放进 Error.message
+    onError: (e: Error) => message.error(e.message ? `创建失败：${e.message}` : '创建失败'),
   })
 
   const updateMut = useMutation({
@@ -78,7 +79,7 @@ export default function NovelForm() {
       qc.invalidateQueries({ queryKey: ['novels'] })
       qc.invalidateQueries({ queryKey: ['novel', id] })
     },
-    onError: () => message.error('更新失败'),
+    onError: (e: Error) => message.error(e.message ? `更新失败：${e.message}` : '更新失败'),
   })
 
   const handleSubmit = (publish = false) => {

@@ -744,6 +744,70 @@ slug 详情另有 `sources`（`{ id, movieId, name, kind, player, sortOrder, epi
 - **后台角色**：任意章节（含未发布、所属小说为草稿或已删除），完整字段与正文；不累加阅读数。
 - **游客、无角色的登录用户**：章节已发布、所属小说已发布且未删除才返回（目录字段 + `content`），否则与不存在一样返回 `404`；每次成功读取章节阅读数 +1。
 
+### 16.6 创建小说
+`POST /novels`  🔒 后台角色（admin / editor）
+
+**请求体**（后台编辑页提交表单全部字段，「立即发布」时带 `status: "published"`）：
+```json
+{
+  "title": "诡秘之主",
+  "slug": "lord-of-mysteries",
+  "author": "爱潜水的乌贼",
+  "subType": "玄幻",
+  "serialStatus": "ongoing",
+  "intro": "简介",
+  "coverUrl": "/uploads/cover.jpg",
+  "score": 9.3,
+  "isFeatured": false,
+  "isVip": false,
+  "metaTitle": "SEO 标题",
+  "metaKeywords": "玄幻,克苏鲁",
+  "metaDescription": "SEO 描述",
+  "status": "draft",
+  "categoryId": "uuid（可选）",
+  "publishedAt": "2026-04-25T14:00:00.000Z（可选）"
+}
+```
+
+只接受上面这些字段，其余字段（`id`、`chapters`、`viewCount`、`favoriteCount`、`wordCount`、`chapterCount`、`lastChapterAt`、`collectSource`、`collectExternalId`、时间戳等）一律 `400`；
+采集字段只由采集任务在服务端写入，计数由章节接口维护。`status` 只能是 `draft`（默认）或 `published`，为 `published` 时 `publishedAt` 缺省为当前时间。
+
+| 字段 | 规则 |
+|------|------|
+| `title` | 必填，非空，≤ 500 字符 |
+| `slug` | 必填，只含小写字母、数字、连字符，≤ 500；与任何小说（含已删除的）重复返回 `409` |
+| `author` / `subType` | ≤ 200 字符 |
+| `intro` | ≤ 65535 字节（TEXT 列）|
+| `coverUrl` | 空串、`http(s)://` 地址或站内路径（`/uploads/...`），≤ 1000 |
+| `serialStatus` | `ongoing` \| `finished` \| `paused`；不能为 `null` |
+| `score` | 0–10（编辑页回填的 `"8.5"` 这类字符串按数字处理）；不能为 `null` |
+| `isFeatured` / `isVip` | JSON 布尔值（字符串 `"false"` 等 `400`）；不能为 `null` |
+| `metaTitle` / `metaKeywords` / `metaDescription` | ≤ 200 / 300 / 500 字符 |
+| `categoryId` | UUID |
+| `publishedAt` | ISO 8601 |
+
+可空字段可以为 `null`（清空）。
+
+### 16.7 更新小说
+`PATCH /novels/:id`  🔒 后台角色（admin / editor）
+
+字段与校验规则同创建，全部可选；`title` / `slug` / `serialStatus` / `score` / 两个布尔字段不能为 `null`。
+`status` 只接受 `published`（后台「保存并发布」）：同时写 `publishedAt`（优先用本次提交的，其次保留原发布时间）；取消发布请用 `POST /novels/:id/unpublish`。
+
+### 16.8 发布 / 取消发布 / 删除
+`POST /novels/:id/publish`、`POST /novels/:id/unpublish`、`DELETE /novels/:id`（软删除）  🔒 后台角色（admin / editor）
+
+### 16.9 章节写接口
+🔒 后台角色（admin / editor）
+
+| 接口 | 请求体 |
+|------|--------|
+| `POST /novels/:id/chapters` | `title`（必填，非空，≤ 500）、`content`（必填，字符串，可为空串）、`chapterNumber`（非负整数；不填或 `null` 按 1）、`isVip`（默认 `false`）、`isPublished`（默认 `true`）；归属取路径里的小说，字数按正文计算并累加到小说 |
+| `PATCH /novels/chapters/:chapterId` | 同上，全部可选，均不能为 `null`；改正文时重算字数并同步小说总字数 |
+| `DELETE /novels/chapters/:chapterId` | — |
+
+章节请求体带 `id` / `novelId` / `wordCount` / `viewCount` / `collectExternalId` 等一律 `400`（章节不能改挂到别的小说）。
+
 ---
 
 ## 十七、漫画模块 `/comics`
@@ -779,6 +843,22 @@ slug 详情另有 `sources`（`{ id, movieId, name, kind, player, sortOrder, epi
 `GET /comics/chapters/:chapterId`（公开，门户阅读页；后台不调用）
 
 章节已发布、所属漫画已发布且未删除才返回（目录字段 + `pageUrls`），否则与不存在一样返回 `404`（带后台 token 也一样：这条不解析 token）；每次成功读取章节阅读数 +1。
+
+### 17.6 创建 / 更新 / 发布 / 删除漫画
+`POST /comics`、`PATCH /comics/:id`、`POST /comics/:id/publish`、`POST /comics/:id/unpublish`、`DELETE /comics/:id`  🔒 后台角色（admin / editor）
+
+请求体字段与校验规则同 16.6 / 16.7（`title` 为漫画名；漫画没有 `wordCount`）。
+
+### 17.7 章节写接口
+🔒 后台角色（admin / editor）
+
+| 接口 | 请求体 |
+|------|--------|
+| `POST /comics/:id/chapters` | `title`（必填，非空，≤ 500）、`pageUrls`（字符串数组，按阅读顺序，最多 1000 张；每项是非空的 `http(s)://` 地址或站内路径、≤ 1000；可为 `null`）、`chapterNumber`（非负整数；不填或 `null` 按 1）、`isVip`（默认 `false`）、`isPublished`（默认 `true`）；归属取路径里的漫画，页数按 `pageUrls` 计算 |
+| `PATCH /comics/chapters/:chapterId` | 同上，全部可选；除 `pageUrls` 外不能为 `null`；改 `pageUrls` 时重算页数 |
+| `DELETE /comics/chapters/:chapterId` | — |
+
+章节请求体带 `id` / `comicId` / `pageCount` / `viewCount` / `collectExternalId` 等一律 `400`（章节不能改挂到别的漫画）。
 
 ---
 
