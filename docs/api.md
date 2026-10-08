@@ -688,6 +688,100 @@ slug 详情另有 `sources`（`{ id, movieId, name, kind, player, sortOrder, epi
 
 ---
 
+## 十六、小说模块 `/novels`
+
+🔒 写操作需要后台角色（admin / editor）
+
+### 16.1 获取小说列表
+`GET /novels`（可选登录：后台与门户共用）
+
+- **后台角色（admin / editor）带 token**：全量视图 —— 任意状态（含草稿、归档），可按 `status` 筛选，字段完整（含 `status`、`collectSource`、`collectExternalId`），每页最多 100。
+- **游客、无角色的登录用户**：服务端固定只返回已发布、未删除的小说，`status` 参数被忽略；每页最多 50（`limit` 超过 50 时按 50 返回，不报错）；字段为公开白名单（见下方「公开视图」）。
+
+**查询参数**（未列出的参数一律 `400`）：
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `search` | string | 搜索书名 / 作者（最长 200）|
+| `status` | `draft` \| `published` \| `archived` | 状态筛选（仅后台角色生效）|
+| `serialStatus` | `ongoing` \| `finished` \| `paused` | 连载状态 |
+| `categoryId` | UUID | 分类筛选 |
+| `subType` | string | 子分类（最长 200）|
+| `isFeatured` / `isVip` | `true` \| `false` | 推荐 / VIP 筛选（其他写法 `400`）|
+| `page` | 整数 1–100000 | 页码（默认 1）|
+| `limit` | 整数 1–100 | 每页数量（默认 20；游客最多按 50 返回）|
+
+**公开视图**（游客列表与 slug 详情）：只含 `id`、`title`、`slug`、`author`、`categoryId`、`subType`、`coverUrl`、`intro`、`wordCount`、`chapterCount`、`serialStatus`、`isFeatured`、`isVip`、`score`（DECIMAL，MySQL 下是字符串）、`viewCount`、`favoriteCount`、`metaTitle`、`metaKeywords`、`metaDescription`、`lastChapterAt`、`publishedAt`、`createdAt`、`updatedAt`；
+不含 `status`、`collectSource`、`collectExternalId`。
+
+### 16.2 获取小说详情
+`GET /novels/:id`  🔒 后台角色（admin / editor）
+
+后台编辑页与章节管理页加载用，任意状态、完整字段；不累加阅读数。
+
+### 16.3 通过 slug 获取已发布小说（门户详情 / 阅读页）
+`GET /novels/slug/:slug`（公开）
+
+只返回已发布且未删除的小说（公开视图字段），草稿 / 归档与不存在一样返回 `404`；每次成功读取阅读数 +1。
+
+### 16.4 章节目录
+`GET /novels/:id/chapters`（可选登录：后台章节管理与门户目录共用）
+
+两种视图都不含正文（`content`），按章节序号升序。
+
+- **后台角色**：全部章节（含未发布），除正文外的全部字段（含 `isPublished`、`collectExternalId`），可按 `published` 筛选；小说是草稿或已删除也照常列出。
+- **游客、无角色的登录用户**：只有已发布章节，且所属小说必须已发布、未删除（否则得到空目录，与不存在的小说 id 相同）；`published` 参数被忽略。
+  每章只含 `id`、`novelId`、`chapterNumber`、`title`、`wordCount`、`isVip`、`viewCount`。
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `page` | 整数 1–100000 | 页码（默认 1）|
+| `limit` | 整数 1–100 | 每页数量（默认 50）|
+| `published` | `true` / `1` \| `false` / `0` | 发布状态筛选（仅后台角色生效）|
+
+### 16.5 章节正文
+`GET /novels/chapters/:chapterId`（可选登录：后台章节编辑弹窗与门户阅读页共用）
+
+- **后台角色**：任意章节（含未发布、所属小说为草稿或已删除），完整字段与正文；不累加阅读数。
+- **游客、无角色的登录用户**：章节已发布、所属小说已发布且未删除才返回（目录字段 + `content`），否则与不存在一样返回 `404`；每次成功读取章节阅读数 +1。
+
+---
+
+## 十七、漫画模块 `/comics`
+
+🔒 写操作需要后台角色（admin / editor）
+
+### 17.1 获取漫画列表
+`GET /comics`（可选登录：后台与门户共用）
+
+规则与查询参数同 16.1（`search` 搜索漫画名 / 作者）。
+**公开视图**：与小说相同，但没有 `wordCount`；不含 `status`、`collectSource`、`collectExternalId`。
+
+### 17.2 获取漫画详情
+`GET /comics/:id`  🔒 后台角色（admin / editor）
+
+后台编辑页与章节管理页加载用，任意状态、完整字段；不累加阅读数。
+
+### 17.3 通过 slug 获取已发布漫画（门户详情 / 阅读页）
+`GET /comics/slug/:slug`（公开）
+
+只返回已发布且未删除的漫画（公开视图字段），草稿 / 归档与不存在一样返回 `404`；每次成功读取阅读数 +1。
+
+### 17.4 章节目录
+`GET /comics/:id/chapters`（可选登录：后台章节管理与门户目录共用）
+
+查询参数同 16.4，按章节序号升序。
+
+- **后台角色**：全部章节（含未发布）、完整字段，**含 `pageUrls`**（后台编辑弹窗直接用目录里的页面图）。
+- **游客、无角色的登录用户**：只有已发布漫画的已发布章节，**不含 `pageUrls`**；每章只含 `id`、`comicId`、`chapterNumber`、`title`、`pageCount`、`isVip`、`viewCount`。
+  门户阅读页经 17.5 取页面图。
+
+### 17.5 章节内容（页面图）
+`GET /comics/chapters/:chapterId`（公开，门户阅读页；后台不调用）
+
+章节已发布、所属漫画已发布且未删除才返回（目录字段 + `pageUrls`），否则与不存在一样返回 `404`（带后台 token 也一样：这条不解析 token）；每次成功读取章节阅读数 +1。
+
+---
+
 ## HTTP 状态码说明
 
 | 状态码 | 含义 |

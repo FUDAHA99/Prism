@@ -153,6 +153,10 @@ export interface Movie {
 }
 
 // ─── 小说 ─────────────────────────────
+/**
+ * 公开小说（后端 novel.service.ts PublicNovel 白名单）：只有已发布小说，
+ * 不含 status 与采集等后台字段。
+ */
 export interface Novel {
   id: string
   title: string
@@ -164,7 +168,6 @@ export interface Novel {
   wordCount: number
   chapterCount: number
   serialStatus: 'ongoing' | 'finished' | 'paused'
-  status: 'draft' | 'published' | 'archived'
   isFeatured: boolean
   isVip: boolean
   score: number | string
@@ -172,9 +175,9 @@ export interface Novel {
   favoriteCount: number
   publishedAt?: string | null
   createdAt: string
-  category?: Category | null
 }
 
+/** 公开章节（PublicNovelChapter）：目录只有已发布章节、不带正文；content 只在单章接口里有 */
 export interface NovelChapter {
   id: string
   novelId: string
@@ -183,11 +186,14 @@ export interface NovelChapter {
   content?: string
   wordCount: number
   isVip: boolean
-  isPublished: boolean
   viewCount: number
 }
 
 // ─── 漫画 ─────────────────────────────
+/**
+ * 公开漫画（后端 comic.service.ts PublicComic 白名单）：只有已发布漫画，
+ * 不含 status 与采集等后台字段。
+ */
 export interface Comic {
   id: string
   title: string
@@ -198,7 +204,6 @@ export interface Comic {
   intro?: string | null
   chapterCount: number
   serialStatus: 'ongoing' | 'finished' | 'paused'
-  status: 'draft' | 'published' | 'archived'
   isFeatured: boolean
   isVip: boolean
   score: number | string
@@ -206,9 +211,9 @@ export interface Comic {
   favoriteCount: number
   publishedAt?: string | null
   createdAt: string
-  category?: Category | null
 }
 
+/** 公开章节（PublicComicChapter）：目录只有已发布章节、不带 pageUrls；pageUrls 只在单章接口里有 */
 export interface ComicChapter {
   id: string
   comicId: string
@@ -217,7 +222,6 @@ export interface ComicChapter {
   pageUrls?: string[]
   pageCount: number
   isVip: boolean
-  isPublished: boolean
   viewCount: number
 }
 

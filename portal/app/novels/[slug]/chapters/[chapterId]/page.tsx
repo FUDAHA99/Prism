@@ -21,7 +21,8 @@ export default async function NovelChapterPage({ params }: Props) {
     getNovelChapter(params.chapterId),
     getNovelChapters(novel.id),
   ])
-  if (!chapter) notFound()
+  // 章节必须属于地址栏里的这本书：否则任意已发布章节都能挂在别的书名下显示
+  if (!chapter || chapter.novelId !== novel.id) notFound()
 
   const idx = chapters.findIndex((c) => c.id === chapter.id)
   const prev = idx > 0 ? chapters[idx - 1] : null

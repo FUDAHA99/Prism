@@ -21,7 +21,8 @@ export default async function ComicChapterPage({ params }: Props) {
     getComicChapter(params.chapterId),
     getComicChapters(comic.id),
   ])
-  if (!chapter) notFound()
+  // 章节必须属于地址栏里的这部漫画：否则任意已发布章节都能挂在别的漫画名下显示
+  if (!chapter || chapter.comicId !== comic.id) notFound()
 
   const idx = chapters.findIndex((c) => c.id === chapter.id)
   const prev = idx > 0 ? chapters[idx - 1] : null

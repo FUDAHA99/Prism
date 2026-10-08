@@ -1,0 +1,669 @@
+import 'reflect-metadata';
+import { ValidationPipe } from '@nestjs/common';
+import { Test } from '@nestjs/testing';
+import { ConfigService } from '@nestjs/config';
+import { JwtModule, JwtService } from '@nestjs/jwt';
+import { PassportModule } from '@nestjs/passport';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { NestExpressApplication } from '@nestjs/platform-express';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { DataSource, Logger as TypeOrmLogger, Repository } from 'typeorm';
+import { randomUUID } from 'crypto';
+import * as request from 'supertest';
+
+import { ComicController } from './comic.controller';
+import { ComicService } from './comic.service';
+import { Comic, ComicSerialStatus, ComicStatus } from './entities/comic.entity';
+import { ComicChapter } from './entities/comic-chapter.entity';
+import { COMIC_PUBLIC_MAX_LIMIT } from './dto/query-comic.dto';
+import { AuthService } from '../auth/auth.service';
+import { JwtStrategy } from '../auth/strategies/jwt.strategy';
+import { UserService } from '../user/user.service';
+import { RoleService } from '../role/role.service';
+import { AuditService } from '../audit/audit.service';
+import { User } from '../user/entities/user.entity';
+import { Role } from '../role/entities/role.entity';
+import { Permission } from '../role/entities/permission.entity';
+import { AuditLog } from '../audit/entities/audit-log.entity';
+import { MediaFile } from '../media/entities/media-file.entity';
+import { Content } from '../content/entities/content.entity';
+import { Category } from '../category/entities/category.entity';
+import { Comment } from '../comment/entities/comment.entity';
+import { HttpExceptionFilter } from '../../common/filters/http-exception.filter';
+import { globalValidationPipeOptions } from '../../common/pipes/global-validation';
+
+/**
+ * 漫画模块走真实 HTTP：真实 ComicController / ComicService、Access 守卫链（严格可选登录、JwtStrategy、RolesGuard）、
+ * 全局 ValidationPipe 与异常过滤器，数据落在内存 SQLite。token 直接用测试密钥签发（与 AuthService 同形状），
+ * JwtStrategy 照常验签并从库里加载用户与角色 —— 不跑 bcrypt。
+ *
+ * 读接口（批次 1-F-2）：GET /comics、GET /comics/:id/chapters 由后台与门户共用 —— 后台角色看全量（含草稿、未发布章节、
+ * 目录里的 pageUrls），其余人只看已发布漫画的已发布章节、公开字段，目录不带 pageUrls；
+ * GET /comics/slug/:slug 与 GET /comics/chapters/:chapterId 是门户专用的公开接口，只返回已发布的内容。
+ */
+
+const ACCESS_SECRET = 'comic-spec-access-secret-0123456789abcdef';
+const REFRESH_SECRET = 'comic-spec-refresh-secret-fedcba9876543210';
+
+class JsonCache {
+  readonly store = new Map<string, string>();
+  async get<T>(key: string): Promise<T | undefined> {
+    const raw = this.store.get(key);
+    return raw === undefined ? undefined : (JSON.parse(raw) as T);
+  }
+  async set(key: string, value: unknown): Promise<void> {
+    this.store.set(key, JSON.stringify(value));
+  }
+  async del(key: string): Promise<void> {
+    this.store.delete(key);
+  }
+}
+
+/** 记录 SQL：用来断言游客目录的查询根本不读 pageUrls 列 */
+class QueryRecorder implements TypeOrmLogger {
+  readonly queries: string[] = [];
+  logQuery(query: string): void {
+    this.queries.push(query);
+  }
+  logQueryError(): void {}
+  logQuerySlow(): void {}
+  logSchemaBuild(): void {}
+  logMigration(): void {}
+  log(): void {}
+}
+
+/** 公开视图（列表与 slug 详情）的全部键：多一个少一个都算失败（白名单是逐字段构造的） */
+const PUBLIC_COMIC_KEYS = [
+  'author',
+  'categoryId',
+  'chapterCount',
+  'coverUrl',
+  'createdAt',
+  'favoriteCount',
+  'id',
+  'intro',
+  'isFeatured',
+  'isVip',
+  'lastChapterAt',
+  'metaDescription',
+  'metaKeywords',
+  'metaTitle',
+  'publishedAt',
+  'score',
+  'serialStatus',
+  'slug',
+  'subType',
+  'title',
+  'updatedAt',
+  'viewCount',
+];
+const PUBLIC_CHAPTER_LIST_KEYS = ['chapterNumber', 'comicId', 'id', 'isVip', 'pageCount', 'title', 'viewCount'];
+const PUBLIC_CHAPTER_DETAIL_KEYS = [...PUBLIC_CHAPTER_LIST_KEYS, 'pageUrls'].sort();
+/** 后台目录：完整字段（编辑弹窗直接用列表里的 pageUrls） */
+const STAFF_CHAPTER_LIST_KEYS = [
+  'chapterNumber',
+  'collectExternalId',
+  'comicId',
+  'createdAt',
+  'id',
+  'isPublished',
+  'isVip',
+  'pageCount',
+  'pageUrls',
+  'title',
+  'updatedAt',
+  'viewCount',
+];
+/** 公开视图里绝不能出现的字段名 */
+const INTERNAL_FIELD = /"(collectSource|collectExternalId|status|isPublished|deletedAt)"/;
+
+type Who = 'anonymous' | 'plain' | 'editor' | 'admin';
+
+// 只建 SQLite 表、签 token，不跑 bcrypt；CI 机器比本地慢，留足余量
+jest.setTimeout(60_000);
+
+describe('漫画模块 HTTP', () => {
+  let app: NestExpressApplication;
+  let ds: DataSource;
+  let comics: Repository<Comic>;
+  let chapters: Repository<ComicChapter>;
+  const sql = new QueryRecorder();
+  const jwt = new JwtService({ secret: ACCESS_SECRET });
+  const ids = { plain: '', editor: '', admin: '' };
+  /** 采集源的内部 UUID：公开响应里不能出现 */
+  const COLLECT_SOURCE_ID = randomUUID();
+  const slugs = {
+    published: 'published-comic',
+    featured: 'featured-comic',
+    draft: 'draft-comic',
+    archived: 'archived-comic',
+    deletedPublished: 'deleted-published-comic',
+  };
+  type ComicKey = keyof typeof slugs;
+  const comicIds = {} as Record<ComicKey, string>;
+  /** 每部漫画的章节：pub1 / pub2（已发布，pub2 为 VIP）、hidden（未发布） */
+  const chapterIds = {} as Record<ComicKey, { pub1: string; pub2: string; hidden: string }>;
+  /** 每一章的页面图地址：未发布章节、未发布 / 已删除漫画的不能被游客拿到 */
+  const pagesOf = (key: ComicKey, n: number) => [1, 2, 3].map((p) => `/uploads/${key}-ch${n}-p${p}.jpg`);
+
+  const http = () => request(app.getHttpServer());
+
+  /** 与 AuthService.generateTokens 同形状的 access token */
+  function tokenFor(userId: string): string {
+    const now = Math.floor(Date.now() / 1000);
+    return jwt.sign({
+      sub: userId,
+      email: 'x@cms.test',
+      username: 'x',
+      roles: [],
+      type: 'access',
+      jti: randomUUID(),
+      iat: now,
+      exp: now + 600,
+    });
+  }
+
+  function as(req: request.Test, who: Who): request.Test {
+    return who === 'anonymous' ? req : req.set('Authorization', `Bearer ${tokenFor(ids[who])}`);
+  }
+
+  const get = (path: string, who: Who) => as(http().get(path), who);
+
+  async function createUser(name: string, roles: Array<'editor' | 'admin'>, roleIds: Record<string, string>) {
+    const user = await ds.getRepository(User).save({
+      username: name,
+      email: `${name}@cms.test`,
+      // 不需要登录：token 直接签发，哈希只为满足 NOT NULL
+      passwordHash: 'not-a-real-hash',
+      isActive: true,
+    } as Partial<User>);
+    for (const role of roles) {
+      await ds.query('INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)', [user.id, roleIds[role]]);
+    }
+    return user.id;
+  }
+
+  /** 建一部漫画，带三话：第 2 话（VIP）、第 1 话已发布，第 3 话未发布（故意乱序插入，验证按章节序号排序） */
+  async function seedComic(key: ComicKey, status: ComicStatus, extra: Partial<Comic> = {}): Promise<string> {
+    const comic = await comics.save({
+      title: `漫画 ${slugs[key]}`,
+      slug: slugs[key],
+      status,
+      publishedAt: status === ComicStatus.PUBLISHED ? new Date('2026-10-01T08:00:00.000Z') : undefined,
+      collectSource: COLLECT_SOURCE_ID,
+      collectExternalId: `ext-${slugs[key]}`,
+      ...extra,
+    } as Partial<Comic>);
+    const save = (chapterNumber: number, isPublished: boolean, isVip = false) =>
+      chapters.save({
+        comicId: comic.id,
+        chapterNumber,
+        title: `第${chapterNumber}话 ${key}`,
+        pageUrls: pagesOf(key, chapterNumber),
+        pageCount: 3,
+        isPublished,
+        isVip,
+        collectExternalId: `ext-ch-${key}-${chapterNumber}`,
+      } as Partial<ComicChapter>);
+    const pub2 = await save(2, true, true);
+    const pub1 = await save(1, true);
+    const hidden = await save(3, false);
+    chapterIds[key] = { pub1: pub1.id, pub2: pub2.id, hidden: hidden.id };
+    return comic.id;
+  }
+
+  const slugsOf = (rows: Array<{ slug: string }>) => rows.map((r) => r.slug).sort();
+  const viewCountOf = async (id: string) => (await comics.findOne({ where: { id }, withDeleted: true }))!.viewCount;
+  const chapterViewCountOf = async (id: string) => (await chapters.findOne({ where: { id } }))!.viewCount;
+
+  beforeAll(async () => {
+    const moduleRef = await Test.createTestingModule({
+      imports: [
+        TypeOrmModule.forRoot({
+          type: 'better-sqlite3',
+          database: ':memory:',
+          // User 关联闭包里的实体 + 漫画两张表（pageUrls 是 json 列，SQLite 驱动直接支持）
+          entities: [User, Role, Permission, AuditLog, MediaFile, Content, Category, Comment, Comic, ComicChapter],
+          synchronize: true,
+          logging: ['query'],
+          logger: sql,
+        }),
+        TypeOrmModule.forFeature([User, Role, Permission, AuditLog, Comic, ComicChapter]),
+        PassportModule,
+        JwtModule.register({ secret: ACCESS_SECRET, signOptions: { expiresIn: 3600 } }),
+      ],
+      controllers: [ComicController],
+      providers: [
+        ComicService,
+        AuthService,
+        JwtStrategy,
+        UserService,
+        RoleService,
+        AuditService,
+        {
+          provide: ConfigService,
+          useValue: new ConfigService({
+            app: {
+              jwt: { secret: ACCESS_SECRET, refreshSecret: REFRESH_SECRET, expiresIn: 3600, refreshExpiresIn: 86400 },
+            },
+          }),
+        },
+        { provide: CACHE_MANAGER, useValue: new JsonCache() },
+      ],
+    }).compile();
+
+    app = moduleRef.createNestApplication<NestExpressApplication>();
+    app.useGlobalPipes(new ValidationPipe(globalValidationPipeOptions()));
+    app.useGlobalFilters(new HttpExceptionFilter());
+    await app.init();
+    await app.listen(0, '127.0.0.1');
+
+    ds = moduleRef.get(DataSource);
+    comics = ds.getRepository(Comic);
+    chapters = ds.getRepository(ComicChapter);
+    const roleIds = {
+      admin: (await ds.getRepository(Role).save({ name: 'admin', isSystem: true })).id,
+      editor: (await ds.getRepository(Role).save({ name: 'editor', isSystem: true })).id,
+    };
+    ids.plain = await createUser('plain', [], roleIds);
+    ids.editor = await createUser('editor', ['editor'], roleIds);
+    ids.admin = await createUser('admin', ['admin'], roleIds);
+
+    comicIds.published = await seedComic('published', ComicStatus.PUBLISHED, {
+      author: '作者甲',
+      subType: '热血',
+      coverUrl: 'https://img.example.com/published.jpg',
+      intro: '简介',
+      score: 8.5,
+      metaTitle: 'SEO 标题',
+      viewCount: 7,
+      chapterCount: 3,
+    });
+    comicIds.featured = await seedComic('featured', ComicStatus.PUBLISHED, {
+      serialStatus: ComicSerialStatus.FINISHED,
+      isFeatured: true,
+      isVip: true,
+    });
+    comicIds.draft = await seedComic('draft', ComicStatus.DRAFT, { intro: '机密草稿简介' });
+    comicIds.archived = await seedComic('archived', ComicStatus.ARCHIVED);
+    comicIds.deletedPublished = await seedComic('deletedPublished', ComicStatus.PUBLISHED);
+    await comics.softDelete(comicIds.deletedPublished);
+  });
+
+  afterAll(async () => {
+    await app?.close();
+  });
+
+  const PUBLISHED_SLUGS = [slugs.published, slugs.featured].sort();
+  const ALL_LIVE_SLUGS = [slugs.published, slugs.featured, slugs.draft, slugs.archived].sort();
+  const NOT_VISIBLE: ComicKey[] = ['draft', 'archived', 'deletedPublished'];
+
+  describe('GET /comics', () => {
+    it.each<Who>(['anonymous', 'plain'])('%s：只看到已发布、未删除的漫画', async (who) => {
+      const res = await get('/comics', who).expect(200);
+      expect(slugsOf(res.body.data)).toEqual(PUBLISHED_SLUGS);
+      expect(res.body.meta).toEqual({ total: 2, page: 1, limit: 20, totalPages: 1 });
+    });
+
+    it.each<[Who, string]>([
+      ['anonymous', 'status=draft'],
+      ['anonymous', 'status=archived'],
+      ['plain', 'status=draft'],
+    ])('%s 传 %s 被忽略，仍然只有已发布漫画', async (who, qs) => {
+      const res = await get(`/comics?${qs}`, who).expect(200);
+      expect(slugsOf(res.body.data)).toEqual(PUBLISHED_SLUGS);
+    });
+
+    it('游客看到的是公开字段白名单：没有采集字段与状态', async () => {
+      const res = await get('/comics', 'anonymous').expect(200);
+      for (const row of res.body.data) {
+        expect(Object.keys(row).sort()).toEqual(PUBLIC_COMIC_KEYS);
+      }
+      expect(res.body.data.find((r: Comic) => r.slug === slugs.published)).toMatchObject({
+        id: comicIds.published,
+        title: `漫画 ${slugs.published}`,
+        author: '作者甲',
+        subType: '热血',
+        coverUrl: 'https://img.example.com/published.jpg',
+        intro: '简介',
+        score: 8.5,
+        serialStatus: 'ongoing',
+        viewCount: 7,
+        chapterCount: 3,
+        metaTitle: 'SEO 标题',
+        metaKeywords: null,
+        publishedAt: '2026-10-01T08:00:00.000Z',
+      });
+      const text = JSON.stringify(res.body);
+      expect(text).not.toMatch(INTERNAL_FIELD);
+      expect(text).not.toContain(COLLECT_SOURCE_ID);
+      expect(text).not.toContain('ext-');
+    });
+
+    it.each<Who>(['editor', 'admin'])('%s：全量视图，含草稿 / 归档与完整字段（与此前一致）', async (who) => {
+      const res = await get('/comics?limit=100', who).expect(200);
+      expect(slugsOf(res.body.data)).toEqual(ALL_LIVE_SLUGS);
+      expect(res.body.meta).toEqual({ total: 4, page: 1, limit: 100, totalPages: 1 });
+      expect(res.body.data.find((r: Comic) => r.slug === slugs.draft)).toMatchObject({
+        status: 'draft',
+        collectSource: COLLECT_SOURCE_ID,
+        collectExternalId: `ext-${slugs.draft}`,
+        intro: '机密草稿简介',
+      });
+    });
+
+    it.each<Who>(['editor', 'admin'])('%s：status 筛选照常生效（后台漫画列表的下拉）', async (who) => {
+      const slugsFor = async (qs: string) => slugsOf((await get(`/comics?${qs}`, who).expect(200)).body.data);
+      expect(await slugsFor('status=draft')).toEqual([slugs.draft]);
+      expect(await slugsFor('status=archived')).toEqual([slugs.archived]);
+      expect(await slugsFor('status=published')).toEqual(PUBLISHED_SLUGS);
+    });
+
+    it('门户的真实请求都能通过（portal/lib/api.ts getComics 默认补 status=published、limit=24）', async () => {
+      const list = await get('/comics?status=published&limit=24&page=1', 'anonymous').expect(200);
+      expect(slugsOf(list.body.data)).toEqual(PUBLISHED_SLUGS);
+      expect(list.body.meta).toMatchObject({ page: 1, limit: 24 });
+      const searched = await get(`/comics?status=published&limit=24&page=1&search=${encodeURIComponent('作者甲')}`, 'anonymous').expect(200);
+      expect(slugsOf(searched.body.data)).toEqual([slugs.published]);
+      const draftSearch = await get(`/comics?status=published&search=${encodeURIComponent(slugs.draft)}`, 'anonymous').expect(200);
+      expect(draftSearch.body.data).toEqual([]);
+      const home = await get('/comics?status=published&limit=8', 'anonymous').expect(200);
+      expect(slugsOf(home.body.data)).toEqual(PUBLISHED_SLUGS);
+      const finished = await get('/comics?status=published&serialStatus=finished', 'anonymous').expect(200);
+      expect(slugsOf(finished.body.data)).toEqual([slugs.featured]);
+      await get(`/comics?status=published&limit=24&categoryId=${randomUUID()}`, 'anonymous').expect(200);
+      const featured = await get('/comics?isFeatured=true', 'anonymous').expect(200);
+      expect(slugsOf(featured.body.data)).toEqual([slugs.featured]);
+      const notVip = await get('/comics?isVip=false', 'anonymous').expect(200);
+      expect(slugsOf(notVip.body.data)).toEqual([slugs.published]);
+    });
+
+    it('后台漫画列表的真实请求能通过（frontend/src/pages/Comic/index.tsx：search / status / serialStatus / page / limit=20）', async () => {
+      const res = await get(
+        `/comics?search=${encodeURIComponent('draft')}&status=draft&serialStatus=ongoing&page=1&limit=20`,
+        'admin',
+      ).expect(200);
+      expect(slugsOf(res.body.data)).toEqual([slugs.draft]);
+      expect(res.body.meta).toEqual({ total: 1, page: 1, limit: 20, totalPages: 1 });
+    });
+
+    it.each([
+      ['limit=101'],
+      ['limit=0'],
+      ['limit=-1'],
+      ['limit=abc'],
+      ['page=0'],
+      ['page=abc'],
+      ['page=1e21'],
+      ['status=deleted'],
+      ['status[]=draft&status[]=published'],
+      ['serialStatus=done'],
+      ['categoryId=not-a-uuid'],
+      ['isFeatured=yes'],
+      ['isVip=1'],
+      [`search=${'x'.repeat(201)}`],
+      ['foo=bar'],
+    ])('非法参数 %s 返回 400 而不是 500', async (qs) => {
+      const res = await get(`/comics?${qs}`, 'anonymous');
+      expect(res.status).toBe(400);
+    });
+
+    it(`游客每页最多 ${COMIC_PUBLIC_MAX_LIMIT} 条（超出按上限返回、不报错），后台角色可到 100`, async () => {
+      const subType = '批量子类';
+      const rows = Array.from({ length: COMIC_PUBLIC_MAX_LIMIT + 5 }, (_, i) => ({
+        title: `bulk-${i}`,
+        slug: `bulk-${i}`,
+        status: ComicStatus.PUBLISHED,
+        subType,
+      }));
+      await comics.insert(rows);
+      try {
+        const qs = `limit=100&subType=${encodeURIComponent(subType)}`;
+        const anon = await get(`/comics?${qs}`, 'anonymous').expect(200);
+        expect(anon.body.data).toHaveLength(COMIC_PUBLIC_MAX_LIMIT);
+        expect(anon.body.meta).toEqual({
+          total: COMIC_PUBLIC_MAX_LIMIT + 5,
+          page: 1,
+          limit: COMIC_PUBLIC_MAX_LIMIT,
+          totalPages: 2,
+        });
+        const staff = await get(`/comics?${qs}`, 'editor').expect(200);
+        expect(staff.body.data).toHaveLength(COMIC_PUBLIC_MAX_LIMIT + 5);
+        expect(staff.body.meta.limit).toBe(100);
+      } finally {
+        await comics.delete({ subType });
+      }
+    });
+
+    it('带了无效 token 的请求 401，不会被当成游客（后台据此回到登录页）', async () => {
+      await http().get('/comics').set('Authorization', 'Bearer not.a.jwt').expect(401);
+    });
+  });
+
+  describe('GET /comics/slug/:slug', () => {
+    it('已发布：公开字段白名单，阅读数 +1', async () => {
+      const before = await viewCountOf(comicIds.published);
+      const res = await get(`/comics/slug/${slugs.published}`, 'anonymous').expect(200);
+      expect(Object.keys(res.body).sort()).toEqual(PUBLIC_COMIC_KEYS);
+      expect(res.body).toMatchObject({ id: comicIds.published, author: '作者甲', intro: '简介' });
+      const text = JSON.stringify(res.body);
+      expect(text).not.toMatch(INTERNAL_FIELD);
+      expect(text).not.toContain(COLLECT_SOURCE_ID);
+      expect(await viewCountOf(comicIds.published)).toBe(before + 1);
+    });
+
+    it.each<[ComicKey]>([['draft'], ['archived'], ['deletedPublished']])(
+      '%s：404（与不存在的 slug 同一条消息），阅读数不变',
+      async (key) => {
+        const before = await viewCountOf(comicIds[key]);
+        const res = await get(`/comics/slug/${slugs[key]}`, 'anonymous').expect(404);
+        const missing = await get('/comics/slug/no-such-slug', 'anonymous').expect(404);
+        expect(res.body.message).toBe(`漫画不存在: ${slugs[key]}`);
+        expect(missing.body.message).toBe('漫画不存在: no-such-slug');
+        expect(await viewCountOf(comicIds[key])).toBe(before);
+      },
+    );
+
+    it('公开接口不解析 token：带着管理员 token 也读不到草稿（后台从不调用这条）', async () => {
+      await get(`/comics/slug/${slugs.draft}`, 'admin').expect(404);
+    });
+  });
+
+  describe('GET /comics/:id（后台编辑页 / 章节管理页）', () => {
+    it.each<Who>(['editor', 'admin'])('%s 能读草稿的完整字段，且不累加阅读数', async (who) => {
+      const draftBefore = await viewCountOf(comicIds.draft);
+      const publishedBefore = await viewCountOf(comicIds.published);
+      const res = await get(`/comics/${comicIds.draft}`, who).expect(200);
+      expect(res.body).toMatchObject({
+        slug: slugs.draft,
+        status: 'draft',
+        collectSource: COLLECT_SOURCE_ID,
+        collectExternalId: `ext-${slugs.draft}`,
+      });
+      await get(`/comics/${comicIds.published}`, who).expect(200);
+      expect(await viewCountOf(comicIds.draft)).toBe(draftBefore);
+      expect(await viewCountOf(comicIds.published)).toBe(publishedBefore);
+    });
+
+    it('游客 401、无角色用户 403', async () => {
+      await get(`/comics/${comicIds.draft}`, 'anonymous').expect(401);
+      await get(`/comics/${comicIds.draft}`, 'plain').expect(403);
+    });
+  });
+
+  describe('GET /comics/:id/chapters（目录）', () => {
+    async function sqlOf(run: () => Promise<unknown>): Promise<string[]> {
+      const start = sql.queries.length;
+      await run();
+      return sql.queries.slice(start);
+    }
+
+    it.each<Who>(['anonymous', 'plain'])('%s：已发布漫画只列已发布章节、按章节序号排序、公开字段，不带页面图', async (who) => {
+      const res = await get(`/comics/${comicIds.published}/chapters`, who).expect(200);
+      expect(res.body.data.map((c: ComicChapter) => c.id)).toEqual([
+        chapterIds.published.pub1,
+        chapterIds.published.pub2,
+      ]);
+      expect(res.body.meta).toEqual({ total: 2, page: 1, limit: 50, totalPages: 1 });
+      for (const row of res.body.data) expect(Object.keys(row).sort()).toEqual(PUBLIC_CHAPTER_LIST_KEYS);
+      expect(res.body.data[1]).toMatchObject({
+        comicId: comicIds.published,
+        chapterNumber: 2,
+        title: '第2话 published',
+        isVip: true,
+        pageCount: 3,
+      });
+      const text = JSON.stringify(res.body);
+      expect(text).not.toMatch(INTERNAL_FIELD);
+      expect(text).not.toContain('/uploads/');
+      expect(text).not.toContain('ext-ch-');
+    });
+
+    it('游客目录的查询不读 pageUrls 列', async () => {
+      const queries = await sqlOf(() => get(`/comics/${comicIds.published}/chapters`, 'anonymous').expect(200));
+      const selects = queries.filter((q) => /FROM "comic_chapters"/.test(q));
+      expect(selects.length).toBeGreaterThan(0);
+      for (const q of selects) expect(q).not.toMatch(/"pageUrls"/);
+    });
+
+    it.each<string>(['published=false', 'published=0', 'published=true&limit=100'])(
+      '游客传 %s 被忽略：仍然只有已发布章节',
+      async (qs) => {
+        const res = await get(`/comics/${comicIds.published}/chapters?${qs}`, 'anonymous').expect(200);
+        expect(res.body.data.map((c: ComicChapter) => c.id).sort()).toEqual(
+          [chapterIds.published.pub1, chapterIds.published.pub2].sort(),
+        );
+        expect(JSON.stringify(res.body)).not.toContain('/uploads/');
+      },
+    );
+
+    it.each<[ComicKey]>(NOT_VISIBLE.map((k) => [k]))(
+      '游客读 %s 漫画的目录：空（与不存在的漫画一样），已发布章节也不列出',
+      async (key) => {
+        for (const who of ['anonymous', 'plain'] as Who[]) {
+          const res = await get(`/comics/${comicIds[key]}/chapters`, who).expect(200);
+          expect(res.body).toEqual({ data: [], meta: { total: 0, page: 1, limit: 50, totalPages: 0 } });
+        }
+        const missing = await get(`/comics/${randomUUID()}/chapters`, 'anonymous').expect(200);
+        expect(missing.body.data).toEqual([]);
+      },
+    );
+
+    it.each<Who>(['editor', 'admin'])('%s：全部章节（含未发布）与完整字段，含 pageUrls（编辑弹窗要用）', async (who) => {
+      const res = await get(`/comics/${comicIds.published}/chapters?page=1&limit=20`, who).expect(200);
+      expect(res.body.data.map((c: ComicChapter) => c.id)).toEqual([
+        chapterIds.published.pub1,
+        chapterIds.published.pub2,
+        chapterIds.published.hidden,
+      ]);
+      expect(res.body.meta).toEqual({ total: 3, page: 1, limit: 20, totalPages: 1 });
+      for (const row of res.body.data) expect(Object.keys(row).sort()).toEqual(STAFF_CHAPTER_LIST_KEYS);
+      expect(res.body.data[2]).toMatchObject({
+        isPublished: false,
+        collectExternalId: 'ext-ch-published-3',
+        pageUrls: pagesOf('published', 3),
+      });
+      const draft = await get(`/comics/${comicIds.draft}/chapters?page=1&limit=20`, who).expect(200);
+      expect(draft.body.meta.total).toBe(3);
+      expect(draft.body.data[0].pageUrls).toEqual(pagesOf('draft', 1));
+    });
+
+    it('后台的 published 筛选照常生效（true / 1 / false / 0）', async () => {
+      const idsFor = async (qs: string) =>
+        (await get(`/comics/${comicIds.published}/chapters?${qs}`, 'editor').expect(200)).body.data
+          .map((c: ComicChapter) => c.id)
+          .sort();
+      const published = [chapterIds.published.pub1, chapterIds.published.pub2].sort();
+      expect(await idsFor('published=true')).toEqual(published);
+      expect(await idsFor('published=1')).toEqual(published);
+      expect(await idsFor('published=false')).toEqual([chapterIds.published.hidden]);
+      expect(await idsFor('published=0')).toEqual([chapterIds.published.hidden]);
+    });
+
+    it.each([['limit=101'], ['limit=100000'], ['limit=0'], ['page=0'], ['page=abc'], ['published=maybe'], ['foo=bar']])(
+      '非法参数 %s 返回 400',
+      async (qs) => {
+        await get(`/comics/${comicIds.published}/chapters?${qs}`, 'anonymous').expect(400);
+        await get(`/comics/${comicIds.published}/chapters?${qs}`, 'admin').expect(400);
+      },
+    );
+
+    it('分页：limit / page 照常生效', async () => {
+      const second = await get(`/comics/${comicIds.published}/chapters?limit=1&page=2`, 'anonymous').expect(200);
+      expect(second.body.data.map((c: ComicChapter) => c.id)).toEqual([chapterIds.published.pub2]);
+      expect(second.body.meta).toEqual({ total: 2, page: 2, limit: 1, totalPages: 2 });
+      const staff = await get(`/comics/${comicIds.published}/chapters?limit=1&page=3`, 'admin').expect(200);
+      expect(staff.body.data.map((c: ComicChapter) => c.id)).toEqual([chapterIds.published.hidden]);
+    });
+  });
+
+  describe('GET /comics/chapters/:chapterId（阅读页）', () => {
+    it('已发布漫画的已发布章节：公开字段 + 页面图地址，阅读数 +1', async () => {
+      const id = chapterIds.published.pub1;
+      const before = await chapterViewCountOf(id);
+      const res = await get(`/comics/chapters/${id}`, 'anonymous').expect(200);
+      expect(Object.keys(res.body).sort()).toEqual(PUBLIC_CHAPTER_DETAIL_KEYS);
+      expect(res.body).toMatchObject({
+        id,
+        comicId: comicIds.published,
+        chapterNumber: 1,
+        pageCount: 3,
+        pageUrls: pagesOf('published', 1),
+      });
+      expect(JSON.stringify(res.body)).not.toMatch(INTERNAL_FIELD);
+      expect(await chapterViewCountOf(id)).toBe(before + 1);
+    });
+
+    it('未发布章节：404（与不存在的章节同一条消息），页面图不外泄，阅读数不变', async () => {
+      const id = chapterIds.published.hidden;
+      const before = await chapterViewCountOf(id);
+      const res = await get(`/comics/chapters/${id}`, 'anonymous').expect(404);
+      expect(res.body.message).toBe(`章节不存在: ${id}`);
+      expect(JSON.stringify(res.body)).not.toContain('/uploads/');
+      const missingId = randomUUID();
+      const missing = await get(`/comics/chapters/${missingId}`, 'anonymous').expect(404);
+      expect(missing.body.message).toBe(`章节不存在: ${missingId}`);
+      expect(await chapterViewCountOf(id)).toBe(before);
+    });
+
+    it.each<[ComicKey]>(NOT_VISIBLE.map((k) => [k]))(
+      '%s 漫画的章节（含已发布章节）：一律 404，阅读数不变',
+      async (key) => {
+        for (const chapterId of Object.values(chapterIds[key])) {
+          const before = await chapterViewCountOf(chapterId);
+          const res = await get(`/comics/chapters/${chapterId}`, 'anonymous').expect(404);
+          expect(JSON.stringify(res.body)).not.toContain('/uploads/');
+          expect(await chapterViewCountOf(chapterId)).toBe(before);
+        }
+      },
+    );
+
+    it('公开接口不解析 token：带着管理员 token 也读不到未发布章节（后台编辑弹窗用的是目录里的 pageUrls）', async () => {
+      await get(`/comics/chapters/${chapterIds.published.hidden}`, 'admin').expect(404);
+      await get(`/comics/chapters/${chapterIds.draft.pub1}`, 'editor').expect(404);
+    });
+  });
+
+  it('游客经任何读接口都拿不到未发布章节、未发布 / 已删除漫画的页面图', async () => {
+    const leaked: string[] = [];
+    const responses: string[] = [];
+    responses.push(JSON.stringify((await get('/comics?limit=100', 'anonymous')).body));
+    for (const key of Object.keys(slugs) as ComicKey[]) {
+      responses.push(JSON.stringify((await get(`/comics/slug/${slugs[key]}`, 'anonymous')).body));
+      responses.push(JSON.stringify((await get(`/comics/${comicIds[key]}/chapters?limit=100`, 'anonymous')).body));
+      for (const chapterId of Object.values(chapterIds[key])) {
+        responses.push(JSON.stringify((await get(`/comics/chapters/${chapterId}`, 'anonymous')).body));
+      }
+    }
+    const text = responses.join('\n');
+    for (const key of Object.keys(slugs) as ComicKey[]) {
+      for (const n of [1, 2, 3]) {
+        const visible = (key === 'published' || key === 'featured') && n !== 3;
+        for (const url of pagesOf(key, n)) if (!visible && text.includes(url)) leaked.push(url);
+      }
+    }
+    expect(leaked).toEqual([]);
+    // 已发布漫画的已发布章节照常能读到（门户阅读页）
+    expect(text).toContain(pagesOf('featured', 2)[0]);
+  });
+});

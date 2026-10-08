@@ -19,7 +19,7 @@ export const MOVIE_LIST_MAX_PAGE = 100_000;
  * 'true' / 'false' 以字符串拼进 SQL，MySQL 把 'true' 当 0 比较：门户首页的「推荐影视」（isFeatured=true）
  * 拿到的反而是非推荐片，后台封面筛选选「异常」显示的是正常封面。
  */
-function queryBoolean({ obj, key }: TransformFnParams): unknown {
+export function queryBoolean({ obj, key }: TransformFnParams): unknown {
   const raw: unknown = (obj as Record<string, unknown>)[key];
   if (raw === 'true' || raw === true) return true;
   if (raw === 'false' || raw === false) return false;
