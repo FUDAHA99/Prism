@@ -5,11 +5,14 @@
 # 使用前提：
 #   1. 域名已解析到本机公网 IP（A 记录）
 #   2. 防火墙已放行 80 / 443 端口
-#   3. 已完成初次部署（docker-compose.prod.yml 已在运行）
+#   3. 已用当前版本的 scripts/deploy.sh 完成部署（nginx/nginx.active.conf 已生成、容器在运行）
 #   4. .env.prod 中 DOMAIN 已填写真实域名，如 https://prism.example.com
 #
 # 用法：
 #   bash scripts/setup-ssl.sh [邮箱]
+#
+# 停掉 nginx 之后任何一步失败，都会恢复原来的 nginx/nginx.active.conf、撤回本次复制进
+# nginx/ssl/ 的证书（原件仍在 /etc/letsencrypt），再把 nginx 启动回来，站点保持 HTTP 可用。
 # =================================================================
 
 set -euo pipefail
@@ -24,19 +27,19 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_DIR"
 
-# ── 读取域名 ────────────────────────────────────────────────────
+COMPOSE="docker compose -f docker-compose.prod.yml --env-file .env.prod"
+
+# ── 前置检查 / 读取域名 ─────────────────────────────────────────
 [ -f .env.prod ] || die ".env.prod 不存在，请先完成初始部署"
-RAW_DOMAIN=$(grep '^DOMAIN=' .env.prod | cut -d= -f2)
-DOMAIN=${RAW_DOMAIN#https://}
-DOMAIN=${DOMAIN#http://}
-[ -z "$DOMAIN" ] && die "DOMAIN 未在 .env.prod 中配置"
+[ -f nginx/nginx-ssl.conf ] || die "找不到 nginx/nginx-ssl.conf，请确认代码完整"
+[ -f nginx/nginx.active.conf ] || die "找不到 nginx/nginx.active.conf：请先用当前版本的 bash scripts/deploy.sh 完成一次部署"
+# 与生成 nginx 配置用同一套解析（规则同 docker compose 读 .env.prod），certbot -d、证书路径与 server_name 一致
+DOMAIN=$(bash scripts/render-nginx-conf.sh --print-domain) \
+  || die "无法从 .env.prod 的 DOMAIN 解析出主机名（见上方报错）"
 EMAIL=${1:-"admin@${DOMAIN}"}
 
 log "域名：$DOMAIN"
 log "邮箱：$EMAIL（用于 Let's Encrypt 到期提醒）"
-
-# ── 检查 nginx-ssl.conf 模板 ─────────────────────────────────────
-[ -f "nginx/nginx-ssl.conf" ] || die "找不到 nginx/nginx-ssl.conf，请确认代码完整"
 
 # ── 安装 Certbot ─────────────────────────────────────────────────
 if ! command -v certbot &>/dev/null; then
@@ -50,9 +53,33 @@ if ! command -v certbot &>/dev/null; then
   fi
 fi
 
+# ── 失败兜底：停掉 nginx 之后任何一步出错，都恢复原状并把 nginx 启动回来 ──
+NGINX_DOWN=false
+HAD_CERT=false
+if [ -f nginx/ssl/fullchain.pem ]; then HAD_CERT=true; fi
+ACTIVE_BAK=$(mktemp)
+cp nginx/nginx.active.conf "$ACTIVE_BAK"
+on_exit() {
+  local rc=$?
+  if [ "$rc" -ne 0 ] && $NGINX_DOWN; then
+    warn "HTTPS 配置未完成（退出码 $rc），恢复原来的 nginx 配置并启动 nginx..."
+    cp -f "$ACTIVE_BAK" nginx/nginx.active.conf
+    if ! $HAD_CERT && [ -f nginx/ssl/fullchain.pem ]; then
+      # 留着的话下次 deploy.sh 会切到 HTTPS 模式，而 .env.prod 的 DOMAIN 还没改成 https://
+      rm -f nginx/ssl/fullchain.pem nginx/ssl/privkey.pem
+      warn "已撤回本次复制到 nginx/ssl/ 的证书（原件仍在 /etc/letsencrypt），服务器保持 HTTP 模式"
+    fi
+    $COMPOSE up -d --no-deps --force-recreate nginx \
+      || warn "nginx 启动失败，请手工检查：$COMPOSE ps nginx；$COMPOSE logs nginx"
+  fi
+  rm -f "$ACTIVE_BAK"
+}
+trap on_exit EXIT
+
 # ── 临时停 nginx（certbot standalone 需要占用 80 端口）──────────
 log "临时停止 nginx 容器..."
-docker compose -f docker-compose.prod.yml --env-file .env.prod stop nginx
+NGINX_DOWN=true
+$COMPOSE stop nginx
 
 # ── 申请证书 ─────────────────────────────────────────────────────
 log "申请 SSL 证书（使用 standalone 模式）..."
@@ -74,29 +101,28 @@ cp "$CERT_DIR/privkey.pem"   nginx/ssl/privkey.pem
 chmod 644 nginx/ssl/fullchain.pem
 chmod 600 nginx/ssl/privkey.pem
 
-# ── 用 nginx-ssl.conf 模板生成带域名的配置，覆盖 nginx.conf ──────
-# 证书已在 nginx/ssl，渲染脚本会走 HTTPS 分支；之后每次 deploy.sh / CI 部署
-# 都会先还原 nginx.conf 再调用同一脚本重新生成，不会退回 HTTP 版
+# ── 生成 HTTPS 生效配置并校验 ────────────────────────────────────
+# 证书已在 nginx/ssl，render 走 HTTPS 分支，由 nginx-ssl.conf 生成 nginx/nginx.active.conf；
+# 之后每次 deploy.sh / CI 部署都会按同样规则重新生成，不会退回 HTTP 版
 log "生成 HTTPS nginx 配置..."
 bash scripts/render-nginx-conf.sh
+log "校验 nginx 配置（一次性容器）..."
+bash scripts/check-nginx-conf.sh || die "HTTPS 配置未通过 nginx -t（见上方输出）"
 
-# ── 更新 .env.prod 的 DOMAIN 协议为 https ───────────────────────
-DOMAIN_CHANGED=false
-if grep -q "^DOMAIN=http://" .env.prod; then
-  sed -i "s|^DOMAIN=http://|DOMAIN=https://|" .env.prod
-  DOMAIN_CHANGED=true
-  log ".env.prod DOMAIN 已更新为 https://"
-fi
+# ── 启动 nginx（重建：重新挂载新生成的配置并重新解析 upstream）──────
+log "启动 nginx..."
+$COMPOSE up -d --no-deps --force-recreate nginx
+NGINX_DOWN=false   # nginx 已带 HTTPS 配置跑起来，之后的失败不再回滚
 
-# ── 启动 nginx；DOMAIN 变了则连带重建 backend / portal ──────────
-COMPOSE="docker compose -f docker-compose.prod.yml --env-file .env.prod"
-log "启动 nginx（容器 start 时会重新挂载新生成的 nginx.conf）..."
-$COMPOSE up -d nginx
+# ── 更新 .env.prod 的 DOMAIN 协议为 https；变了则连带重建 backend / portal ──
 # NEXT_PUBLIC_API_BASE 是 portal 的构建期参数，CORS_ORIGIN 在 backend 容器创建时注入；
 # 不重建的话门户客户端仍请求 http:// API，会被浏览器按混合内容拦截（评论区失效）
-if $DOMAIN_CHANGED; then
+if grep -q "^DOMAIN=http://" .env.prod; then
+  sed -i "s|^DOMAIN=http://|DOMAIN=https://|" .env.prod
+  log ".env.prod DOMAIN 已更新为 https://"
   log "DOMAIN 已变更，重建 backend / portal（期间站点可访问）..."
-  $COMPOSE up -d --build backend portal
+  $COMPOSE up -d --build backend portal \
+    || die "重建 backend / portal 失败：HTTPS 已生效，修复后执行 bash scripts/deploy.sh"
   $COMPOSE up -d --no-deps --force-recreate nginx   # 重新解析新容器 IP
 fi
 

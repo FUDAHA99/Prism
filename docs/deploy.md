@@ -87,14 +87,17 @@ openssl rand -hex 32
 bash scripts/deploy.sh
 ```
 
-脚本会自动完成：
-1. `git pull` 拉取最新代码，并按当前模式生成 nginx 配置（HTTPS 模式见第 7 节）
-2. 检测是否首次部署（自动设置 `DB_SYNC=true` 建表）
-3. 构建三个业务镜像（backend / portal / frontend）
-4. 启动所有 6 个容器
-5. 等待 backend 就绪后，在一次性容器里校验 nginx 配置（`nginx -t`），通过后强制重建 nginx 容器（见第 7 节「nginx 配置变更如何生效」）
-6. 首次部署：运行 `seed-admin.js` 创建管理员账户，并配置每日自动备份
-7. 首次部署仅在本次执行中临时设置 `DB_SYNC=true`（不修改 `.env.prod`）；backend 容器会一直保留 `DB_SYNC=true`，直到下一次 `up` 重建它。建完表后执行 `docker compose -f docker-compose.prod.yml --env-file .env.prod up -d backend` 关闭（`restart` 无效），再执行 `docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --no-deps --force-recreate nginx` 让 nginx 重新解析 backend 的新容器 IP（或直接再执行一次 `bash scripts/deploy.sh`，两步都会做）。
+脚本会自动完成（手工部署与 CI 部署执行的是同一份脚本）：
+1. `git pull` 拉取最新代码；`scripts/deploy.sh` 自身有更新时，自动改用新版本继续（`--skip-pull` 跳过这一步）
+2. 生成 nginx 生效配置 `nginx/nginx.active.conf`（`scripts/render-nginx-conf.sh`；HTTP / HTTPS 模式见第 7 节）
+3. 部署前校验：在一次性容器里对生成的配置跑 `nginx -t`，不依赖业务容器；不通过则中止，业务容器与线上 nginx 都不动
+4. 检测是否首次部署（自动设置 `DB_SYNC=true` 建表）；`.env.prod` 里写着 `DB_SYNC=true` 时打印警告
+5. 构建三个业务镜像（backend / portal / frontend），启动全部 6 个容器
+6. 等待 backend 就绪后接到真实 Docker 网络再跑一次 `nginx -t`，通过后强制重建 nginx 容器（每次部署 80/443 中断数秒，见第 7 节「nginx 配置变更如何生效」）
+7. 首次部署：运行 `seed-admin.js` 创建管理员账户，并配置每日自动备份
+8. 清理悬空镜像（`docker image prune -f`）
+
+首次部署仅在本次执行中临时设置 `DB_SYNC=true`（不修改 `.env.prod`）；backend 容器会一直保留 `DB_SYNC=true`，直到下一次 `up` 重建它。建完表后执行 `docker compose -f docker-compose.prod.yml --env-file .env.prod up -d backend` 关闭（`restart` 无效），再执行 `docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --no-deps --force-recreate nginx` 让 nginx 重新解析 backend 的新容器 IP（或直接再执行一次 `bash scripts/deploy.sh`，两步都会做）。
 
 部署完成后访问：
 
@@ -156,8 +159,10 @@ $COMPOSE down
 ### 拉取最新代码并重部署
 
 ```bash
-bash scripts/deploy.sh   # 内含 git pull + 带 --env-file 的 up -d --build
+bash scripts/deploy.sh   # 内含 git pull、生成并校验 nginx 配置、带 --env-file 的 up -d --build、重建 nginx
 ```
+
+> 已有服务器第一次升级到「nginx 生效配置改为 `nginx.active.conf`」的版本时，不要直接运行服务器上的旧 `deploy.sh`，先看第 5.1 节。
 
 ---
 
@@ -177,6 +182,54 @@ $COMPOSE up -d --no-deps --force-recreate nginx
 ```
 
 > ⚠️ build/up 漏掉 `--env-file` 时，portal 会被构建成请求 `http://localhost:3001`，backend/mysql/redis 会以空密码重建，mysql 健康检查失败后 backend 起不来。
+
+### 5.1 已有部署首次升级到本版本（2026-10 批次）须知
+
+本批次有两处需要已有服务器先处理，全新部署不受影响。
+
+**① 上线前确认管理员带 `admin` / `editor` 角色。** 从本批次起，评论管理的 8 个接口要求 `admin` 或 `editor` 角色（`seed-admin.js` 只在首次部署时运行，已有库里的管理员可能没有任何角色）。缺角色时这些接口全部返回 403，而管理后台的评论页会先转圈十几秒、再显示成空列表，看起来像「没有评论」。在推送 / 部署本批次**之前**，先在服务器的项目目录执行（库名、账号、密码取自 `prism-mysql` 容器自己的环境变量，无需手填）：
+
+```bash
+docker exec -i prism-mysql sh -c 'exec mysql --default-character-set=utf8mb4 -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' <<'SQL'
+SELECT u.email, r.name AS role FROM users u
+JOIN user_roles ur ON ur.user_id = u.id
+JOIN roles r ON r.id = ur.role_id
+WHERE r.name IN ('admin', 'editor');
+SQL
+```
+
+有输出（实际在用的管理员账号带 `admin` 或 `editor`）就不用处理。没有输出时补角色——把 `admin@cms.com` 换成线上实际在用的管理员邮箱，可重复执行：
+
+```bash
+docker exec -i prism-mysql sh -c 'exec mysql --default-character-set=utf8mb4 -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' <<'SQL'
+INSERT IGNORE INTO roles (id, name, description, isSystem, createdAt, updatedAt)
+VALUES (UUID(), 'admin', '系统管理员', 1, NOW(6), NOW(6));
+INSERT IGNORE INTO user_roles (user_id, role_id)
+SELECT u.id, r.id FROM users u JOIN roles r ON r.name = 'admin' WHERE u.email = 'admin@cms.com';
+SELECT u.email, r.name AS role FROM users u
+JOIN user_roles ur ON ur.user_id = u.id
+JOIN roles r ON r.id = ur.role_id
+WHERE r.name IN ('admin', 'editor');
+SQL
+```
+
+最后一条 SELECT 应列出该邮箱和 `admin`。然后让该账号退出重新登录（登录会清掉 5 分钟的用户缓存），新角色才生效。不要为此重跑 `seed-admin.js`（账号已存在时它会把密码重置为 `Admin123!`），也不要顺手创建 `user` 角色（见 `docs/dev-guide.md`「初始化管理员角色」）。
+
+**② 第一次运行新的部署流程。** nginx 的生效配置改成了生成的 `nginx/nginx.active.conf`（第 7 节），`docker-compose.prod.yml` 挂载的是它，文件不存在时 nginx 容器会创建失败。
+
+- **CI 部署**：不需要手工操作。新的 workflow 会先把有本地改动的 `nginx/nginx.conf`（旧版 `setup-ssl.sh` 把 HTTPS 配置写进了这个受跟踪的文件）备份到 `backup/nginx.conf.local.<时间>` 并还原，再 `git pull`、运行新版 `deploy.sh`。
+- **手工部署**：服务器上现有的 `scripts/deploy.sh` 还是旧版，**不要直接运行它**——旧脚本不会生成 `nginx.active.conf`，HTTP 服务器上它 `up` 时会让 nginx 容器因挂载文件不存在而重建失败；HTTPS 服务器上它的 `git pull` 会因 `nginx/nginx.conf` 的本地改动中止。第一次按下面执行，之后照常 `bash scripts/deploy.sh`：
+
+  ```bash
+  cd /opt/prism-cms   # 项目目录
+  # 只有 nginx/nginx.conf 有本地改动（HTTPS 服务器）时才会备份并还原，否则什么也不做
+  git diff --quiet HEAD -- nginx/nginx.conf || { mkdir -p backup; cp nginx/nginx.conf backup/nginx.conf.local.bak; git checkout HEAD -- nginx/nginx.conf; }
+  git pull origin main
+  bash scripts/deploy.sh --skip-pull
+  ```
+
+- 已经误跑了旧脚本、nginx 起不来时：代码已经拉下来了，直接 `bash scripts/deploy.sh --skip-pull`，它会生成配置、校验并重建 nginx。
+- 从本版本起，`deploy.sh` 在 `git pull` 拉到自身更新时会自动改跑新版本，不再需要「连续执行两次」；本地改动的迁移也内置在 `deploy.sh` 里（备份同样放在 `backup/`，不会被自动清理）。
 
 ---
 
@@ -212,7 +265,7 @@ docker run --rm \
 
 ## 7. 配置 HTTPS（Let's Encrypt）
 
-**前提**：域名已解析到服务器 IP，防火墙放行 80 和 443 端口（certbot standalone 校验需要 80）。
+**前提**：域名已解析到服务器 IP，防火墙放行 80 和 443 端口（certbot standalone 校验需要 80）；已用当前版本的 `deploy.sh` 部署过（`nginx/nginx.active.conf` 已生成）。
 
 ```bash
 # 一键申请证书并启用 HTTPS（传入邮箱用于到期提醒）
@@ -221,16 +274,22 @@ bash scripts/setup-ssl.sh admin@example.com
 
 脚本会自动完成：
 1. 安装 Certbot
-2. 临时停止 nginx，申请 Let's Encrypt 免费证书（standalone 模式）
-3. 将证书复制到 `nginx/ssl/`
-4. 调用 `scripts/render-nginx-conf.sh`，由 `nginx/nginx-ssl.conf` 模板生成 `nginx/nginx.conf`。该文件受 Git 跟踪，HTTPS 模式下是生成物；之后每次 `deploy.sh` / CI 部署都会在 `git pull` 前自动还原它、pull 后重新生成，不需要手工处理
-5. 将 `.env.prod` 的 `DOMAIN` 改为 `https://`
-6. 启动 nginx；若上一步改了 `DOMAIN`，自动重建 backend / portal（portal 构建期写入 API 地址，backend 创建时注入 CORS 白名单），再重建 nginx
-7. 将自动续签任务写入 crontab（每天凌晨 3:00 检查）
+2. 从 `.env.prod` 的 `DOMAIN` 解析主机名（`bash scripts/render-nginx-conf.sh --print-domain`，与生成 nginx 配置同一套规则），用于 `certbot -d`、证书路径和续签脚本
+3. 临时停止 nginx，申请 Let's Encrypt 免费证书（standalone 模式）
+4. 将证书复制到 `nginx/ssl/`
+5. 调用 `scripts/render-nginx-conf.sh`，由 `nginx/nginx-ssl.conf` 模板生成 `nginx/nginx.active.conf`，再用 `scripts/check-nginx-conf.sh` 在一次性容器里 `nginx -t`
+6. 重建并启动 nginx
+7. 将 `.env.prod` 的 `DOMAIN` 改为 `https://`；改了则自动重建 backend / portal（portal 构建期写入 API 地址，backend 创建时注入 CORS 白名单），再重建 nginx
+8. 将自动续签任务写入 crontab（每天凌晨 3:00 检查）
+
+停掉 nginx 之后（第 3～6 步）任何一步失败，脚本都会恢复原来的 `nginx/nginx.active.conf`、撤回本次复制进 `nginx/ssl/` 的证书（原件仍在 `/etc/letsencrypt`），再把 nginx 启动回来，站点保持 HTTP 可用；修好问题后重跑即可。
 
 ### nginx 配置变更如何生效
 
-- **两份配置必须同步修改**：`nginx/nginx.conf` 是 HTTP 模式直接生效的配置，`nginx/nginx-ssl.conf` 是 HTTPS 模板。服务器跑过 `setup-ssl.sh` 后（判断依据：`nginx/ssl/fullchain.pem` 存在），生效的 `nginx/nginx.conf` 由模板生成，**只改 `nginx.conf` 的改动在 HTTPS 环境会丢失**。除 HSTS 与 80→443 跳转 server 外，两份的 http 块和全部 location 必须一致。提交前在仓库根目录用 bash 跑一遍镜像校验，输出 `HTTP_BLOCK_OK` 和 `LOCATIONS_OK` 才算一致：
+- **生效配置是生成物**：nginx 容器挂载的是 `nginx/nginx.active.conf`（未跟踪，已 gitignore），由 `scripts/render-nginx-conf.sh` 生成。HTTP 模式下它是 `nginx/nginx.conf` 的副本；HTTPS 模式（判断依据：`nginx/ssl/fullchain.pem` 存在，即跑过 `setup-ssl.sh`）下由 `nginx/nginx-ssl.conf` 填入 `DOMAIN` 的主机名生成。写入是原子的，生成失败时保留上一次的文件。仓库里受跟踪的两份配置从不被改写，`git pull` 不会再因它们中止。
+- **compose 不会替你建这个文件**：`docker-compose.prod.yml` 用长语法加 `create_host_path: false` 挂载它，文件不存在时 `up` 直接报错（`bind source path does not exist`），而不是让 Docker 在宿主机上建一个同名空目录。手工 `up` 前先跑 `bash scripts/render-nginx-conf.sh`。
+- **`DOMAIN` 的解析规则与 docker compose 读 `.env.prod` 一致**：多行时取最后一行；加引号的取引号内的值；不加引号的值从第一个「空格 + `#`」起是行内注释，再去掉首尾空白（含 tab、CR）。之后去掉 `https://` 和路径，只接受主机名（不支持端口）。`bash scripts/render-nginx-conf.sh --print-domain` 打印解析结果。
+- **两份配置必须同步修改**：`nginx/nginx.conf` 是 HTTP 版，`nginx/nginx-ssl.conf` 是 HTTPS 模板，**只改 `nginx.conf` 的改动在 HTTPS 环境会丢失**。除 HSTS 与 80→443 跳转 server 外，两份的 http 块和全部 location 必须一致。提交前在仓库根目录用 bash 跑一遍镜像校验，输出 `HTTP_BLOCK_OK` 和 `LOCATIONS_OK` 才算一致：
 
   ```bash
   norm(){ sed -e 's/[[:space:]]*#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]\+/ /g' "$1" | grep -v '^$'; }
@@ -238,23 +297,19 @@ bash scripts/setup-ssl.sh admin@example.com
   diff <(norm nginx/nginx.conf | sed -n '/^location \/api\//,$p') <(norm nginx/nginx-ssl.conf | sed -n '/^location \/api\//,$p') && echo LOCATIONS_OK
   ```
 
-- **不要在服务器上手改 `nginx/nginx.conf`**：HTTPS 模式下每次部署都会先 `git checkout -- nginx/nginx.conf` 再重新生成，手改会被覆盖；HTTP 模式下手改会让 `git pull` 中止。
-- **部署时自动校验并重建**：`nginx.conf` 以单文件 bind mount 挂载，`git pull` 换了文件 inode 后，运行中的容器仍读旧文件，`up -d --build` 也不会重建 nginx；`exec` 进旧容器跑 `nginx -t` 测的也是旧文件。所以 `deploy.sh` 和 CI 在 backend 就绪后，会在一次性 `nginx:alpine` 容器里（与 nginx 服务同一 Docker 网络、同样的挂载）对新文件跑 `nginx -t`，通过后再 `up -d --no-deps --force-recreate nginx`。校验失败时部署中止、不重建，线上继续用旧配置。重建还会让 nginx 重新解析 backend / portal / frontend 的新容器 IP。手工执行的等价命令：
+- **不要在服务器上手改** `nginx/` 下的任何文件：`nginx.active.conf` 每次部署都会重新生成；两份受跟踪的配置手改后，HTTP 模式会原样生效且让下次 `git pull` 可能中止。改动一律走仓库提交。
+- **部署时两道 `nginx -t`**：
+  1. 部署前（`scripts/check-nginx-conf.sh`）：一次性 `nginx:alpine` 容器，不接任何网络，upstream 主机名 `backend` / `portal` / `frontend` 用 `--add-host` 指到 127.0.0.1，只检查语法与语义（指令、正则、证书能否加载），不依赖业务容器是否在跑，首次部署也能用。不通过则部署中止，业务容器与线上 nginx 都不动。
+  2. 部署后：`up -d --build` 之后，接到 `prism-backend` 所在的真实网络、挂载与 nginx 服务一致再跑一次，通过后 `up -d --no-deps --force-recreate nginx`。这一步失败几乎都是 `host not found in upstream "xxx"`——对应的业务容器没在运行，不是配置问题；此时脚本不重建 nginx（重建了也起不来），线上旧 nginx 可能还指向业务容器的旧 IP（502），修好业务容器后手工执行下面最后一条命令。
+- **每次部署都重建 nginx，80/443 会中断数秒（已接受）**：单文件 bind mount 绑定的是 inode，render 用 `mv` 换了文件后运行中的容器仍读旧内容；upstream 也只在启动时解析一次，业务容器重建换 IP 后必须重建 nginx 才能连上。代价是每次部署都有几秒不可用：旧容器收到 SIGQUIT 后立即停止监听，最多再排空 10 秒，更长的请求（大文件上传、`/uploads/` 下视频的 Range 流）会被切断。要做到零中断，需要改为挂载 `nginx/` 目录、upstream 用 `resolver 127.0.0.11` 加变量形式的 `proxy_pass`、部署时 `nginx -t && nginx -s reload`，目前未做。
+- 手工执行的等价命令：
 
   ```bash
   COMPOSE="docker compose -f docker-compose.prod.yml --env-file .env.prod"
-  bash scripts/render-nginx-conf.sh    # HTTPS 模式下重新生成；HTTP 模式下什么也不做
-  NET=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.NetworkID}} {{end}}' prism-backend | awk '{print $1}')
-  mkdir -p nginx/ssl
-  docker run --rm --network "$NET" \
-    -v "$PWD/nginx/nginx.conf:/etc/nginx/nginx.conf:ro" \
-    -v "$PWD/nginx/ssl:/etc/nginx/ssl:ro" \
-    -v prism_nginx_logs:/var/log/nginx \
-    nginx:alpine nginx -t
+  bash scripts/render-nginx-conf.sh    # 生成 nginx/nginx.active.conf
+  bash scripts/check-nginx-conf.sh     # 一次性容器 nginx -t，不依赖业务容器
   $COMPOSE up -d --no-deps --force-recreate nginx
   ```
-
-- **首次上线引入本机制的版本时**：`deploy.sh` 在执行过程中 `git pull` 了自己，bash 仍在读旧脚本，所以拉到新版本的那一次运行的是旧逻辑，不会校验和重建 nginx。需要连续执行两次 `bash scripts/deploy.sh`（第一次运行的是旧脚本），或在第一次之后手工执行上面的 `nginx -t` 和重建。HTTPS 服务器在第一次执行前还要先 `git checkout -- nginx/nginx.conf`：旧脚本不会自动还原，`git pull` 会因本地改动中止。CI 的部署脚本内联在 workflow 里，不受影响。
 
 ---
 
@@ -274,13 +329,13 @@ bash scripts/setup-ssl.sh admin@example.com
 | `SSH_PORT` | SSH 端口，默认 22（可省略） |
 | `DEPLOY_PATH` | 项目在服务器上的绝对路径（如 `/opt/prism-cms`） |
 
-配置完成后，每次 `git push origin main` 都会自动：
-1. SSH 登录服务器
-2. `git pull` 拉取最新代码，并按当前模式生成 nginx 配置（HTTPS 模式下 pull 前先还原 `nginx/nginx.conf`）
-3. `docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build` 重新构建并启动
-4. 等待 backend 健康检查通过
-5. 在一次性容器里 `nginx -t` 校验新配置，通过后强制重建 nginx
-6. 清理旧镜像
+配置完成后，每次 `git push origin main` 在构建门禁通过后都会自动：
+1. SSH 登录服务器，进入 `DEPLOY_PATH`
+2. `nginx/nginx.conf` 有本地改动时（旧版 `setup-ssl.sh` 留下的）备份到 `backup/` 并还原，见第 5.1 节；pull 失败时恢复原样
+3. `git pull origin main`
+4. `bash scripts/deploy.sh --skip-pull`：与手工部署完全相同的流程（第 3.3 节：生成并校验 nginx 配置、构建启动、等 backend、再校验并重建 nginx、清理旧镜像）
+
+部署逻辑只维护 `scripts/deploy.sh` 一份，workflow 里不要再内联部署步骤。workflow 的 `script` 段经 appleboy/ssh-action 执行，其底层 drone-ssh 可能按半角逗号切分，不要在里面写 ASCII 逗号。
 
 ### 生成 SSH 密钥对（若无）
 
@@ -314,6 +369,14 @@ docker compose -f docker-compose.prod.yml --env-file .env.prod logs backend
 常见原因：
 - `.env.prod` 变量未填写或格式错误
 - MySQL 首次启动较慢，backend 健康检查超时（重新执行 `deploy.sh` 即可）
+
+### nginx 容器创建失败：bind source path does not exist … nginx.active.conf
+
+nginx 挂载的生效配置还没生成（例如手工 `up` 前没跑 render，或在已有服务器上运行了旧版 `deploy.sh`，见第 5.1 节）。执行 `bash scripts/render-nginx-conf.sh` 后重新 `up`，或直接 `bash scripts/deploy.sh --skip-pull`。
+
+### 部署中止：「部署后 nginx -t 失败，未重建 nginx」
+
+部署前的语法检查已经通过，所以几乎都是上方输出里有 `host not found in upstream "xxx"`：对应的业务容器没在运行。用 `$COMPOSE ps`、`$COMPOSE logs <服务>` 找原因，修好后执行 `$COMPOSE up -d --no-deps --force-recreate nginx`（第 7 节）。
 
 ### 管理后台登录 401
 

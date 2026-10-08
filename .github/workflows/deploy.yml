@@ -92,63 +92,32 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key:      ${{ secrets.SSH_PRIVATE_KEY }}
           port:     ${{ secrets.SSH_PORT || 22 }}
+          # 部署逻辑全部在 scripts/deploy.sh（与手工部署同一份）。这里先 git pull 再带 --skip-pull 调用，
+          # 保证执行的是刚拉下来的新版 deploy.sh。
+          # 注意：appleboy/ssh-action 底层的 drone-ssh 可能按 ASCII 逗号切分 script，本段不要出现半角逗号。
           script: |
             set -euo pipefail
             cd ${{ secrets.DEPLOY_PATH || '/opt/prism-cms' }}
 
-            echo "=== [1/6] 拉取最新代码 ==="
-            # HTTPS 模式下 nginx/nginx.conf 是 render-nginx-conf.sh 的生成物（受 git 跟踪），
-            # 不先还原的话，上游一改 nginx.conf，git pull 就会中止
-            if [ -f nginx/ssl/fullchain.pem ]; then git checkout -- nginx/nginx.conf; fi
+            # 一次性迁移（见 docs/deploy.md 第 7 节）：旧版 setup-ssl.sh 把 HTTPS 配置写进了受跟踪的
+            # nginx/nginx.conf；生效配置现在是生成的 nginx/nginx.active.conf，备份后还原它，否则 git pull 会中止
+            BAK=""
+            if ! git diff --quiet HEAD -- nginx/nginx.conf; then
+              mkdir -p backup
+              BAK="backup/nginx.conf.local.$(date +%Y%m%d-%H%M%S)"
+              cp nginx/nginx.conf "$BAK"
+              git checkout HEAD -- nginx/nginx.conf
+              echo "nginx/nginx.conf 有本地改动：已备份到 $BAK 并还原"
+            fi
+
             if ! git pull origin main; then
-              # 上一步已把 nginx.conf 还原成 HTTP 版，退出前按当前模式重新生成，
-              # 否则 nginx 容器下次重启会以 HTTP 配置起来、443 不再监听
-              bash scripts/render-nginx-conf.sh || echo "::warning::nginx/nginx.conf 重新生成失败，请登录服务器执行 bash scripts/render-nginx-conf.sh"
-              echo "git pull 失败，部署中止"
+              # pull 没成功：服务器仍是旧版本（旧版 compose 挂载的就是 nginx/nginx.conf）——恢复原样
+              if [ -n "$BAK" ]; then cp -f "$BAK" nginx/nginx.conf; fi
+              echo "git pull 失败，部署中止（未改动任何容器）"
               exit 1
             fi
-            # 按当前模式生成 nginx/nginx.conf（HTTP 模式下什么也不做）
-            bash scripts/render-nginx-conf.sh
 
-            echo "=== [2/6] 安全检查 ==="
-            if grep -q '^DB_SYNC=true' .env.prod 2>/dev/null; then
-              echo "::warning::.env.prod 中 DB_SYNC=true —— TypeORM 会在容器启动时 ALTER 生产库，改类型或删列将静默丢数据。首次部署完成后应改回 false。"
-            fi
-
-            echo "=== [3/6] 构建并重启服务 ==="
-            docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build --remove-orphans
-
-            echo "=== [4/6] 等待 backend 健康 ==="
-            for i in $(seq 1 24); do
-              STATUS=$(docker inspect --format='{{.State.Health.Status}}' prism-backend 2>/dev/null || echo "none")
-              if [ "$STATUS" = "healthy" ]; then
-                echo "backend 就绪 (healthy)"
-                break
-              fi
-              [ $i -eq 24 ] && { echo "backend 启动超时 (status=$STATUS)"; docker logs --tail 50 prism-backend; exit 1; }
-              sleep 5
-            done
-
-            echo "=== [5/6] 校验并重建 nginx ==="
-            # 单文件 bind mount：git pull 换了 inode，运行中的容器仍读旧文件，up -d 也不会重建 nginx；
-            # 先在一次性容器里（与 compose 的 nginx 服务同网络、同挂载）用新文件跑 nginx -t，
-            # 通过后再强制重建，同时让 upstream 重新解析新容器 IP。校验失败则中止，线上保持旧配置。
-            NET=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.NetworkID}} {{end}}' prism-backend | awk '{print $1}') \
-              || { echo "找不到 prism-backend 容器，无法确定 Docker 网络"; exit 1; }
-            [ -n "$NET" ] || { echo "prism-backend 没有接入任何 Docker 网络"; exit 1; }
-            mkdir -p nginx/ssl
-            docker run --rm --network "$NET" \
-              -v "$PWD/nginx/nginx.conf:/etc/nginx/nginx.conf:ro" \
-              -v "$PWD/nginx/ssl:/etc/nginx/ssl:ro" \
-              -v prism_nginx_logs:/var/log/nginx \
-              nginx:alpine nginx -t \
-              || { echo "nginx 配置校验失败，未重建 nginx（线上仍是旧配置）"; exit 1; }
-            docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --no-deps --force-recreate nginx
-
-            echo "=== [6/6] 清理旧镜像 ==="
-            docker image prune -f
-
-            echo "部署完成: $(date '+%Y-%m-%d %H:%M:%S')"
+            bash scripts/deploy.sh --skip-pull
 
       - name: Notify on failure
         if: failure()

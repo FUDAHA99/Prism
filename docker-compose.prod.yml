@@ -7,7 +7,8 @@ version: '3.8'
 #   2. bash scripts/deploy.sh
 #
 # 手动操作：
-#   启动: docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+#   启动: bash scripts/render-nginx-conf.sh   # 先生成 nginx/nginx.active.conf，否则 nginx 起不来
+#         docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
 #   停止: docker compose -f docker-compose.prod.yml down
 #   日志: docker compose -f docker-compose.prod.yml logs -f <service>
 #   重置: docker compose -f docker-compose.prod.yml down -v  ⚠️ 删除所有数据
@@ -179,7 +180,16 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # 生效配置 nginx/nginx.active.conf 是 scripts/render-nginx-conf.sh 的生成物（未跟踪），
+      # deploy.sh / setup-ssl.sh 会先生成它；不要挂仓库里的 nginx.conf，也不要在服务器上手改。
+      # 长语法 + create_host_path: false：文件不存在时 up 直接报错，
+      # 而不是让 Docker 在宿主机上建一个同名空目录、nginx 再因挂载类型不符起不来。
+      - type: bind
+        source: ./nginx/nginx.active.conf
+        target: /etc/nginx/nginx.conf
+        read_only: true
+        bind:
+          create_host_path: false
       - ./nginx/ssl:/etc/nginx/ssl:ro          # SSL 证书（可选）
       - prism_nginx_logs:/var/log/nginx
     networks:

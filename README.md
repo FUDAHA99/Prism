@@ -58,7 +58,7 @@ prism-cms/
 ├── backend/                 # NestJS API（端口 3001）
 ├── frontend/                # React 管理后台（开发端口 5173）
 ├── portal/                  # Next.js 前台门户（端口 3002）
-├── nginx/                   # 生产反向代理配置（nginx.conf；nginx-ssl.conf 为 HTTPS 模板）
+├── nginx/                   # 生产反向代理配置（nginx.conf；nginx-ssl.conf 为 HTTPS 模板；生效的 nginx.active.conf 部署时生成）
 ├── scripts/                 # 生产运维脚本：deploy.sh / setup-ssl.sh / backup.sh
 ├── database/init/           # 仅本地开发：MySQL 首次初始化脚本
 ├── docs/                    # 文档
@@ -109,7 +109,7 @@ cp .env.prod.example .env.prod   # 编辑填入域名、密码、JWT 密钥
 bash scripts/deploy.sh
 ```
 
-> ⚠️ **唯一的生产部署入口是 `scripts/deploy.sh`**，它固定使用 `docker-compose.prod.yml` + `.env.prod`；GitHub Actions 自动部署（`.github/workflows/deploy.yml`）用的也是这一份编排。
+> ⚠️ **唯一的生产部署入口是 `scripts/deploy.sh`**，它固定使用 `docker-compose.prod.yml` + `.env.prod`；GitHub Actions 自动部署（`.github/workflows/deploy.yml`）`git pull` 后调用的也是这一份脚本。
 > - 根目录的 `docker-compose.yml` 只用于本地开发：它把 MySQL(3306) / Redis(6379) / Adminer(8080) 直接发布到宿主机，且使用弱口令，**切勿在服务器上运行**。
 > - 手动执行 compose 命令时必须带 `--env-file .env.prod`。Compose 只会自动读取 `.env`，漏掉这个参数时 `DOMAIN`、数据库密码、JWT 密钥都会按空串处理。
 

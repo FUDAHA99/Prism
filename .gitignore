@@ -62,6 +62,10 @@ scripts/renew-ssl.sh
 # ─── SSL 证书（含私钥，绝不入库）───────────────────
 nginx/ssl/
 
+# ─── nginx 生效配置：scripts/render-nginx-conf.sh 的生成物（及其写入中的临时文件）─
+nginx/nginx.active.conf
+nginx/.nginx.active.conf.*
+
 # ─── 杂项 ───────────────────────────────────────────
 .cache/
 .turbo/
