@@ -185,6 +185,9 @@ async function createHarness({ throttle = false } = {}): Promise<Harness> {
   app.useGlobalPipes(new ValidationPipe(globalValidationPipeOptions()));
   app.useGlobalFilters(new HttpExceptionFilter());
   await app.init();
+  // 先监听一个随机本地端口：否则 supertest 每个请求都临时 listen 同一个 server，
+  // 并发请求（如 refresh 并发测试）在 CI 上会撞出 ECONNRESET
+  await app.listen(0, '127.0.0.1');
 
   const userService = moduleRef.get(UserService);
   const users = moduleRef.get<Repository<User>>(getRepositoryToken(User));
@@ -210,6 +213,9 @@ async function createHarness({ throttle = false } = {}): Promise<Harness> {
 }
 
 const decode = (token: string) => JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
+
+// 不少用例要做 20 次以上真实 bcrypt 比对（分布式猜测、账号级锁定），CI 机器比本地慢，默认 5 秒不够
+jest.setTimeout(60_000);
 
 describe('认证核心安全行为', () => {
   let h: Harness;
