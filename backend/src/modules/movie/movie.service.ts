@@ -12,6 +12,7 @@ import {
 } from './entities/movie-source.entity';
 import { MovieEpisode } from './entities/movie-episode.entity';
 import { AuditService } from '../audit/audit.service';
+import { changedAuditFields } from '../audit/audit-summary';
 
 export interface CreateMovieEpisodeDto {
   title: string;
@@ -252,6 +253,7 @@ export class MovieService {
     }
     await this.movieRepo.update(id, patch);
 
+    // 只记实际写入的变更字段名，不记请求体原文
     await this.auditService.log({
       userId,
       action: 'MOVIE_UPDATE',
@@ -259,7 +261,7 @@ export class MovieService {
       resourceId: id,
       ipAddress: 'system',
       userAgent: 'system',
-      newValues: dto as Record<string, unknown>,
+      newValues: { changedFields: changedAuditFields(movie, patch) },
     });
 
     return this.findOne(id);
@@ -436,7 +438,7 @@ export class MovieService {
       resourceId: episodeId,
       ipAddress: 'system',
       userAgent: 'system',
-      newValues: dto as Record<string, unknown>,
+      newValues: { changedFields: changedAuditFields(ep, dto) },
     });
     const updated = await this.episodeRepo.findOne({ where: { id: episodeId } });
     return updated!;

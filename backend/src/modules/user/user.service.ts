@@ -17,8 +17,12 @@ import { UpdateUserDto } from './dto/update-user.dto';
 import { QueryUserDto } from './dto/query-user.dto';
 import { RoleService } from '../role/role.service';
 import { AuditService } from '../audit/audit.service';
+import { changedAuditFields, pickAuditFields } from '../audit/audit-summary';
 import { SafeUser, toSafeUser } from './user-fields';
 import { revokeTokensIssuedBefore } from '../auth/token-revocation';
+
+/** USER_UPDATE 审计允许记录值的字段（资料类，不含任何凭据） */
+const USER_AUDIT_FIELDS = ['username', 'email', 'nickname', 'avatarUrl', 'isActive'] as const;
 
 @Injectable()
 export class UserService {
@@ -213,6 +217,9 @@ export class UserService {
       await revokeTokensIssuedBefore(this.cacheManager, id);
     }
 
+    // 只记白名单字段里真正变了的前后值，密码只记"改过"这一事实：
+    // 此前直接记录 updateData，管理员重置密码时 passwordHash 会原样进审计表
+    const changed = changedAuditFields(user, updateData, USER_AUDIT_FIELDS);
     await this.auditService.log({
       userId: currentUserId,
       action: 'USER_UPDATE',
@@ -220,7 +227,11 @@ export class UserService {
       resourceId: id,
       ipAddress: 'system',
       userAgent: 'system',
-      newValues: updateData,
+      oldValues: pickAuditFields(user, changed),
+      newValues: {
+        ...pickAuditFields(updateData, changed),
+        passwordChanged: !!updateUserDto.password,
+      },
     });
 
     return this.findOne(id);

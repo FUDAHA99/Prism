@@ -8,6 +8,7 @@ import { Repository, IsNull } from 'typeorm';
 import { Comic, ComicStatus, ComicSerialStatus } from './entities/comic.entity';
 import { ComicChapter } from './entities/comic-chapter.entity';
 import { AuditService } from '../audit/audit.service';
+import { changedAuditFields } from '../audit/audit-summary';
 
 export interface CreateComicDto {
   title: string;
@@ -163,6 +164,7 @@ export class ComicService {
     }
     await this.comicRepo.update(id, patch);
 
+    // 只记实际写入的变更字段名，不记请求体原文
     await this.auditService.log({
       userId,
       action: 'COMIC_UPDATE',
@@ -170,7 +172,7 @@ export class ComicService {
       resourceId: id,
       ipAddress: 'system',
       userAgent: 'system',
-      newValues: dto as Record<string, unknown>,
+      newValues: { changedFields: changedAuditFields(comic, patch) },
     });
     return this.findOne(id);
   }

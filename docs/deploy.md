@@ -238,6 +238,19 @@ SQL
 - 已经误跑了旧脚本、nginx 起不来时：代码已经拉下来了，直接 `bash scripts/deploy.sh --skip-pull`，它会生成配置、校验并重建 nginx。
 - 从本版本起，`deploy.sh` 在 `git pull` 拉到自身更新时会自动改跑新版本，不再需要「连续执行两次」；本地改动的迁移也内置在 `deploy.sh` 里（备份同样放在 `backup/`，不会被自动清理；失败时同样自动拷回，拉到 `deploy.sh` 新版本、改跑新版之后也一样）。
 
+### 5.2 清洗存量审计日志（1-F 批次，已有部署执行一次）
+
+1-F 之前写入的 `audit_logs` 可能含管理员重置密码时的 `passwordHash`、采集源请求头原文、内容正文全文。新写入已在后端统一脱敏；
+已有的行用一次性脚本清洗，规则与写入路径是同一份（脚本读取 backend 镜像里编译好的 `dist`，所以要在**部署完本版本之后**执行）。
+默认只读预演，只输出待改的行数与键路径（不输出值）；确认当天备份（第 6 节）已完成后再加 `--apply` 写回。可重复执行，第二次应报告 0 行待改：
+
+```bash
+$COMPOSE exec -T backend node scripts/scrub-audit-logs.js           # 预演
+$COMPOSE exec -T backend node scripts/scrub-audit-logs.js --apply   # 写回
+```
+
+全新部署不需要执行。
+
 ---
 
 ## 6. 数据备份

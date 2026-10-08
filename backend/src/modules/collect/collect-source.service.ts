@@ -9,6 +9,7 @@ import { CollectSource, CollectSourceStatus, CollectSourceType, CollectContentTy
 import { CollectCategoryMapping } from './entities/collect-category-mapping.entity';
 import { fetchMacCmsList } from './maccms-client';
 import { AuditService } from '../audit/audit.service';
+import { auditKeysOnly, auditUrlHost, changedAuditFields } from '../audit/audit-summary';
 
 export interface CreateCollectSourceDto {
   name: string;
@@ -66,7 +67,12 @@ export class CollectSourceService {
       action: 'CREATE',
       resourceType: 'collect_source',
       resourceId: saved.id,
-      newValues: { name: saved.name, apiUrl: saved.apiUrl },
+      // apiUrl 只记 host（资源站常把 key 放在 query 里），请求头只记名称
+      newValues: {
+        name: saved.name,
+        apiHost: auditUrlHost(saved.apiUrl),
+        extraHeaders: auditKeysOnly(saved.extraHeaders),
+      },
     });
     return saved;
   }
@@ -105,14 +111,21 @@ export class CollectSourceService {
 
   async update(id: string, dto: UpdateCollectSourceDto, userId: string) {
     const item = await this.findOne(id);
+    // 必须在 Object.assign 之前算：之后 item 已是新值
+    const changedFields = changedAuditFields(item, dto);
     Object.assign(item, dto);
     const saved = await this.sourceRepo.save(item);
+    // 不记请求体原文（DTO 是 interface，客户端发什么就会存什么）：只记变更字段名，
+    // apiUrl 只记 host、请求头只记名称
+    const newValues: Record<string, unknown> = { changedFields };
+    if (changedFields.includes('apiUrl')) newValues.apiHost = auditUrlHost(saved.apiUrl);
+    if (changedFields.includes('extraHeaders')) newValues.extraHeaders = auditKeysOnly(saved.extraHeaders);
     await this.auditService.log({
       userId,
       action: 'UPDATE',
       resourceType: 'collect_source',
       resourceId: id,
-      newValues: dto,
+      newValues,
     });
     return saved;
   }
@@ -226,7 +239,14 @@ export class CollectSourceService {
       action: 'UPSERT',
       resourceType: 'collect_category_mapping',
       resourceId: saved.id,
-      newValues: dto,
+      // 记落库后的值，而不是请求体原文（interface DTO 不挡多余字段）
+      newValues: {
+        sourceId,
+        sourceCategoryId: saved.sourceCategoryId,
+        sourceCategoryName: saved.sourceCategoryName,
+        localCategoryId: saved.localCategoryId,
+        enabled: saved.enabled,
+      },
     });
     return saved;
   }

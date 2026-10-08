@@ -8,6 +8,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, IsNull } from 'typeorm';
 import { Content, ContentStatus, ContentType } from './entities/content.entity';
 import { AuditService } from '../audit/audit.service';
+import { changedAuditFields } from '../audit/audit-summary';
 
 export interface CreateContentDto {
   title: string;
@@ -181,6 +182,7 @@ export class ContentService {
 
     await this.contentRepository.update(id, dto);
 
+    // 只记变更字段名：此前记录整个 dto，草稿正文全文进审计表，超过 TEXT 64KB 时还会让已提交的更新返回 500
     await this.auditService.log({
       userId: currentUserId,
       action: 'CONTENT_UPDATE',
@@ -188,7 +190,7 @@ export class ContentService {
       resourceId: id,
       ipAddress: 'system',
       userAgent: 'system',
-      newValues: dto,
+      newValues: { changedFields: changedAuditFields(content, dto) },
     });
 
     return this.findOne(id);

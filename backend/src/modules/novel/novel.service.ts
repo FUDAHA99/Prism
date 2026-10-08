@@ -8,6 +8,7 @@ import { Repository, IsNull } from 'typeorm';
 import { Novel, NovelStatus, NovelSerialStatus } from './entities/novel.entity';
 import { NovelChapter } from './entities/novel-chapter.entity';
 import { AuditService } from '../audit/audit.service';
+import { changedAuditFields } from '../audit/audit-summary';
 
 export interface CreateNovelDto {
   title: string;
@@ -163,6 +164,7 @@ export class NovelService {
     }
     await this.novelRepo.update(id, patch);
 
+    // 只记实际写入的变更字段名，不记请求体原文
     await this.auditService.log({
       userId,
       action: 'NOVEL_UPDATE',
@@ -170,7 +172,7 @@ export class NovelService {
       resourceId: id,
       ipAddress: 'system',
       userAgent: 'system',
-      newValues: dto as Record<string, unknown>,
+      newValues: { changedFields: changedAuditFields(novel, patch) },
     });
     return this.findOne(id);
   }

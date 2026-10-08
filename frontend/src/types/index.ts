@@ -82,16 +82,16 @@ export interface MediaFile {
   uploader?: User
 }
 
+/** GET /audit-logs 列表项：后端不返回 oldValues / newValues / userAgent */
 export interface AuditLog {
   id: string
   userId: string
+  username?: string
   action: string
   resourceType: string
   resourceId?: string
   ipAddress: string
-  userAgent: string
   createdAt: string
-  user?: User
 }
 
 export interface PaginationMeta {
