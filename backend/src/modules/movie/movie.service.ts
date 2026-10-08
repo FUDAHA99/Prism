@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, IsNull, SelectQueryBuilder } from 'typeorm';
+import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { Movie, MovieType, MovieStatus } from './entities/movie.entity';
 import {
   MovieSource,
@@ -21,56 +22,58 @@ import {
   MOVIE_PUBLIC_MAX_LIMIT,
   QueryMovieDto,
 } from './dto/query-movie.dto';
+import { CreateMovieDto, CreateMovieEpisodeDto, CreateMovieSourceDto } from './dto/create-movie.dto';
+import { UpdateMovieDto, UpdateMovieEpisodeDto } from './dto/update-movie.dto';
 
-export interface CreateMovieEpisodeDto {
-  title: string;
-  episodeNumber?: number;
-  url: string;
-  durationSec?: number;
-  sortOrder?: number;
+/**
+ * 新建 / 编辑时从请求体里取的影视列 —— 只有这些。不再把 dto 整体展开进 repository.create / update：
+ * 那样请求体里的任何键（id、viewCount、likeCount、posterBroken、titleCleaned、collectSource、collectExternalId、
+ * deletedAt、sources……）都会写进库。状态与 publishedAt 由服务端按状态流转决定，采集字段只由采集任务写。
+ */
+const MOVIE_EDITABLE_FIELDS = [
+  'title',
+  'originalTitle',
+  'slug',
+  'movieType',
+  'categoryId',
+  'subType',
+  'year',
+  'region',
+  'language',
+  'director',
+  'actors',
+  'intro',
+  'posterUrl',
+  'trailerUrl',
+  'duration',
+  'totalEpisodes',
+  'currentEpisode',
+  'isFinished',
+  'score',
+  'isFeatured',
+  'isVip',
+  'metaTitle',
+  'metaKeywords',
+  'metaDescription',
+] as const;
+
+/** 剧集可写的列：所属线路（sourceId）只来自路径或父线路，请求体改不了 */
+const EPISODE_EDITABLE_FIELDS = ['title', 'episodeNumber', 'url', 'durationSec', 'sortOrder'] as const;
+
+/** 按白名单逐字段挑出提交了的列（undefined 视为没提交；null 照常写入，用于清空可空列） */
+function pickFields<K extends string>(dto: object, fields: readonly K[]): Partial<Record<K, unknown>> {
+  const source = dto as Partial<Record<K, unknown>>;
+  const out: Partial<Record<K, unknown>> = {};
+  for (const key of fields) {
+    if (source[key] !== undefined) out[key] = source[key];
+  }
+  return out;
 }
 
-export interface CreateMovieSourceDto {
-  name: string;
-  kind?: MovieSourceKind;
-  player?: string;
-  sortOrder?: number;
-  episodes?: CreateMovieEpisodeDto[];
-}
-
-export interface CreateMovieDto {
-  title: string;
-  originalTitle?: string;
-  slug: string;
-  movieType?: MovieType;
-  categoryId?: string;
-  subType?: string;
-  year?: number;
-  region?: string;
-  language?: string;
-  director?: string;
-  actors?: string;
-  intro?: string;
-  posterUrl?: string;
-  trailerUrl?: string;
-  duration?: number;
-  totalEpisodes?: number;
-  currentEpisode?: number;
-  isFinished?: boolean;
-  score?: number;
-  status?: MovieStatus;
-  isFeatured?: boolean;
-  isVip?: boolean;
-  metaTitle?: string;
-  metaKeywords?: string;
-  metaDescription?: string;
-  collectSource?: string;
-  collectExternalId?: string;
-  publishedAt?: string;
-  sources?: CreateMovieSourceDto[];
-}
-
-export type UpdateMovieDto = Partial<CreateMovieDto>;
+const pickMovieFields = (dto: object) =>
+  pickFields(dto, MOVIE_EDITABLE_FIELDS) as QueryDeepPartialEntity<Movie>;
+const pickEpisodeFields = (dto: object) =>
+  pickFields(dto, EPISODE_EDITABLE_FIELDS) as QueryDeepPartialEntity<MovieEpisode>;
 
 /** 影视剧集的公开视图：与门户 lib/types.ts 的 MovieEpisode 一致（播放器要用 url） */
 export interface PublicMovieEpisode {
@@ -223,53 +226,78 @@ export class MovieService {
     private readonly auditService: AuditService,
   ) {}
 
-  async create(dto: CreateMovieDto, userId: string): Promise<Movie> {
+  /**
+   * slug 是否已被占用 —— 包括已软删除的影视：库里的唯一索引也覆盖它们，
+   * 此前查重排除了软删除行，复用这类 slug 时查重通过、INSERT / UPDATE 撞唯一索引返回 500。
+   */
+  private async assertSlugAvailable(slug: string, exceptId?: string): Promise<void> {
     const existing = await this.movieRepo.findOne({
-      where: { slug: dto.slug, deletedAt: IsNull() },
+      where: { slug },
+      withDeleted: true,
+      select: { id: true },
     });
-    if (existing) {
-      throw new ConflictException(`slug已存在: ${dto.slug}`);
+    if (existing && existing.id !== exceptId) {
+      throw new ConflictException(`slug已存在: ${slug}`);
     }
+  }
 
-    const { sources, publishedAt, ...rest } = dto;
+  /**
+   * 给影视写一条线路及其剧集。movieId / sourceId 只来自调用方（路径参数或刚建好的父记录），
+   * 请求体里的字段逐个挑：即便有调用方绕过 ValidationPipe 塞进 id / movieId / sourceId，也挪不动别人的线路与剧集。
+   */
+  private async insertSource(movieId: string, dto: CreateMovieSourceDto): Promise<MovieSource> {
+    const saved = await this.sourceRepo.save(
+      this.sourceRepo.create({
+        movieId,
+        name: dto.name,
+        kind: dto.kind ?? MovieSourceKind.PLAY,
+        player: dto.player ?? undefined,
+        sortOrder: dto.sortOrder ?? 0,
+      }),
+    );
+    const episodes = dto.episodes ?? [];
+    if (episodes.length > 0) {
+      await this.episodeRepo.save(
+        episodes.map((e, idx) => this.newEpisode(saved.id, e, { episodeNumber: idx + 1, sortOrder: idx })),
+      );
+    }
+    return saved;
+  }
+
+  private newEpisode(
+    sourceId: string,
+    dto: CreateMovieEpisodeDto,
+    defaults: { episodeNumber: number; sortOrder: number },
+  ): MovieEpisode {
+    return this.episodeRepo.create({
+      sourceId,
+      title: dto.title,
+      episodeNumber: dto.episodeNumber ?? defaults.episodeNumber,
+      url: dto.url,
+      durationSec: dto.durationSec ?? undefined,
+      sortOrder: dto.sortOrder ?? defaults.sortOrder,
+    });
+  }
+
+  /**
+   * 新建影视（仅后台角色）。列按 MOVIE_EDITABLE_FIELDS 逐个挑；status 只能是 draft（默认）或 published，
+   * published 时 publishedAt 缺省为当前时间。线路与剧集按嵌套 DTO 逐字段写，归属取刚建好的影视。
+   */
+  async create(dto: CreateMovieDto, userId: string): Promise<Movie> {
+    await this.assertSlugAvailable(dto.slug);
+
+    const requestedAt = dto.publishedAt ? new Date(dto.publishedAt) : undefined;
+    const published = dto.status === MovieStatus.PUBLISHED;
     const movie = this.movieRepo.create({
-      ...rest,
-      status: dto.status ?? MovieStatus.DRAFT,
-      publishedAt:
-        dto.status === MovieStatus.PUBLISHED
-          ? publishedAt
-            ? new Date(publishedAt)
-            : new Date()
-          : publishedAt
-            ? new Date(publishedAt)
-            : undefined,
+      ...(pickMovieFields(dto) as Partial<Movie>),
+      movieType: dto.movieType ?? MovieType.MOVIE,
+      status: published ? MovieStatus.PUBLISHED : MovieStatus.DRAFT,
+      publishedAt: published ? (requestedAt ?? new Date()) : requestedAt,
     });
     const saved = await this.movieRepo.save(movie);
 
-    if (sources && sources.length > 0) {
-      for (const s of sources) {
-        const src = this.sourceRepo.create({
-          movieId: saved.id,
-          name: s.name,
-          kind: s.kind ?? MovieSourceKind.PLAY,
-          player: s.player,
-          sortOrder: s.sortOrder ?? 0,
-        });
-        const savedSrc = await this.sourceRepo.save(src);
-        if (s.episodes && s.episodes.length > 0) {
-          const eps = s.episodes.map((e, idx) =>
-            this.episodeRepo.create({
-              sourceId: savedSrc.id,
-              title: e.title,
-              episodeNumber: e.episodeNumber ?? idx + 1,
-              url: e.url,
-              durationSec: e.durationSec,
-              sortOrder: e.sortOrder ?? idx,
-            }),
-          );
-          await this.episodeRepo.save(eps);
-        }
-      }
+    for (const source of dto.sources ?? []) {
+      await this.insertSource(saved.id, source);
     }
 
     await this.auditService.log({
@@ -376,6 +404,14 @@ export class MovieService {
     return toPublicMovie(movie);
   }
 
+  /**
+   * 编辑影视（仅后台角色）。只写 MOVIE_EDITABLE_FIELDS 里提交了的列：即便有调用方绕过 ValidationPipe，
+   * 请求体里的 id / 计数 / 采集 / 封面检测 / 线路也写不进库（此前 {...rest} 原样交给 repository.update）。
+   *
+   * - status=published（编辑页「保存并发布」）与 POST /:id/publish 一样把 publishedAt 一起写上：优先本次提交的时间，
+   *   其次保留原发布时间（此前只改 status，从编辑页发布的影视 publishedAt 一直是空的）。
+   * - 换了海报就把封面检测状态重置为「未检测」，与「修复封面」接口一致（否则换好的海报仍显示「封面异常」）。
+   */
   async update(id: string, dto: UpdateMovieDto, userId: string): Promise<Movie> {
     const movie = await this.movieRepo.findOne({
       where: { id, deletedAt: IsNull() },
@@ -383,20 +419,25 @@ export class MovieService {
     if (!movie) throw new NotFoundException(`影视不存在: ${id}`);
 
     if (dto.slug && dto.slug !== movie.slug) {
-      const dup = await this.movieRepo.findOne({
-        where: { slug: dto.slug, deletedAt: IsNull() },
-      });
-      if (dup && dup.id !== id) {
-        throw new ConflictException(`slug已存在: ${dto.slug}`);
-      }
+      await this.assertSlugAvailable(dto.slug, id);
     }
 
-    const { sources, publishedAt, ...rest } = dto;
-    const patch: Partial<Movie> = { ...rest };
-    if (publishedAt !== undefined) {
-      patch.publishedAt = publishedAt ? new Date(publishedAt) : undefined;
+    const patch = pickMovieFields(dto);
+    const requestedAt = dto.publishedAt ? new Date(dto.publishedAt) : undefined;
+    if (dto.status === MovieStatus.PUBLISHED) {
+      patch.status = MovieStatus.PUBLISHED;
+      patch.publishedAt = requestedAt ?? movie.publishedAt ?? new Date();
+    } else if (requestedAt) {
+      patch.publishedAt = requestedAt;
     }
-    await this.movieRepo.update(id, patch);
+    if (dto.posterUrl !== undefined && (dto.posterUrl ?? null) !== (movie.posterUrl ?? null)) {
+      patch.posterBroken = null;
+    }
+
+    // 什么都没提交时不发 UPDATE：否则 TypeORM 仍会把 updatedAt 刷成当前时间，后台列表的「更新时间」凭空变了
+    if (Object.keys(patch).length > 0) {
+      await this.movieRepo.update(id, patch);
+    }
 
     // 只记实际写入的变更字段名，不记请求体原文
     await this.auditService.log({
@@ -488,33 +529,15 @@ export class MovieService {
 
   // ==================== Sources ====================
 
+  /** 给影视加一条线路（可带剧集）：所属影视只取路径参数，线路与剧集的列逐个挑（见 insertSource） */
   async addSource(
     movieId: string,
     dto: CreateMovieSourceDto,
     userId: string,
   ): Promise<MovieSource> {
-    await this.findOne(movieId);
-    const src = this.sourceRepo.create({
-      movieId,
-      name: dto.name,
-      kind: dto.kind ?? MovieSourceKind.PLAY,
-      player: dto.player,
-      sortOrder: dto.sortOrder ?? 0,
-    });
-    const saved = await this.sourceRepo.save(src);
-    if (dto.episodes && dto.episodes.length > 0) {
-      const eps = dto.episodes.map((e, idx) =>
-        this.episodeRepo.create({
-          sourceId: saved.id,
-          title: e.title,
-          episodeNumber: e.episodeNumber ?? idx + 1,
-          url: e.url,
-          durationSec: e.durationSec,
-          sortOrder: e.sortOrder ?? idx,
-        }),
-      );
-      await this.episodeRepo.save(eps);
-    }
+    const movie = await this.movieRepo.findOne({ where: { id: movieId }, select: { id: true } });
+    if (!movie) throw new NotFoundException(`影视不存在: ${movieId}`);
+    const saved = await this.insertSource(movieId, dto);
     await this.auditService.log({
       userId,
       action: 'MOVIE_SOURCE_CREATE',
@@ -542,6 +565,7 @@ export class MovieService {
 
   // ==================== Episodes ====================
 
+  /** 给线路加一集：所属线路只取路径参数 */
   async addEpisode(
     sourceId: string,
     dto: CreateMovieEpisodeDto,
@@ -549,15 +573,7 @@ export class MovieService {
   ): Promise<MovieEpisode> {
     const src = await this.sourceRepo.findOne({ where: { id: sourceId } });
     if (!src) throw new NotFoundException(`线路不存在: ${sourceId}`);
-    const ep = this.episodeRepo.create({
-      sourceId,
-      title: dto.title,
-      episodeNumber: dto.episodeNumber ?? 1,
-      url: dto.url,
-      durationSec: dto.durationSec,
-      sortOrder: dto.sortOrder ?? 0,
-    });
-    const saved = await this.episodeRepo.save(ep);
+    const saved = await this.episodeRepo.save(this.newEpisode(sourceId, dto, { episodeNumber: 1, sortOrder: 0 }));
     await this.auditService.log({
       userId,
       action: 'MOVIE_EPISODE_CREATE',
@@ -569,14 +585,21 @@ export class MovieService {
     return saved;
   }
 
+  /**
+   * 编辑一集：只写 EPISODE_EDITABLE_FIELDS 里提交了的列。此前请求体原样交给 repository.update，
+   * 带 sourceId 就能把剧集挪到另一部影视的线路下，带 id 能改主键，未知键则是 500。
+   */
   async updateEpisode(
     episodeId: string,
-    dto: Partial<CreateMovieEpisodeDto>,
+    dto: UpdateMovieEpisodeDto,
     userId: string,
   ): Promise<MovieEpisode> {
     const ep = await this.episodeRepo.findOne({ where: { id: episodeId } });
     if (!ep) throw new NotFoundException(`剧集不存在: ${episodeId}`);
-    await this.episodeRepo.update(episodeId, dto);
+    const patch = pickEpisodeFields(dto);
+    if (Object.keys(patch).length > 0) {
+      await this.episodeRepo.update(episodeId, patch);
+    }
     await this.auditService.log({
       userId,
       action: 'MOVIE_EPISODE_UPDATE',
@@ -584,7 +607,7 @@ export class MovieService {
       resourceId: episodeId,
       ipAddress: 'system',
       userAgent: 'system',
-      newValues: { changedFields: changedAuditFields(ep, dto) },
+      newValues: { changedFields: changedAuditFields(ep, patch) },
     });
     const updated = await this.episodeRepo.findOne({ where: { id: episodeId } });
     return updated!;

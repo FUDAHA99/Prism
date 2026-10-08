@@ -340,18 +340,19 @@ describe('AuditService 脱敏、截断与列表字段', () => {
     });
 
     it('影视 / 剧集 / 小说 / 漫画更新：只记变更字段名', async () => {
-      const movie = { id: 'm-1', title: 'old', slug: 'm', description: 'd', sources: [] };
+      const movie = { id: 'm-1', title: 'old', slug: 'm', intro: 'd', sources: [] };
       const movieRepo = { findOne: async () => ({ ...movie }), update: jest.fn() };
       const episodeRepo = { findOne: async () => ({ id: 'e-1', title: 'ep', url: 'https://v/1.m3u8' }), update: jest.fn() };
       const movieSvc = new MovieService(movieRepo as any, {} as any, episodeRepo as any, auditService);
       jest.spyOn(movieSvc, 'findOne').mockResolvedValue(movie as any);
       await movieSvc.update(
         'm-1',
-        { title: 'new', description: '简介'.repeat(3000), publishedAt: '2026-01-01T00:00:00Z', sources: [{}] } as any,
+        { title: 'new', intro: '简介'.repeat(3000), publishedAt: '2026-01-01T00:00:00Z', sources: [{}] } as any,
         adminId,
       );
+      // sources 不是影视的可写列（线路走专用接口），不会出现在变更字段里
       expect(JSON.parse((await lastRaw('MOVIE_UPDATE')).newValues!)).toEqual({
-        changedFields: ['title', 'description', 'publishedAt'],
+        changedFields: ['title', 'intro', 'publishedAt'],
       });
       await movieSvc.updateEpisode('e-1', { url: 'https://v/2.m3u8?token=EP-SECRET' } as any, adminId);
       const ep = await lastRaw('MOVIE_EPISODE_UPDATE');

@@ -110,7 +110,8 @@ export default function MovieList() {
       setPosterModal({ open: false, movieId: '', title: '' })
       posterForm.resetFields()
     },
-    onError: () => message.error('更新失败'),
+    // 后端只收 http(s) 地址或站内路径；400 时把具体原因显示出来
+    onError: (e: Error) => message.error(e.message ? `更新失败：${e.message}` : '更新失败'),
   })
 
   // posterBroken 筛选映射到后端参数（「未检测」传字符串 'null'：axios 会把值为 null 的参数整个丢掉，等于不筛选）

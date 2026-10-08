@@ -596,6 +596,98 @@ slug 详情另有 `sources`（`{ id, movieId, name, kind, player, sortOrder, epi
 
 ---
 
+### 15.4 创建影视
+`POST /movies`  🔒 后台角色（admin / editor）
+
+**请求体**（后台编辑页提交表单全部字段，「立即发布」时带 `status: "published"`）：
+```json
+{
+  "title": "流浪地球 2",
+  "originalTitle": "The Wandering Earth II",
+  "slug": "wandering-earth-2",
+  "movieType": "movie",
+  "subType": "科幻",
+  "year": 2023,
+  "region": "中国大陆",
+  "language": "国语",
+  "director": "郭帆",
+  "actors": "吴京,刘德华",
+  "intro": "剧情简介",
+  "posterUrl": "/uploads/poster.jpg",
+  "trailerUrl": "https://...",
+  "duration": 173,
+  "totalEpisodes": 1,
+  "currentEpisode": 1,
+  "isFinished": true,
+  "score": 8.3,
+  "isFeatured": false,
+  "isVip": false,
+  "metaTitle": "SEO 标题",
+  "metaKeywords": "科幻,灾难",
+  "metaDescription": "SEO 描述",
+  "status": "draft",
+  "categoryId": "uuid（可选）",
+  "publishedAt": "2026-04-25T14:00:00.000Z（可选）",
+  "sources": [
+    { "name": "线路1", "kind": "play", "player": "m3u8", "sortOrder": 0,
+      "episodes": [{ "title": "第01集", "episodeNumber": 1, "url": "https://.../index.m3u8", "durationSec": 2400, "sortOrder": 0 }] }
+  ]
+}
+```
+
+只接受上面这些字段，其余字段（`id`、`viewCount`、`likeCount`、`collectSource`、`collectExternalId`、`posterBroken`、`titleCleaned`、`aliases`、时间戳等）一律 `400`；
+采集字段只由采集任务在服务端写入。`status` 只能是 `draft`（默认）或 `published`，为 `published` 时 `publishedAt` 缺省为当前时间。
+`sources` 里的线路与剧集同样只认上面列出的字段：带 `id` / `movieId` / `sourceId` 一律 `400`（归属取新建的影视），最多 50 条线路、每条最多 2000 集。
+
+| 字段 | 规则 |
+|------|------|
+| `title` | 必填，非空，≤ 500 字符 |
+| `slug` | 必填，只含小写字母、数字、连字符，≤ 500；与任何影视（含已删除的）重复返回 `409` |
+| `movieType` | 枚举；不能为 `null` |
+| `originalTitle` / `director` | ≤ 500 字符 |
+| `subType` / `region` / `language` | ≤ 200 / 100 / 100 字符 |
+| `actors` / `intro` | ≤ 65535 字节（TEXT 列）|
+| `posterUrl` / `trailerUrl` | 空串、`http(s)://` 地址或站内路径（`/uploads/...`），≤ 1000 |
+| `year` | 整数 0–9999 |
+| `duration` / `totalEpisodes` / `currentEpisode` | 非负整数 |
+| `score` | 0–10（编辑页回填的 `"8.5"` 这类字符串按数字处理）；不能为 `null` |
+| `isFinished` / `isFeatured` / `isVip` | JSON 布尔值（字符串 `"false"` 等 `400`）；不能为 `null` |
+| `metaTitle` / `metaKeywords` / `metaDescription` | ≤ 200 / 300 / 500 字符 |
+| `categoryId` | UUID |
+| `publishedAt` | ISO 8601 |
+| 剧集 `url` | 必填，≤ 65535 字节；协议不限（直链、磁力链等），但不能是 `javascript:` / `vbscript:` / `data:` / `file:` |
+| 剧集 `title` / 线路 `name` / 线路 `player` | ≤ 200 / 100 / 50 字符 |
+
+可空字段可以为 `null`（清空）。
+
+### 15.5 更新影视
+`PATCH /movies/:id`  🔒 后台角色（admin / editor）
+
+字段与校验规则同创建（不含 `sources`：线路与剧集只经 15.8 的接口增删改），全部可选；`title` / `slug` / `movieType` / `score` / 三个布尔字段不能为 `null`。
+`status` 只接受 `published`（后台「保存并发布」）：同时写 `publishedAt`（优先用本次提交的，其次保留原发布时间）；取消发布请用 `POST /movies/:id/unpublish`。
+`posterUrl` 改了会把封面检测状态重置为「未检测」。
+
+### 15.6 修复封面
+`PATCH /movies/:id/poster`  🔒 后台角色（admin / editor）
+
+请求体只有 `{ "posterUrl": "https://..." }`（非空，`http(s)://` 地址或站内路径），写入后封面检测状态重置为「未检测」。
+
+### 15.7 发布 / 取消发布 / 删除
+`POST /movies/:id/publish`、`POST /movies/:id/unpublish`、`DELETE /movies/:id`（软删除）  🔒 后台角色（admin / editor）
+
+### 15.8 线路与剧集
+🔒 后台角色（admin / editor）
+
+| 接口 | 请求体 |
+|------|--------|
+| `POST /movies/:id/sources` | 一条线路：`name`、`kind`、`player`、`sortOrder`、`episodes`（同 15.4）；归属取路径里的影视 |
+| `DELETE /movies/sources/:sourceId` | — （连同剧集一起删除）|
+| `POST /movies/sources/:sourceId/episodes` | 一集：`title`、`episodeNumber`、`url`、`durationSec`、`sortOrder`；归属取路径里的线路 |
+| `PATCH /movies/episodes/:episodeId` | 同上，全部可选；`title` / `url` / `episodeNumber` / `sortOrder` 不能为 `null`；带 `sourceId` / `id` 一律 `400`（剧集不能改挂到别的线路）|
+| `DELETE /movies/episodes/:episodeId` | — |
+
+---
+
 ## HTTP 状态码说明
 
 | 状态码 | 含义 |

@@ -124,8 +124,7 @@ export interface CreateMovieData {
   metaTitle?: string
   metaKeywords?: string
   metaDescription?: string
-  collectSource?: string
-  collectExternalId?: string
+  // 采集字段（collectSource / collectExternalId）只由采集任务在服务端写入，接口不接受（带了 400）
   publishedAt?: string
   sources?: CreateMovieSourceData[]
 }

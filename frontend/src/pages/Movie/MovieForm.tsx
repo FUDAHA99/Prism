@@ -100,7 +100,8 @@ export default function MovieForm() {
       queryClient.invalidateQueries({ queryKey: ['movies'] })
       navigate(`/movies/${m.id}/edit`)
     },
-    onError: () => message.error('创建失败'),
+    // 后端校验失败（400）时 message 是具体原因（如海报地址不合法），拦截器已放进 Error.message
+    onError: (e: Error) => message.error(e.message ? `创建失败：${e.message}` : '创建失败'),
   })
 
   const updateMutation = useMutation({
@@ -110,7 +111,7 @@ export default function MovieForm() {
       queryClient.invalidateQueries({ queryKey: ['movies'] })
       queryClient.invalidateQueries({ queryKey: ['movie', id] })
     },
-    onError: () => message.error('更新失败'),
+    onError: (e: Error) => message.error(e.message ? `更新失败：${e.message}` : '更新失败'),
   })
 
   const handleSubmit = (publish = false) => {
@@ -401,6 +402,7 @@ function SourcesPanel({ movie }: { movie: Movie }) {
       setSourceModal(false)
       refresh()
     },
+    onError: (e: Error) => message.error(e.message ? `添加线路失败：${e.message}` : '添加线路失败'),
   })
 
   const deleteSourceMutation = useMutation({
@@ -425,6 +427,7 @@ function SourcesPanel({ movie }: { movie: Movie }) {
       setEditingEpisode(null)
       refresh()
     },
+    onError: (e: Error) => message.error(e.message ? `添加剧集失败：${e.message}` : '添加剧集失败'),
   })
 
   const updateEpMutation = useMutation({
@@ -441,6 +444,7 @@ function SourcesPanel({ movie }: { movie: Movie }) {
       setEditingEpisode(null)
       refresh()
     },
+    onError: (e: Error) => message.error(e.message ? `更新剧集失败：${e.message}` : '更新剧集失败'),
   })
 
   const deleteEpMutation = useMutation({

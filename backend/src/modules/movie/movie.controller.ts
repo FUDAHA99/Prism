@@ -17,14 +17,10 @@ import {
   ApiBearerAuth,
 } from '@nestjs/swagger';
 
-import {
-  MovieService,
-  CreateMovieDto,
-  UpdateMovieDto,
-  CreateMovieSourceDto,
-  CreateMovieEpisodeDto,
-} from './movie.service';
+import { MovieService } from './movie.service';
 import { QueryMovieDto } from './dto/query-movie.dto';
+import { CreateMovieDto, CreateMovieEpisodeDto, CreateMovieSourceDto } from './dto/create-movie.dto';
+import { UpdateMovieDto, UpdateMovieEpisodeDto, UpdateMoviePosterDto } from './dto/update-movie.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthUser } from '../auth/interfaces/auth.interface';
 import { Access } from '../../common/authz/access.decorator';
@@ -72,10 +68,10 @@ export class MovieController {
   @ApiOperation({ summary: '更新影视封面图并重置检测状态' })
   async updatePoster(
     @Param('id') id: string,
-    @Body() body: { posterUrl: string },
+    @Body() dto: UpdateMoviePosterDto,
     @CurrentUser() user: AuthUser,
   ) {
-    return this.movieService.updatePoster(id, body.posterUrl, user.id);
+    return this.movieService.updatePoster(id, dto.posterUrl, user.id);
   }
 
   /** 后台编辑页加载用：任意状态、完整字段；不累加播放量（此前管理员每打开一次编辑页就 +1） */
@@ -169,7 +165,7 @@ export class MovieController {
   @ApiOperation({ summary: '更新剧集' })
   async updateEpisode(
     @Param('episodeId') episodeId: string,
-    @Body() dto: Partial<CreateMovieEpisodeDto>,
+    @Body() dto: UpdateMovieEpisodeDto,
     @CurrentUser() user: AuthUser,
   ) {
     return this.movieService.updateEpisode(episodeId, dto, user.id);
