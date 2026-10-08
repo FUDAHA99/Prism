@@ -62,14 +62,18 @@ export default function UserPage() {
       id,
       values,
       originalRoles,
+      originalEmail,
     }: {
       id: string
       values: EditFormValues
       originalRoles: string[]
+      originalEmail: string
     }) => {
+      // 邮箱没改就不发：存量账号的邮箱可能是非 ASCII（后端已不再接受），带着原值提交会被 400 挡住，
+      // 管理员就没法停用 / 降权这类账号了
       await updateUser(id, {
         nickname: values.nickname,
-        email: values.email,
+        ...(values.email !== originalEmail ? { email: values.email } : {}),
         isActive: values.isActive,
       })
 
@@ -122,7 +126,12 @@ export default function UserPage() {
   const handleEditSubmit = () => {
     if (!editingUser) return
     form.validateFields().then((values) => {
-      updateMutation.mutate({ id: editingUser.id, values, originalRoles: editingUser.roles })
+      updateMutation.mutate({
+        id: editingUser.id,
+        values,
+        originalRoles: editingUser.roles,
+        originalEmail: editingUser.email,
+      })
     })
   }
 
@@ -286,8 +295,19 @@ export default function UserPage() {
             label="邮箱"
             rules={[
               { required: true, message: '请输入邮箱' },
-              { type: 'email', message: '邮箱格式不正确' },
-              ASCII_EMAIL_RULE,
+              // 只校验改过的邮箱：未改动的存量非 ASCII 邮箱不阻止保存其他字段（停用、改昵称、调整角色）
+              () => ({
+                validator(_, value: string) {
+                  if (value === editingUser?.email) return Promise.resolve()
+                  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value ?? '')) {
+                    return Promise.reject(new Error('邮箱格式不正确'))
+                  }
+                  if (!ASCII_EMAIL_RULE.pattern.test(value)) {
+                    return Promise.reject(new Error(ASCII_EMAIL_RULE.message))
+                  }
+                  return Promise.resolve()
+                },
+              }),
             ]}
           >
             <Input placeholder="请输入邮箱" />
