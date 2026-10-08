@@ -16,11 +16,12 @@ import { AuditService } from '../audit/audit.service';
 import { AuthService } from '../auth/auth.service';
 import { MediaFile } from '../media/entities/media-file.entity';
 import { MediaService } from '../media/media.service';
-import { Content } from '../content/entities/content.entity';
+import { Content, ContentStatus } from '../content/entities/content.entity';
 import { ContentService } from '../content/content.service';
 import { Category } from '../category/entities/category.entity';
 import { Comment } from '../comment/entities/comment.entity';
 import { StatsService } from '../stats/stats.service';
+import { AuthUser } from '../auth/interfaces/auth.interface';
 
 /**
  * 密码哈希不出库（批次 1-F-1）。
@@ -31,6 +32,8 @@ import { StatsService } from '../stats/stats.service';
  */
 
 const ADMIN_PASSWORD = 'Admin123!';
+/** 内容列表的后台视图：findAll 按 viewer 的角色选择全量 / 公开视图 */
+const STAFF_VIEWER = { id: 'staff-viewer', roles: ['admin'] } as AuthUser;
 const EDITOR_PASSWORD = 'Editor123!';
 
 /** 模拟 Redis：值按 JSON 存取，和生产缓存一样会丢掉 class 原型（@Exclude 因此失效） */
@@ -170,6 +173,9 @@ describe('密码哈希不出库：用户与关联查询只取安全字段', () =
       slug: 's',
       body: 'b',
       authorId: adminId,
+      // 已发布：公开的 slug 详情只返回已发布内容
+      status: ContentStatus.PUBLISHED,
+      isPublished: true,
     });
     contentId = content.id;
 
@@ -314,11 +320,15 @@ describe('密码哈希不出库：用户与关联查询只取安全字段', () =
     });
 
     it('内容列表 / 详情 / slug 的 author 不含邮箱与哈希', async () => {
-      const { data } = await contentService.findAll({});
+      // 后台视图（含 author.id）与公开视图（游客列表、slug 详情）都查一遍
+      const { data } = await contentService.findAll({}, STAFF_VIEWER);
+      const { data: publicData } = await contentService.findAll({});
       const byId = await contentService.findOne(contentId);
-      const bySlug = await contentService.findBySlug('s');
+      const bySlug = await contentService.findPublishedBySlug('s');
       expect(byId.author.username).toBe('admin');
-      for (const v of [data, byId, bySlug]) {
+      expect(bySlug.author?.username).toBe('admin');
+      expect(publicData).toHaveLength(1);
+      for (const v of [data, publicData, byId, bySlug]) {
         expectNoHash(v);
         expectNoEmail(v);
       }

@@ -130,19 +130,24 @@
 🔒 写操作需要认证
 
 ### 2.1 获取内容列表
-`GET /contents`
+`GET /contents`（可选登录：后台与门户共用）
 
-**查询参数**：
+- **后台角色（admin / editor）带 token**：全量视图 —— 任意状态（含草稿），可按 `status` / `authorId` 筛选，字段完整（见下方响应示例），每页最多 100。
+- **游客、无角色的登录用户**：服务端固定只返回已发布、未删除的内容，`status` / `authorId` 参数被忽略；每页最多 50（`limit` 超过 50 时按 50 返回，不报错）；字段为公开白名单（见下方「公开视图」）。
+
+**查询参数**（未列出的参数一律 `400`）：
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| `search` | string | 搜索标题/摘要 |
-| `status` | `draft` \| `published` \| `archived` | 状态筛选 |
+| `search` | string | 搜索标题/摘要（最长 200）|
+| `status` | `draft` \| `review` \| `published` \| `archived` | 状态筛选（仅后台角色生效）|
 | `contentType` | `article` \| `page` \| `announcement` | 类型筛选 |
-| `categoryId` | string | 分类筛选 |
-| `page` | number | 页码（默认 1）|
-| `limit` | number | 每页数量（默认 20）|
+| `categoryId` | UUID | 分类筛选 |
+| `tagId` | UUID | 占位：内容尚未关联标签，不参与筛选（门户标签页会传）|
+| `authorId` | UUID | 作者筛选（仅后台角色生效）|
+| `page` | 整数 1–100000 | 页码（默认 1）|
+| `limit` | 整数 1–100 | 每页数量（默认 20；游客最多按 50 返回）|
 
-**响应**：
+**响应**（后台视图）：
 ```json
 {
   "data": [
@@ -171,10 +176,20 @@
 }
 ```
 
+**公开视图**（游客列表与 slug 详情）：只含 `id`、`title`、`slug`、`contentType`、`categoryId`、`featuredImageUrl`、`excerpt`、`body`、`metaTitle`、`metaDescription`、`viewCount`、`publishedAt`、`createdAt`、`updatedAt`、`author`（`{ username, nickname, avatarUrl }`，无作者时为 `null`）、`category`（`{ id, name, slug }` 或 `null`）；
+不含 `authorId`、`author.id`、`status`、`isPublished`。
+
 ---
 
 ### 2.2 获取内容详情
-`GET /contents/:id`
+`GET /contents/:id`  🔒 后台角色（admin / editor）
+
+后台编辑页加载用，任意状态、完整字段；不累加阅读数。
+
+### 2.2.1 通过 slug 获取已发布内容（门户文章详情）
+`GET /contents/slug/:slug`（公开）
+
+只返回已发布且未删除的内容（公开视图字段），草稿 / 待审 / 已归档与不存在一样返回 `404`；每次成功读取阅读数 +1。
 
 ---
 

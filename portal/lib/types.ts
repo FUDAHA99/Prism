@@ -1,7 +1,7 @@
 // 与后端 API 一致的核心类型定义
 
+/** 文章作者的公开资料：GET /contents 与 /contents/slug/:slug 不返回作者的用户 ID */
 export interface User {
-  id: string
   username: string
   nickname?: string | null
   avatarUrl?: string | null
@@ -25,13 +25,15 @@ export interface Tag {
   usageCount?: number
 }
 
+/**
+ * 公开内容（后端 content.service.ts PublicContent 白名单）：只有已发布内容，
+ * 不含 status / isPublished / authorId 等后台字段。
+ */
 export interface Content {
   id: string
   title: string
   slug: string
   contentType: 'article' | 'page' | string
-  status: 'draft' | 'published' | string
-  authorId: string
   categoryId?: string | null
   featuredImageUrl?: string | null
   excerpt?: string | null
@@ -39,7 +41,6 @@ export interface Content {
   metaTitle?: string | null
   metaDescription?: string | null
   viewCount: number
-  isPublished: boolean
   publishedAt?: string | null
   createdAt: string
   updatedAt: string

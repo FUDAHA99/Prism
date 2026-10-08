@@ -5,10 +5,18 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, IsNull } from 'typeorm';
+import { Repository, IsNull, SelectQueryBuilder } from 'typeorm';
 import { Content, ContentStatus, ContentType } from './entities/content.entity';
 import { AuditService } from '../audit/audit.service';
 import { changedAuditFields } from '../audit/audit-summary';
+import { isStaff, Viewer } from '../../common/authz/viewer';
+import {
+  CONTENT_LIST_DEFAULT_LIMIT,
+  CONTENT_LIST_MAX_LIMIT,
+  CONTENT_LIST_MAX_PAGE,
+  CONTENT_PUBLIC_MAX_LIMIT,
+  QueryContentDto,
+} from './dto/query-content.dto';
 
 export interface CreateContentDto {
   title: string;
@@ -37,14 +45,80 @@ export interface UpdateContentDto {
   status?: ContentStatus;
 }
 
-export interface QueryContentDto {
-  search?: string;
-  status?: ContentStatus;
-  contentType?: ContentType;
-  categoryId?: string;
-  authorId?: string;
-  page?: number;
-  limit?: number;
+/** 文章作者的公开资料：不含用户 ID（此前 author.id 让匿名者拿到发文管理员的 UUID） */
+export interface PublicContentAuthor {
+  username: string;
+  nickname: string | null;
+  avatarUrl: string | null;
+}
+
+export interface PublicContentCategory {
+  id: string;
+  name: string;
+  slug: string;
+}
+
+/**
+ * 游客（及非后台角色）看到的内容：显式白名单，逐字段构造 —— 实体将来新增列也不会顺带公开。
+ *
+ * 不含 authorId / author.id（内部用户 ID）、status / isPublished（审核状态；公开视图里恒为已发布，
+ * isPublished 还可能与 status 不同步）、deletedAt。保留的字段都核对过门户用法
+ * （portal/components/ArticleCard.tsx、app/page.tsx、app/articles/[slug]/page.tsx）：
+ * 作者显示用 `(nickname || username).charAt(0)`，所以 username 必须保留且非空。
+ */
+export interface PublicContent {
+  id: string;
+  title: string;
+  slug: string;
+  contentType: ContentType;
+  categoryId: string | null;
+  featuredImageUrl: string | null;
+  excerpt: string | null;
+  body: string;
+  metaTitle: string | null;
+  metaDescription: string | null;
+  viewCount: number;
+  publishedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+  author: PublicContentAuthor | null;
+  category: PublicContentCategory | null;
+}
+
+export interface ContentPage<T> {
+  data: T[];
+  meta: { total: number; page: number; limit: number; totalPages: number };
+}
+
+export function toPublicContent(content: Content): PublicContent {
+  const { author, category } = content;
+  return {
+    id: content.id,
+    title: content.title,
+    slug: content.slug,
+    contentType: content.contentType,
+    categoryId: content.categoryId ?? null,
+    featuredImageUrl: content.featuredImageUrl ?? null,
+    excerpt: content.excerpt ?? null,
+    body: content.body,
+    metaTitle: content.metaTitle ?? null,
+    metaDescription: content.metaDescription ?? null,
+    viewCount: content.viewCount,
+    publishedAt: content.publishedAt ?? null,
+    createdAt: content.createdAt,
+    updatedAt: content.updatedAt,
+    author: author
+      ? { username: author.username, nickname: author.nickname ?? null, avatarUrl: author.avatarUrl ?? null }
+      : null,
+    category: category ? { id: category.id, name: category.name, slug: category.slug } : null,
+  };
+}
+
+/** 缺省或不是有限整数时用 fallback，再收进 [min, max]：HTTP 入口已由 QueryContentDto 校验，这里兜住其他调用方 */
+function clampInt(value: unknown, fallback: number, min: number, max: number): number {
+  const n = Number(value);
+  if (value === undefined || value === null || value === '' || !Number.isFinite(n)) return fallback;
+  return Math.min(Math.max(Math.trunc(n), min), max);
 }
 
 @Injectable()
@@ -90,21 +164,42 @@ export class ContentService {
     return saved;
   }
 
-  async findAll(query: QueryContentDto): Promise<{
-    data: Content[];
-    meta: { total: number; page: number; limit: number; totalPages: number };
-  }> {
-    const { search, status, contentType, categoryId, authorId } = query;
-    const page = query.page ?? 1;
-    const limit = query.limit ?? 20;
-
-    const qb = this.contentRepository
+  /** 列表 / 详情共用的查询：作者只取公开资料列（不含邮箱与口令哈希），分类只取 id / name / slug */
+  private baseQuery(): SelectQueryBuilder<Content> {
+    return this.contentRepository
       .createQueryBuilder('content')
       .leftJoin('content.author', 'author')
       .addSelect(['author.id', 'author.username', 'author.nickname', 'author.avatarUrl'])
       .leftJoin('content.category', 'category')
       .addSelect(['category.id', 'category.name', 'category.slug'])
       .where('content.deletedAt IS NULL');
+  }
+
+  /**
+   * GET /contents（后台与门户共用，Access('optional')）。
+   *
+   * - 后台角色（admin / editor）：全量视图 —— 任意状态（含草稿）、可按 status / authorId 筛选、完整字段，
+   *   每页最多 100；与此前行为一致。
+   * - 其他人（游客、无角色的登录用户）：服务端固定 status = published，忽略客户端传的 status 与 authorId，
+   *   每页最多 50（超出按 50 返回而不是报错），按 PublicContent 白名单出参。
+   *   此前只靠门户自己补 status=published，?status=draft 就能匿名列出全部草稿正文。
+   *
+   * viewer 缺省按游客处理：漏传身份只会少看到数据，不会多看到。
+   */
+  async findAll(query: QueryContentDto, viewer?: Viewer): Promise<ContentPage<Content> | ContentPage<PublicContent>> {
+    const staff = isStaff(viewer);
+    const { search, contentType, categoryId } = query;
+    const status = staff ? query.status : ContentStatus.PUBLISHED;
+    const authorId = staff ? query.authorId : undefined;
+    const limit = clampInt(
+      query.limit,
+      CONTENT_LIST_DEFAULT_LIMIT,
+      1,
+      staff ? CONTENT_LIST_MAX_LIMIT : CONTENT_PUBLIC_MAX_LIMIT,
+    );
+    const page = clampInt(query.page, 1, 1, CONTENT_LIST_MAX_PAGE);
+
+    const qb = this.baseQuery();
 
     if (search) {
       qb.andWhere(
@@ -121,22 +216,16 @@ export class ContentService {
       .skip((page - 1) * limit)
       .take(limit);
 
-    const [data, total] = await qb.getManyAndCount();
+    const [rows, total] = await qb.getManyAndCount();
+    const meta = { total, page, limit, totalPages: Math.ceil(total / limit) };
 
-    return {
-      data,
-      meta: { total, page, limit, totalPages: Math.ceil(total / limit) },
-    };
+    return staff ? { data: rows, meta } : { data: rows.map(toPublicContent), meta };
   }
 
+  /** GET /contents/:id（仅后台角色，编辑页加载用）：任意状态、完整字段 */
   async findOne(id: string): Promise<Content> {
-    const content = await this.contentRepository
-      .createQueryBuilder('content')
-      .leftJoin('content.author', 'author')
-      .addSelect(['author.id', 'author.username', 'author.nickname', 'author.avatarUrl'])
-      .leftJoin('content.category', 'category')
-      .addSelect(['category.id', 'category.name', 'category.slug'])
-      .where('content.id = :id AND content.deletedAt IS NULL', { id })
+    const content = await this.baseQuery()
+      .andWhere('content.id = :id', { id })
       .getOne();
     if (!content) {
       throw new NotFoundException(`内容不存在: ${id}`);
@@ -144,19 +233,19 @@ export class ContentService {
     return content;
   }
 
-  async findBySlug(slug: string): Promise<Content> {
-    const content = await this.contentRepository
-      .createQueryBuilder('content')
-      .leftJoin('content.author', 'author')
-      .addSelect(['author.id', 'author.username', 'author.nickname', 'author.avatarUrl'])
-      .leftJoin('content.category', 'category')
-      .addSelect(['category.id', 'category.name', 'category.slug'])
-      .where('content.slug = :slug AND content.deletedAt IS NULL', { slug })
+  /**
+   * GET /contents/slug/:slug（公开，门户文章详情页）：只认已发布且未删除的内容，按白名单出参。
+   * 草稿、待审、已归档与不存在一样返回 404（同一条消息），不泄露「这个 slug 有一篇未发布的内容」。
+   */
+  async findPublishedBySlug(slug: string): Promise<PublicContent> {
+    const content = await this.baseQuery()
+      .andWhere('content.slug = :slug', { slug })
+      .andWhere('content.status = :status', { status: ContentStatus.PUBLISHED })
       .getOne();
     if (!content) {
       throw new NotFoundException(`内容不存在: ${slug}`);
     }
-    return content;
+    return toPublicContent(content);
   }
 
   async update(
@@ -276,6 +365,7 @@ export class ContentService {
     });
   }
 
+  /** 阅读数 +1：只由公开的 slug 详情（已发布内容）调用；后台编辑页读 /:id 不计数 */
   async incrementViewCount(id: string): Promise<void> {
     await this.contentRepository.increment({ id }, 'viewCount', 1);
   }

@@ -16,12 +16,12 @@ import {
   ContentService,
   CreateContentDto,
   UpdateContentDto,
-  QueryContentDto,
 } from './content.service';
+import { QueryContentDto } from './dto/query-content.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthUser } from '../auth/interfaces/auth.interface';
-import { ContentStatus, ContentType } from './entities/content.entity';
 import { Access } from '../../common/authz/access.decorator';
+import { CurrentViewer, Viewer } from '../../common/authz/viewer';
 
 @ApiTags('内容管理')
 @Controller('contents')
@@ -42,34 +42,37 @@ export class ContentController {
 
   @Get()
   @Access('optional')
-  @ApiOperation({ summary: '获取内容列表' })
+  @ApiOperation({
+    summary: '获取内容列表（后台角色看全量；游客只看已发布、公开字段，每页最多 50）',
+  })
   @ApiResponse({ status: 200, description: '获取成功' })
-  async findAll(@Query() query: QueryContentDto) {
-    return this.contentService.findAll(query);
+  async findAll(@Query() query: QueryContentDto, @CurrentViewer() viewer: Viewer) {
+    return this.contentService.findAll(query, viewer);
   }
 
+  /**
+   * 门户文章详情页（portal 从不带 token，后台不调用这条），所以保持 public、不区分身份：
+   * 只返回已发布内容，阅读数也只在这里累加。
+   */
   @Get('slug/:slug')
   @Access('public')
   @ApiOperation({ summary: '【公共】通过 slug 获取已发布内容（前台用）' })
   @ApiResponse({ status: 200, description: '获取成功' })
-  @ApiResponse({ status: 404, description: '内容不存在' })
+  @ApiResponse({ status: 404, description: '内容不存在或未发布' })
   async findBySlug(@Param('slug') slug: string) {
-    const content = await this.contentService.findBySlug(slug);
-    if (content?.id) {
-      await this.contentService.incrementViewCount(content.id);
-    }
+    const content = await this.contentService.findPublishedBySlug(slug);
+    await this.contentService.incrementViewCount(content.id);
     return content;
   }
 
+  /** 后台编辑页加载用：任意状态、完整字段；不累加阅读数（此前管理员每打开一次编辑页就 +1） */
   @Get(':id')
   @Access('staff')
   @ApiOperation({ summary: '获取内容详情' })
   @ApiResponse({ status: 200, description: '获取成功' })
   @ApiResponse({ status: 404, description: '内容不存在' })
   async findOne(@Param('id') id: string) {
-    const content = await this.contentService.findOne(id);
-    await this.contentService.incrementViewCount(id);
-    return content;
+    return this.contentService.findOne(id);
   }
 
   @Patch(':id')
