@@ -10,8 +10,9 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
-import { ApiOperation, ApiQuery, ApiTags, ApiBearerAuth } from '@nestjs/swagger';
-import { NoticeService, CreateNoticeDto, UpdateNoticeDto } from './notice.service';
+import { ApiOperation, ApiTags, ApiBearerAuth } from '@nestjs/swagger';
+import { NoticeService } from './notice.service';
+import { CreateNoticeDto, QueryNoticeDto, UpdateNoticeDto } from './dto/notice.dto';
 import { Access } from '../../common/authz/access.decorator';
 
 @ApiTags('公告管理')
@@ -23,22 +24,8 @@ export class NoticeController {
 
   @Get()
   @ApiOperation({ summary: '获取公告列表' })
-  @ApiQuery({ name: 'page', required: false })
-  @ApiQuery({ name: 'limit', required: false })
-  @ApiQuery({ name: 'level', required: false })
-  @ApiQuery({ name: 'isPublished', required: false })
-  async findAll(
-    @Query('page') page?: string,
-    @Query('limit') limit?: string,
-    @Query('level') level?: string,
-    @Query('isPublished') isPublished?: string,
-  ) {
-    return this.noticeService.findAll({
-      page: page ? parseInt(page, 10) : 1,
-      limit: limit ? parseInt(limit, 10) : 20,
-      level: level as any,
-      isPublished: isPublished !== undefined ? isPublished === 'true' : undefined,
-    });
+  async findAll(@Query() query: QueryNoticeDto) {
+    return this.noticeService.findAll(query);
   }
 
   @Post()

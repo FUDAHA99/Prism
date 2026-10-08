@@ -11,7 +11,8 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { ApiOperation, ApiQuery, ApiTags, ApiBearerAuth } from '@nestjs/swagger';
-import { AdvertisementService, CreateAdDto, UpdateAdDto } from './advertisement.service';
+import { AdvertisementService } from './advertisement.service';
+import { CreateAdvertisementDto, UpdateAdvertisementDto } from './dto/advertisement.dto';
 import { Access } from '../../common/authz/access.decorator';
 
 @ApiTags('广告管理')
@@ -36,13 +37,13 @@ export class AdvertisementController {
 
   @Post()
   @ApiOperation({ summary: '创建广告' })
-  async create(@Body() dto: CreateAdDto) {
+  async create(@Body() dto: CreateAdvertisementDto) {
     return this.adService.create(dto);
   }
 
   @Patch(':id')
   @ApiOperation({ summary: '更新广告' })
-  async update(@Param('id') id: string, @Body() dto: UpdateAdDto) {
+  async update(@Param('id') id: string, @Body() dto: UpdateAdvertisementDto) {
     return this.adService.update(id, dto);
   }
 

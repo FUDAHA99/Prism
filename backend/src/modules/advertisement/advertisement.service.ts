@@ -2,21 +2,15 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, Like } from 'typeorm';
 import { Advertisement } from './entities/advertisement.entity';
+import { CreateAdvertisementDto, UpdateAdvertisementDto } from './dto/advertisement.dto';
+import { assertDateRange, toOptionalDate } from '../../common/utils/date-range';
 
-export interface CreateAdDto {
-  title: string;
-  code: string;
-  type?: 'image' | 'code' | 'text';
-  content?: string;
-  linkUrl?: string;
-  position?: string;
-  isActive?: boolean;
-  sortOrder?: number;
-  startDate?: string;
-  endDate?: string;
-}
-
-export type UpdateAdDto = Partial<CreateAdDto>;
+type AdPatch = Partial<
+  Pick<
+    Advertisement,
+    'title' | 'code' | 'type' | 'content' | 'linkUrl' | 'position' | 'isActive' | 'sortOrder' | 'startDate' | 'endDate'
+  >
+>;
 
 @Injectable()
 export class AdvertisementService {
@@ -41,22 +35,53 @@ export class AdvertisementService {
     return ad;
   }
 
-  async create(dto: CreateAdDto): Promise<Advertisement> {
+  /** 逐字段写库（不展开请求体）：id / createdAt / updatedAt 由库生成 */
+  async create(dto: CreateAdvertisementDto): Promise<Advertisement> {
+    const startDate = toOptionalDate(dto.startDate) ?? null;
+    const endDate = toOptionalDate(dto.endDate) ?? null;
+    assertDateRange(startDate, endDate);
+
     const ad = this.adRepository.create({
-      ...dto,
-      startDate: dto.startDate ? new Date(dto.startDate) : undefined,
-      endDate: dto.endDate ? new Date(dto.endDate) : undefined,
+      title: dto.title,
+      code: dto.code,
+      type: dto.type ?? 'image',
+      content: dto.content ?? null,
+      linkUrl: dto.linkUrl ?? null,
+      position: dto.position ?? null,
+      isActive: dto.isActive ?? true,
+      sortOrder: dto.sortOrder ?? 0,
+      startDate,
+      endDate,
     });
     return this.adRepository.save(ad);
   }
 
-  async update(id: string, dto: UpdateAdDto): Promise<Advertisement> {
-    await this.findOne(id);
-    await this.adRepository.update(id, {
-      ...dto,
-      startDate: dto.startDate ? new Date(dto.startDate) : undefined,
-      endDate: dto.endDate ? new Date(dto.endDate) : undefined,
-    });
+  async update(id: string, dto: UpdateAdvertisementDto): Promise<Advertisement> {
+    const current = await this.findOne(id);
+
+    const patch: AdPatch = {};
+    if (dto.title !== undefined) patch.title = dto.title;
+    if (dto.code !== undefined) patch.code = dto.code;
+    if (dto.type !== undefined) patch.type = dto.type;
+    if (dto.content !== undefined) patch.content = dto.content;
+    if (dto.linkUrl !== undefined) patch.linkUrl = dto.linkUrl;
+    if (dto.position !== undefined) patch.position = dto.position;
+    if (dto.isActive !== undefined) patch.isActive = dto.isActive;
+    if (dto.sortOrder !== undefined) patch.sortOrder = dto.sortOrder ?? 0;
+    // null 清除起止时间（此前 null 被当成「不修改」，设过的有效期就再也清不掉）
+    const startDate = toOptionalDate(dto.startDate);
+    const endDate = toOptionalDate(dto.endDate);
+    if (startDate !== undefined) patch.startDate = startDate;
+    if (endDate !== undefined) patch.endDate = endDate;
+
+    assertDateRange(
+      startDate !== undefined ? startDate : current.startDate ?? null,
+      endDate !== undefined ? endDate : current.endDate ?? null,
+    );
+
+    if (Object.keys(patch).length > 0) {
+      await this.adRepository.update(id, patch);
+    }
     return this.findOne(id);
   }
 

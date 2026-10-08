@@ -520,14 +520,21 @@
 
 ## 九、公告模块 `/notices`
 
-🔒 写操作需要认证
+🔒 全部需要后台角色（admin / editor）
 
-`GET /notices` — 列表（支持 `isPublished`、`level` 筛选）  
+`GET /notices?page=1&limit=20&level=info&isPublished=true` — 列表（置顶在前；`page` 1–100000、`limit` 1–100，非法值 400）  
 `POST /notices` — 创建  
-`PATCH /notices/:id` — 更新  
-`DELETE /notices/:id` — 删除  
-`PATCH /notices/:id/publish` — 发布  
-`PATCH /notices/:id/unpublish` — 取消发布
+`PATCH /notices/:id` — 更新（字段同创建、都可省略）  
+`POST /notices/:id/toggle-publish` — 切换发布状态  
+`DELETE /notices/:id` — 删除
+
+```json
+{ "title": "系统维护通知", "content": "今晚 22:00 维护", "level": "warning", "isPinned": false,
+  "isPublished": true, "startDate": "2026-10-01T00:00:00.000Z", "endDate": null }
+```
+
+`title` 必填 ≤ 200 字符；`content` 必填；`level` 为 `info` / `success` / `warning` / `error`；`isPinned`、`isPublished`
+为 JSON 布尔；`startDate` / `endDate` 为 ISO 8601 或 `null`（`null` 清除，即长期有效），结束不能早于开始。其余字段 400。
 
 ---
 
@@ -558,12 +565,22 @@
 
 ## 十一、广告模块 `/advertisements`
 
-🔒 写操作需要认证
+🔒 全部需要 `admin` 角色
 
-`GET /advertisements` — 列表  
+`GET /advertisements?search=关键词` — 列表  
 `POST /advertisements` — 创建  
-`PATCH /advertisements/:id` — 更新  
+`PATCH /advertisements/:id` — 更新（字段同创建、都可省略）  
+`POST /advertisements/:id/toggle` — 切换启用状态  
 `DELETE /advertisements/:id` — 删除
+
+```json
+{ "title": "首页横幅", "code": "banner_top", "type": "image", "content": "/uploads/banner.png",
+  "linkUrl": "https://example.com/promo", "position": "首页顶部", "sortOrder": 0, "startDate": null, "endDate": null }
+```
+
+`title`、`code` 必填 ≤ 100 字符；`type` 为 `image` / `code` / `text`；`content` 按类型存图片地址、HTML 代码或文字，只限长度
+（门户目前不渲染广告）；`linkUrl` 只能是 http(s) 地址或站内路径；`sortOrder` 整数（`null` 按 0）；`isActive` 布尔；
+起止时间同公告。其余字段 400。
 
 ---
 

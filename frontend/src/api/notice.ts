@@ -14,8 +14,9 @@ export interface CreateNoticeData {
   level?: NoticeLevel
   isPinned?: boolean
   isPublished?: boolean
-  startDate?: string
-  endDate?: string
+  /** ISO 8601；null 清除（长期有效） */
+  startDate?: string | null
+  endDate?: string | null
 }
 
 export type UpdateNoticeData = Partial<CreateNoticeData>

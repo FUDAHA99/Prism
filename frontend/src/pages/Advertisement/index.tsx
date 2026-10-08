@@ -156,8 +156,9 @@ export default function AdvertisementPage() {
     linkUrl: values.linkUrl,
     position: values.position,
     sortOrder: values.sortOrder ?? 0,
-    startDate: values.dateRange?.[0]?.toISOString(),
-    endDate: values.dateRange?.[1]?.toISOString(),
+    // 没选有效期时显式提交 null：后端据此清除已设的起止时间（undefined 在 JSON 里被丢掉，等于「不修改」）
+    startDate: values.dateRange?.[0]?.toISOString() ?? null,
+    endDate: values.dateRange?.[1]?.toISOString() ?? null,
   })
 
   const handleSubmit = () => {

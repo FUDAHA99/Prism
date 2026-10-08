@@ -5,13 +5,16 @@ export interface CreateAdData {
   title: string
   code: string
   type?: 'image' | 'code' | 'text'
-  content?: string
-  linkUrl?: string
-  position?: string
+  content?: string | null
+  /** http(s) 地址或站内路径，其他协议后端 400 */
+  linkUrl?: string | null
+  position?: string | null
   isActive?: boolean
-  sortOrder?: number
-  startDate?: string
-  endDate?: string
+  /** null 按 0 处理 */
+  sortOrder?: number | null
+  /** ISO 8601；null 清除（长期有效） */
+  startDate?: string | null
+  endDate?: string | null
 }
 
 export type UpdateAdData = Partial<CreateAdData>
