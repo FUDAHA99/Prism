@@ -200,7 +200,11 @@ services:
       - portal
       - frontend
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost/"]
+      # 用 127.0.0.1 而不是 localhost：容器里 localhost 先解析到 ::1，而 nginx 只监听 IPv4（listen 80），
+      # 用 localhost 时健康检查永远 Connection refused、容器一直 unhealthy。
+      # --no-check-certificate：HTTPS 模式下 80 端口 301 跳到 https://127.0.0.1/，证书签给的是域名，
+      # 不关校验就会失败；这里只探本机的回环地址，校验证书没有意义。
+      test: ["CMD", "wget", "-qO-", "--no-check-certificate", "http://127.0.0.1/"]
       interval: 30s
       timeout: 10s
       retries: 3
