@@ -21,7 +21,8 @@ ARG NEXT_PUBLIC_SITE_NAME=Prism
 ENV NEXT_PUBLIC_API_BASE=$NEXT_PUBLIC_API_BASE
 ENV NEXT_PUBLIC_SITE_NAME=$NEXT_PUBLIC_SITE_NAME
 
-RUN npm run build
+# public/ 为空目录，不进 git；clone 后不存在会导致 runner 阶段 COPY --from=builder /app/public 失败
+RUN mkdir -p public && npm run build
 
 # ─────────────────────────────────────────────────
 # Stage 3: runner（使用 standalone 输出）

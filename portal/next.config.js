@@ -3,21 +3,12 @@ const nextConfig = {
   reactStrictMode: true,
   // 生产部署：启用 standalone 输出以缩小镜像体积
   output: 'standalone',
-  // 允许加载后端上传的远程图片
+  poweredByHeader: false, // 去掉 X-Powered-By: Next.js（nginx 侧另有 proxy_hide_header 兜底）
+  // 全站只用原生 <img>，不使用 next/image（standalone 镜像也没装 sharp，优化器本就不可用）。
+  // unoptimized 让 /_next/image 直接 404：不再是公网可达的出站抓取代理（SSRF/OOM），
+  // 也让 14.x 无修复版的图片优化器 advisory（如 GHSA-2xp9-vwfh-vxw4）不可达。
   images: {
-    remotePatterns: [
-      { protocol: 'http',  hostname: 'localhost' },
-      { protocol: 'https', hostname: '**' },      // 生产域名（通配）
-    ],
-  },
-  // 后端 API 代理（开发环境）
-  async rewrites() {
-    return [
-      {
-        source: '/proxy-api/:path*',
-        destination: `${process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:3001'}/api/v1/:path*`,
-      },
-    ]
+    unoptimized: true,
   },
 }
 module.exports = nextConfig
