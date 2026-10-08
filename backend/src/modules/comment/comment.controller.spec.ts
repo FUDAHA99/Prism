@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { ExecutionContext } from '@nestjs/common';
+import { ExecutionContext, ForbiddenException } from '@nestjs/common';
 import { GUARDS_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { Reflector } from '@nestjs/core';
 import { AuthGuard } from '@nestjs/passport';
@@ -84,9 +84,10 @@ describe('RolesGuard 对评论管理端 handler 的实际裁决', () => {
     }) as unknown as ExecutionContext;
 
   it.each(MODERATOR_HANDLERS)('%s：无角色 / 普通注册用户被拒，admin / editor 放行', (handler) => {
-    expect(guard.canActivate(ctxFor(handler, undefined))).toBe(false);
-    expect(guard.canActivate(ctxFor(handler, { roles: [] }))).toBe(false);
-    expect(guard.canActivate(ctxFor(handler, { roles: ['user'] }))).toBe(false);
+    // RolesGuard 拒绝时抛 ForbiddenException('权限不足')，不再 return false
+    expect(() => guard.canActivate(ctxFor(handler, undefined))).toThrow(ForbiddenException);
+    expect(() => guard.canActivate(ctxFor(handler, { roles: [] }))).toThrow(ForbiddenException);
+    expect(() => guard.canActivate(ctxFor(handler, { roles: ['user'] }))).toThrow(ForbiddenException);
     expect(guard.canActivate(ctxFor(handler, { roles: ['editor'] }))).toBe(true);
     expect(guard.canActivate(ctxFor(handler, { roles: ['admin'] }))).toBe(true);
   });
