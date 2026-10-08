@@ -1,7 +1,7 @@
 import 'reflect-metadata';
 import * as fs from 'fs';
 import * as path from 'path';
-import { ExecutionContext, ForbiddenException, Logger, RequestMethod } from '@nestjs/common';
+import { Controller, ExecutionContext, ForbiddenException, Get, Logger, RequestMethod } from '@nestjs/common';
 import {
   CONTROLLER_WATERMARK,
   GUARDS_METADATA,
@@ -9,9 +9,10 @@ import {
   MODULE_METADATA,
   PATH_METADATA,
 } from '@nestjs/common/constants';
-import { Reflector } from '@nestjs/core';
+import { MetadataScanner, Reflector } from '@nestjs/core';
+import { PathsExplorer } from '@nestjs/core/router/paths-explorer';
 import { AuthGuard } from '@nestjs/passport';
-import { ACCESS_LEVEL_KEY, ACCESS_LEVELS, AccessLevel, ROLES_FOR_LEVEL } from './access.decorator';
+import { Access, ACCESS_LEVEL_KEY, ACCESS_LEVELS, AccessLevel, ROLES_FOR_LEVEL } from './access.decorator';
 import { API_GLOBAL_PREFIX } from '../api-prefix';
 import { JwtOptionalGuard } from '../guards/jwt-optional.guard';
 import { RolesGuard } from '../../modules/role/guards/roles.guard';
@@ -309,6 +310,8 @@ function controllersInAppModule(): AnyClass[] {
   return result;
 }
 
+const METADATA_SCANNER = new MetadataScanner();
+
 function routesOf(controller: AnyClass): RouteInfo[] {
   const proto = controller.prototype;
   const classLevel = Reflect.getMetadata(ACCESS_LEVEL_KEY, controller) as AccessLevel | undefined;
@@ -316,13 +319,11 @@ function routesOf(controller: AnyClass): RouteInfo[] {
   const classRoles: string[] | undefined = Reflect.getMetadata(ROLES_KEY, controller);
   const controllerPaths = toArray<string>(Reflect.getMetadata(PATH_METADATA, controller), '/');
 
-  // 与 Nest MetadataScanner 相同：按原型上的定义顺序，即路由注册顺序
-  return Object.getOwnPropertyNames(proto)
-    .filter((name) => name !== 'constructor')
-    .filter((name) => {
-      const desc = Object.getOwnPropertyDescriptor(proto, name);
-      return typeof desc?.value === 'function' && Reflect.hasMetadata(PATH_METADATA, desc.value);
-    })
+  // 与 Nest 的 PathsExplorer 完全相同：MetadataScanner 沿原型链收集方法名（子类在前、同名只取一次），
+  // 元数据从 proto[name] 读。只看原型自身会漏掉继承自基类的 @Get/@Post（BaseCrudController 写法），
+  // 而 Nest 照样注册它们 —— 那样的路由既不会报「未登记」，也不会报「未声明 Access」
+  return METADATA_SCANNER.getAllMethodNames(proto)
+    .filter((name) => Reflect.hasMetadata(PATH_METADATA, proto[name]))
     .flatMap((handlerName) => {
       const handler = proto[handlerName];
       const method = RequestMethod[Reflect.getMetadata(METHOD_METADATA, handler) as RequestMethod];
@@ -360,6 +361,51 @@ const ROUTES: RouteInfo[] = APP_CONTROLLERS.flatMap(routesOf);
 const ROUTE_BY_KEY = new Map(ROUTES.map((r) => [r.key, r]));
 
 const describeRoute = (r: RouteInfo) => `${r.key} (${r.controller.name}.${r.handlerName})`;
+
+/** 「方法 handler 路径」签名，用来和 Nest 自己的扫描结果逐条比对 */
+const routeSignatures = (controller: AnyClass) =>
+  routesOf(controller).map((r) => `${r.method} ${r.handlerName} /${r.segments.join('/')}`);
+
+/** Nest 注册路由时用的同一个 PathsExplorer（RouterExplorer 内部即用它扫描 controller 原型） */
+function nestRouteSignatures(controller: AnyClass): string[] {
+  const proto = controller.prototype;
+  const controllerPaths = toArray<string>(Reflect.getMetadata(PATH_METADATA, controller), '/');
+  return new PathsExplorer(new MetadataScanner())
+    .scanForPaths(Object.create(proto), proto)
+    .flatMap((def) =>
+      controllerPaths.flatMap((cp) =>
+        def.path.map(
+          (hp) => `${RequestMethod[def.requestMethod]} ${def.methodName} /${splitPath(API_GLOBAL_PREFIX, cp, hp).join('/')}`,
+        ),
+      ),
+    );
+}
+
+// 继承探针：常见的 BaseCrudController 写法。只用于上面的枚举测试，不注册进任何模块
+class InheritProbeBase {
+  @Get('dump')
+  dump() {
+    return { secret: 'admin-only data' };
+  }
+
+  @Get('shadowed')
+  shadowed() {
+    return 'base';
+  }
+}
+
+@Controller('inherit-probe')
+class InheritProbeController extends InheritProbeBase {
+  @Access('admin')
+  @Get()
+  own() {
+    return [];
+  }
+
+  override shadowed() {
+    return 'override without route decorator';
+  }
+}
 
 // ───────────────────────── 守卫裁决模拟 ─────────────────────────
 
@@ -557,6 +603,40 @@ describe('路由访问矩阵', () => {
           .map((early) => `${describeRoute(late)} 被 ${describeRoute(early)} 遮蔽`),
       );
       expect({ duplicates, shadowed }).toEqual({ duplicates: [], shadowed: [] });
+    });
+
+    it('routesOf 与 Nest 自己的 PathsExplorer 对每个 controller 得到同一组 handler（含继承来的）', () => {
+      expect(Object.fromEntries(APP_CONTROLLERS.map((c) => [c.name, routeSignatures(c)]))).toEqual(
+        Object.fromEntries(APP_CONTROLLERS.map((c) => [c.name, nestRouteSignatures(c)])),
+      );
+    });
+
+    it('继承自基类的 @Get 会被枚举出来，并被 (a)(b) 两项检查同时抓到', () => {
+      const routes = routesOf(InheritProbeController);
+      // 只看原型自身（此前的写法）根本看不到 dump；Nest 却会注册它
+      expect(Object.getOwnPropertyNames(InheritProbeController.prototype)).not.toContain('dump');
+      expect(nestRouteSignatures(InheritProbeController)).toContain('GET dump /api/v1/inherit-probe/dump');
+
+      expect(routes.map(describeRoute)).toEqual([
+        'GET /api/v1/inherit-probe (InheritProbeController.own)',
+        'GET /api/v1/inherit-probe/dump (InheritProbeController.dump)',
+      ]);
+      // 子类覆盖了基类的路由方法却没带装饰器：Nest 不注册，这里也不算路由
+      expect(routes.map((r) => r.handlerName)).not.toContain('shadowed');
+      expect(routeSignatures(InheritProbeController)).toEqual(nestRouteSignatures(InheritProbeController));
+
+      // (a) 的判定：不在 MATRIX 里 → 未登记；(b) 的判定：没有 Access → 未声明级别
+      expect(routes.filter((r) => !(r.key in MATRIX)).map((r) => r.key)).toEqual([
+        'GET /api/v1/inherit-probe',
+        'GET /api/v1/inherit-probe/dump',
+      ]);
+      expect(routes.filter((r) => r.level === undefined).map(describeRoute)).toEqual([
+        'GET /api/v1/inherit-probe/dump (InheritProbeController.dump)',
+      ]);
+      // 继承来的 handler 的守卫链也照实读出（这里没有任何守卫 → 匿名可达）
+      const dump = routes.find((r) => r.handlerName === 'dump')!;
+      expect(dump.guards).toEqual([]);
+      expect(dump.handler).toBe(InheritProbeBase.prototype.dump);
     });
 
     it('MATRIX 的每个级别都是已知级别', () => {
