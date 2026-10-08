@@ -48,19 +48,28 @@ const REFRESH_TTL = 7 * 86400;
 const ADMIN = { email: 'admin@cms.test', password: 'Admin123!' };
 const OTHER = { email: 'other@cms.test', password: 'Other123!' };
 
-/** 记录每次 set 的 TTL（毫秒），用来断言黑名单只保留到 token 过期 */
+/**
+ * 记录每次 set 的 TTL（毫秒），用来断言黑名单只保留到 token 过期。
+ * hooks 用来把并发操作精确插进某次缓存读写之前（模拟竞态），触发一次后由测试自己清掉。
+ */
 class MemoryCache {
   readonly store = new Map<string, string>();
   readonly ttls = new Map<string, number | undefined>();
+  hooks: {
+    beforeSet?: (key: string) => Promise<void> | void;
+    beforeDel?: (key: string) => Promise<void> | void;
+  } = {};
   async get<T>(key: string): Promise<T | undefined> {
     const raw = this.store.get(key);
     return raw === undefined ? undefined : (JSON.parse(raw) as T);
   }
   async set(key: string, value: unknown, ttl?: number): Promise<void> {
+    await this.hooks.beforeSet?.(key);
     this.store.set(key, JSON.stringify(value));
     this.ttls.set(key, ttl);
   }
   async del(key: string): Promise<void> {
+    await this.hooks.beforeDel?.(key);
     this.store.delete(key);
     this.ttls.delete(key);
   }
@@ -519,6 +528,70 @@ describe('认证核心安全行为', () => {
 
     it('未登录 → 401', async () => {
       expect((await change(undefined, { currentPassword: 'Start123!', newPassword: 'Changed2026' })).status).toBe(401);
+    });
+
+    describe('校验凭据之后、签名之前落地的改密（TOCTOU）', () => {
+      afterEach(() => {
+        h.cache.hooks = {};
+      });
+
+      it('refresh：吊销检查通过后、签发前对方改了密码 → 401，攻击者拿不到改密后仍有效的新 token', async () => {
+        const u = await freshUser();
+        const stolen = await login(u);
+        const victim = await login(u);
+        let changed = 0;
+        h.cache.hooks.beforeSet = async (key) => {
+          // 旧 refresh 写进黑名单的那一刻（吊销检查之后、签发之前）受害者完成改密
+          if (key === refreshBlacklistKey(stolen.tokens.refreshToken)) {
+            h.cache.hooks.beforeSet = undefined;
+            const res = await change(victim.tokens.accessToken, { currentPassword: u.password, newPassword: 'Changed2026' });
+            changed = res.status;
+          }
+        };
+        const res = await refresh(stolen.tokens.refreshToken);
+        expect(changed).toBe(200);
+        expect(res.status).toBe(401);
+        expect(res.body.accessToken).toBeUndefined();
+        // 用过的 refresh 仍在黑名单里，不能再换
+        expect((await refresh(stolen.tokens.refreshToken)).status).toBe(401);
+        expect((await me(victim.tokens.accessToken)).status).toBe(401);
+      });
+
+      it('login：旧口令比对通过后、签发前对方改了密码 → 401，不签 token、不记受信任 IP', async () => {
+        const u = await freshUser();
+        const victim = await login(u);
+        let changed = 0;
+        h.cache.hooks.beforeDel = async (key) => {
+          // 口令比对通过后清该 IP 失败计数的那一刻（签发之前）受害者完成改密
+          if (key === ipAttemptsKey(`uid:${u.id}`, '203.0.113.150')) {
+            h.cache.hooks.beforeDel = undefined;
+            const res = await change(victim.tokens.accessToken, { currentPassword: u.password, newPassword: 'Changed2026' });
+            changed = res.status;
+          }
+        };
+        const res = await h
+          .http()
+          .post('/auth/login')
+          .set('X-Forwarded-For', '203.0.113.150')
+          .send({ email: u.email, password: u.password });
+        expect(changed).toBe(200);
+        expect(res.status).toBe(401);
+        expect(res.body.tokens).toBeUndefined();
+        expect(await h.cache.get(trustedIpsKey(u.id))).toBeUndefined();
+        // 新口令照常可用
+        const fresh = await login({ email: u.email, password: 'Changed2026' });
+        expect((await me(fresh.tokens.accessToken)).status).toBe(200);
+      });
+
+      it('没有并发改密时不受影响：签发前的复查放行，改密后立刻用新密码登录、刷新都正常', async () => {
+        const u = await freshUser();
+        const { tokens } = await login(u);
+        await change(tokens.accessToken, { currentPassword: u.password, newPassword: 'Changed2026' }).expect(200);
+        const relogin = await login({ email: u.email, password: 'Changed2026' });
+        const rotated = await refresh(relogin.tokens.refreshToken);
+        expect(rotated.status).toBe(200);
+        expect((await me(rotated.body.accessToken)).status).toBe(200);
+      });
     });
 
     it('管理员重置密码（UserService.update 的 password 分支）同样吊销该用户的 token', async () => {

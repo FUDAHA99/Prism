@@ -20,6 +20,7 @@ import {
 import {
   blacklistUntilExpiry,
   isIssuedBeforeRevocation,
+  readValidAfter,
   waitUntilIssuable,
 } from './token-revocation';
 import { KeyedMutex } from '../../common/utils/keyed-mutex';
@@ -95,6 +96,8 @@ export class AuthService {
     loginData: LoginAttemptData,
   ): Promise<LoginResponse> {
     const { password, rememberMe } = loginDto;
+    // 必须在读口令哈希之前记下：签发前若发现此后发生过改密吊销，这次比对用的可能是旧哈希
+    const startedAt = Date.now();
     // DTO 已归一化，这里再做一次：查库与兜底计数 key 不能依赖调用方
     const email = normalizeEmail(loginDto.email) as string;
     const { ip, userAgent } = loginData;
@@ -125,7 +128,9 @@ export class AuthService {
       roles: await this.roleService.getUserRoleNames(validated.id),
     };
 
-    const tokens = await this.generateTokens(user, this.refreshLifetimeSec(rememberMe));
+    const tokens = await this.generateTokens(user, this.refreshLifetimeSec(rememberMe), () =>
+      this.assertNotRevokedSince(user.id, startedAt),
+    );
     // 签发成功才算「成功登录过」：此后该 IP 不受账号级上限影响（与失败计数同一把锁，读-改-写不丢）
     await this.loginLocks.run(subject, () => rememberTrustedIp(this.cacheManager, user.id, ip));
     await this.recordSuccessfulLogin(user, ip, userAgent);
@@ -213,7 +218,13 @@ export class AuthService {
       }
 
       await blacklistUntilExpiry(this.cacheManager, blacklistKey, payload.exp);
-      return this.generateTokens(user, payload.exp - payload.iat);
+      // 上面的吊销检查到签发之间还有查库、写黑名单、waitUntilIssuable 的等待：签名前按同一条规则再查一次，
+      // 这段时间里落地的改密同样让这个 refresh token 作废（否则新 token 的 iat 晚于吊销时刻，能一直轮换下去）
+      return this.generateTokens(user, payload.exp - payload.iat, async () => {
+        if (await isIssuedBeforeRevocation(this.cacheManager, payload.sub, payload.iat)) {
+          throw new UnauthorizedException('refresh token已失效，请重新登录');
+        }
+      });
     });
   }
 
@@ -339,8 +350,14 @@ export class AuthService {
   private async generateTokens(
     user: Pick<SafeUser, 'id' | 'email' | 'username' | 'roles'>,
     refreshLifetimeSec: number,
+    assertStillValid?: () => Promise<void>,
   ): Promise<AuthTokens> {
     await waitUntilIssuable(this.cacheManager, user.id);
+    // 紧挨着签名再确认一次凭据没在校验之后被吊销（之后到 sign 之间没有 await）。
+    // waitUntilIssuable 让签出的 iat 晚于吊销时刻，少了这一步，校验与签发之间落地的改密反而拦不住新 token
+    if (assertStillValid) {
+      await assertStillValid();
+    }
 
     const payload: JwtPayload = {
       sub: user.id,
@@ -366,6 +383,18 @@ export class AuthService {
       expiresIn: exp - iat,
       tokenType: 'Bearer',
     };
+  }
+
+  /**
+   * 登录的签发前检查：口令是在 startedAt 之后才读出、比对的。这之后发生过改密 / 管理员重置密码
+   * （valid-after 不早于 startedAt），比对用的就可能是旧哈希，按凭据已失效处理。
+   * 吊销标记在新哈希落库之后才写，所以 valid-after 早于 startedAt 时，本次读到的一定是新哈希。
+   */
+  private async assertNotRevokedSince(userId: string, startedAt: number): Promise<void> {
+    const validAfter = await readValidAfter(this.cacheManager, userId);
+    if (validAfter !== undefined && validAfter >= startedAt) {
+      throw new UnauthorizedException('密码刚被修改，请用新密码重新登录');
+    }
   }
 
   /** refresh 密钥必须单独配置（config/jwt.ts 保证非空）；缺失时宁可报错也不回落到 access 密钥 */
