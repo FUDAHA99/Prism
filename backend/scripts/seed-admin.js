@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 /**
- * 在数据库中创建/重置 admin 用户
+ * 在数据库中创建/重置 admin 用户，并确保其拥有 admin 角色（幂等）
  *   账号: admin@cms.com
  *   密码: Admin123!
+ *
+ * 注意：账号已存在时会把密码重置为 Admin123!。已有环境只想补角色，
+ * 请直接执行脚本里那两条 INSERT IGNORE（见 docs/dev-guide.md「初始化管理员角色」）。
  *
  * 用法（先 docker compose up -d，再启动后端建表，然后跑这个）：
  *   node scripts/seed-admin.js
@@ -56,6 +59,33 @@ const ADMIN_NICKNAME = '系统管理员';
     );
     console.log(`✅ 已创建 admin 用户: ${ADMIN_EMAIL} / ${ADMIN_PASSWORD}`);
   }
+
+  // 幂等地确保 admin 角色存在并分配给该账号：评论管理（#29）、用户/角色管理、内容发布都要求 admin/editor。
+  // 不要在这里创建 'user' 角色：role.service.ts 的 assignRolesToUser 仍是 Postgres 语法，
+  // 一旦存在 'user' 角色，注册流程的 assignDefaultRole 会在 MySQL 上报错。
+  // roles.name 唯一、user_roles 主键为 (user_id, role_id)，所以 INSERT IGNORE 重跑无副作用。
+  await my.execute(
+    `INSERT IGNORE INTO roles (id, name, description, isSystem, createdAt, updatedAt)
+     VALUES (?, 'admin', '系统管理员', 1, ?, ?)`,
+    [randomUUID(), now, now],
+  );
+  await my.execute(
+    `INSERT IGNORE INTO user_roles (user_id, role_id)
+     SELECT u.id, r.id FROM users u JOIN roles r ON r.name = 'admin' WHERE u.email = ?`,
+    [ADMIN_EMAIL],
+  );
+  // INSERT IGNORE 会把错误降级为警告，回读确认确实分配成功，避免打印假的成功信息
+  const [assigned] = await my.execute(
+    `SELECT 1 FROM user_roles ur
+     JOIN users u ON u.id = ur.user_id
+     JOIN roles r ON r.id = ur.role_id
+     WHERE u.email = ? AND r.name = 'admin'`,
+    [ADMIN_EMAIL],
+  );
+  if (assigned.length === 0) {
+    throw new Error(`admin 角色未能分配给 ${ADMIN_EMAIL}`);
+  }
+  console.log(`✅ 已确保 admin 角色并分配给 ${ADMIN_EMAIL}`);
 
   await my.end();
 })().catch((e) => {

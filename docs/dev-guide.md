@@ -117,29 +117,28 @@ db.close();
 
 ### 初始化管理员角色
 
-首次运行时需要手动创建 admin 角色并分配给管理员用户：
+后台的评论管理、用户/角色管理和内容发布都要求账号带 `admin` 或 `editor` 角色。
+`node scripts/seed-admin.js` 会幂等地创建 `admin` 角色并分配给 admin@cms.com，新环境跑它即可。
+
+已有环境只想补角色时，**不要**为此重跑 seed-admin.js（账号已存在时它会把密码重置为 `Admin123!`），
+直接在 MySQL 里执行下面两条（可重复执行；开发环境容器为 `cms-mysql`，生产为 `prism-mysql`，库名换成实际值）：
 
 ```bash
-cd backend
-node -e "
-const { v4: uuidv4 } = require('uuid');
-const Database = require('better-sqlite3');
-const db = new Database('cms-dev.sqlite');
-
-// 查找用户 ID
-const user = db.prepare('SELECT id FROM users WHERE email = ?').get('admin@cms.com');
-if (!user) { console.error('用户不存在'); process.exit(1); }
-
-const roleId = uuidv4();
-const now = new Date().toISOString();
-
-db.prepare('INSERT OR IGNORE INTO roles (id, name, description, isSystem, createdAt, updatedAt) VALUES (?, ?, ?, 0, ?, ?)').run(roleId, 'admin', '管理员', now, now);
-db.prepare('INSERT OR IGNORE INTO user_roles (user_id, role_id) VALUES (?, ?)').run(user.id, roleId);
-
-console.log('admin 角色已分配');
-db.close();
-"
+docker exec -i cms-mysql mysql --default-character-set=utf8mb4 -u cms -pcms123 cms_dev <<'SQL'
+INSERT IGNORE INTO roles (id, name, description, isSystem, createdAt, updatedAt)
+VALUES (UUID(), 'admin', '系统管理员', 1, NOW(6), NOW(6));
+INSERT IGNORE INTO user_roles (user_id, role_id)
+SELECT u.id, r.id FROM users u JOIN roles r ON r.name = 'admin' WHERE u.email = 'admin@cms.com';
+SELECT u.email, r.name FROM users u
+JOIN user_roles ur ON ur.user_id = u.id
+JOIN roles r ON r.id = ur.role_id;
+SQL
 ```
+
+> 不要顺手创建 `user` 角色：`role.service.ts` 的 `assignRolesToUser` 仍是 Postgres 语法，
+> 一旦存在 `user` 角色，注册流程的 `assignDefaultRole` 会在 MySQL 上报错。
+>
+> 角色补上后让该账号重新登录（登录会清掉 5 分钟的用户缓存），新角色才会生效。
 
 ---
 
