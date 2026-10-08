@@ -412,11 +412,19 @@ describe('认证核心安全行为', () => {
       expect((await h.http().post('/auth/logout').send({})).status).toBe(401);
     });
 
-    it('注销后换一种 Authorization 写法（双空格 / 带后缀 / 小写 / Tab）也是 401，含 admin 专属接口', async () => {
+    it('注销后换一种 Authorization 写法（双空格 / 带后缀 / 小写 / 大写 / Tab）也是 401，含 admin 专属接口', async () => {
       const { tokens } = await login();
       const tok = tokens.accessToken;
       await h.http().post('/auth/logout').set('Authorization', `Bearer ${tok}`).expect(200);
-      for (const header of [`Bearer ${tok}`, `Bearer  ${tok}`, `Bearer ${tok} x`, `bearer ${tok}`, `Bearer\t${tok}`]) {
+      for (const header of [
+        `Bearer ${tok}`,
+        `Bearer  ${tok}`,
+        `Bearer ${tok} x`,
+        `bearer ${tok}`,
+        `BEARER ${tok}`,
+        `bEaReR ${tok}`,
+        `Bearer\t${tok}`,
+      ]) {
         expect((await h.http().get('/probe/me').set('Authorization', header)).status).toBe(401);
         expect((await h.http().get('/auth/me').set('Authorization', header)).status).toBe(401);
         expect((await h.http().get('/probe/admin').set('Authorization', header)).status).toBe(401);
@@ -439,11 +447,31 @@ describe('认证核心安全行为', () => {
   });
 
   // 头部值首尾的空白由 Node 的 HTTP 解析器按 RFC 7230 去掉，到不了这里，不在此列
-  describe('Authorization 头只接受 `Bearer <三段 base64url>` 一种写法', () => {
+  describe('Authorization 头只接受 `Bearer <三段 base64url>` 一种形状（scheme 不分大小写）', () => {
+    it.each([['bearer'], ['BEARER'], ['bEaReR']])(
+      'scheme 写成 %s：有效 token 照常 200（RFC 7235 规定 scheme 不区分大小写），注销后同样 401',
+      async (scheme) => {
+        const { tokens } = await login();
+        const header = `${scheme} ${tokens.accessToken}`;
+        expect((await h.http().get('/probe/me').set('Authorization', header)).status).toBe(200);
+        expect((await h.http().get('/probe/admin').set('Authorization', header)).status).toBe(200);
+        expect((await h.http().get('/probe/optional').set('Authorization', header)).body).toEqual({ id: h.adminId });
+
+        // 用这种写法注销：黑名单按验签后的 jti 记，规范写法与其他大小写随之全部 401
+        await h.http().post('/auth/logout').set('Authorization', header).expect(200);
+        for (const s of ['Bearer', 'bearer', 'BEARER', scheme]) {
+          const variant = `${s} ${tokens.accessToken}`;
+          expect((await h.http().get('/probe/me').set('Authorization', variant)).status).toBe(401);
+          expect((await h.http().get('/probe/admin').set('Authorization', variant)).status).toBe(401);
+        }
+      },
+    );
+
     it.each([
       ['双空格', (t: string) => `Bearer  ${t}`],
       ['尾部追加内容', (t: string) => `Bearer ${t} x`],
-      ['小写 scheme', (t: string) => `bearer ${t}`],
+      ['小写 scheme 加双空格', (t: string) => `bearer  ${t}`],
+      ['scheme 拼错', (t: string) => `Bearr ${t}`],
       ['Tab 分隔', (t: string) => `Bearer\t${t}`],
       ['缺 scheme', (t: string) => t],
       ['两个 token', (t: string) => `Bearer ${t},Bearer ${t}`],

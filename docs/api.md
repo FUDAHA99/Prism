@@ -1,7 +1,7 @@
 # API 接口文档
 
 **Base URL**: `http://localhost:3001/api/v1`  
-**认证方式**: Bearer Token（JWT）  
+**认证方式**: Bearer Token（JWT），请求头写作 `Authorization: Bearer <accessToken>`：scheme 不区分大小写，scheme 与 token 之间恰好一个空格，前后不能有其他内容（多空格、Tab、尾随内容一律按未登录处理）  
 **Content-Type**: `application/json`
 
 ---
