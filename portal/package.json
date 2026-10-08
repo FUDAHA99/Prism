@@ -13,7 +13,7 @@
     "dayjs": "^1.11.13",
     "highlight.js": "^11.10.0",
     "hls.js": "^1.6.16",
-    "next": "14.2.5",
+    "next": "14.2.35",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^9.0.1",
