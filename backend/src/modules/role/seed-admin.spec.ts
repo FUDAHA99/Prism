@@ -3,14 +3,20 @@
  *
  * --roles-only 由 deploy.sh 在每次例行部署时执行，所以它的安全性质要锁死：
  *   - 不建账号、不改任何账号的密码与启用状态；
- *   - 只在没有任何可用账号持有 admin 时才把 admin 分配给 admin@cms.com，
- *     运维有意撤掉的 admin 不会在下次部署时被加回去。
+ *   - 从不分配任何角色（1-F-1 复审 HIGH：此前没人持有 admin 时会自动把 admin 给 admin@cms.com，
+ *     而注册接口公开，任何人抢注这个邮箱后，下一次例行部署就把他提升为管理员）。
+ *     没有可用 admin 时只警告并打印 docs/deploy.md 5.1 的手工 SQL。
  * 这里用一个按 SQL 语句模拟 users / roles / user_roles 三张表的内存连接驱动脚本里的真实 SQL；
  * 同一批 SQL 在 MySQL 8 上的行为另由一次性容器验证。
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
+
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const seedAdmin = require('../../../scripts/seed-admin.js');
+
+const REPO_ROOT = path.resolve(__dirname, '../../../..');
 
 interface UserRow {
   id: string;
@@ -65,9 +71,6 @@ class FakeDb {
     if (s === 'SELECT id FROM users WHERE email = ?') {
       return [this.users.filter((u) => u.email === params[0]).map((u) => ({ id: u.id }))];
     }
-    if (s === 'SELECT id, isActive FROM users WHERE email = ? AND deletedAt IS NULL') {
-      return [this.users.filter((u) => u.email === params[0] && !u.deletedAt).map((u) => ({ id: u.id, isActive: u.isActive }))];
-    }
     if (s.startsWith('UPDATE users SET passwordHash=?, isActive=1')) {
       const u = user(params[2] as string)!;
       u.passwordHash = params[0] as string;
@@ -109,6 +112,11 @@ class FakeDb {
     throw new Error(`FakeDb 不认识的语句：${s}`);
   }
 
+  /** 所有写 user_roles 表的语句（--roles-only 下必须为空：它从不分配角色） */
+  userRoleWrites(): string[] {
+    return this.statements.filter((s) => /^(UPDATE|INSERT( IGNORE)? INTO|DELETE FROM|REPLACE INTO) user_roles\b/i.test(s));
+  }
+
   /** 所有写 users 表的语句（--roles-only 下必须为空） */
   userWrites(): string[] {
     return this.statements.filter((s) => /^(UPDATE|INSERT( IGNORE)? INTO|DELETE FROM) users\b/i.test(s) || /passwordHash/i.test(s));
@@ -143,33 +151,69 @@ describe('seed-admin.js 参数', () => {
 });
 
 describe('seed-admin.js --roles-only（每次例行部署执行）', () => {
-  it('已有环境升级：补齐 admin / editor 系统角色，没人持有 admin 时分配给 admin@cms.com，不碰密码', async () => {
+  const MANUAL_SQL: string = seedAdmin.MANUAL_ADMIN_SQL;
+
+  it('已有环境升级：补齐 admin / editor 系统角色；没人持有 admin 时只警告并给出手工 SQL，不分配、不碰密码', async () => {
     const db = new FakeDb();
     const admin = db.addUser('admin@cms.com', { passwordHash: 'OPERATOR-CHOSEN-HASH' });
     db.addRole('editor', 0); // 早先在后台手工建的同名角色，没有系统标记
 
     const { result, warns } = await run(db, true);
 
-    expect(result).toEqual({ mode: 'roles-only', admin: 'assigned' });
+    expect(result).toEqual({ mode: 'roles-only', admin: 'missing' });
     expect(systemRoles(db)).toEqual(['admin:1', 'editor:1']);
-    expect(db.rolesOf('admin@cms.com')).toEqual(['admin']);
+    expect(db.rolesOf('admin@cms.com')).toEqual([]);
     expect(admin.passwordHash).toBe('OPERATOR-CHOSEN-HASH');
     expect(db.userWrites()).toEqual([]);
-    expect(warns).toEqual([]);
+    expect(db.userRoleWrites()).toEqual([]);
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toContain(MANUAL_SQL);
+    expect(warns[0]).toMatch(/docs\/deploy\.md 5\.1/);
   });
 
-  it('幂等：再跑一次没有任何变化，也不会重复分配', async () => {
+  it('1-F-1 复审 HIGH：没人持有 admin 时，自助注册的 admin@cms.com 不会在例行部署时被提升为管理员', async () => {
+    // 升级前的常见状态：运维把默认管理员改成了真实邮箱，而早期 seed 从不分配角色，所以没人持有 admin；
+    // 注册接口公开，攻击者抢注了空出来的 admin@cms.com（注册流程只会给默认角色，这里是没有任何角色）
+    const db = new FakeDb();
+    db.addRole('admin', 1);
+    db.addRole('editor', 1);
+    db.addUser('boss@corp.example', { passwordHash: 'OPERATOR-HASH' });
+    const attacker = db.addUser('admin@cms.com', { passwordHash: 'ATTACKER-HASH' });
+
+    for (let i = 0; i < 3; i += 1) {
+      const { result, warns } = await run(db, true);
+      expect(result).toEqual({ mode: 'roles-only', admin: 'missing' });
+      expect(warns.join('\n')).toContain(MANUAL_SQL);
+    }
+
+    expect(db.rolesOf('admin@cms.com')).toEqual([]);
+    expect(db.userRoles).toEqual([]);
+    expect(attacker.passwordHash).toBe('ATTACKER-HASH');
+    expect(db.userRoleWrites()).toEqual([]);
+    expect(db.userWrites()).toEqual([]);
+  });
+
+  it('只读 users / user_roles：发出的语句里没有任何对 users、user_roles 的写入', async () => {
+    const db = new FakeDb();
+    db.addUser('admin@cms.com');
+    await run(db, true);
+    const writes = db.statements.filter((s) => /^(INSERT|UPDATE|DELETE|REPLACE)\b/i.test(s));
+    expect(writes.length).toBeGreaterThan(0);
+    expect(writes.filter((s) => !/^(INSERT IGNORE INTO roles|UPDATE roles)\b/.test(s))).toEqual([]);
+  });
+
+  it('幂等：再跑一次没有任何变化', async () => {
     const db = new FakeDb();
     db.addUser('admin@cms.com');
     await run(db, true);
     const snapshot = JSON.stringify({ roles: db.roles, userRoles: db.userRoles, users: db.users });
 
     const { result } = await run(db, true);
-    expect(result.admin).toBe('has-admin');
+    expect(result.admin).toBe('missing');
     expect(JSON.stringify({ roles: db.roles, userRoles: db.userRoles, users: db.users })).toBe(snapshot);
   });
 
-  it('已有其他可用的 admin、admin@cms.com 被有意撤掉了 admin：不把 admin 加回去', async () => {
+  it('已有其他可用的 admin、admin@cms.com 被有意撤掉了 admin：不把 admin 加回去，也不警告', async () => {
     const db = new FakeDb();
     db.addRole('admin', 1);
     db.addRole('editor', 1);
@@ -178,60 +222,52 @@ describe('seed-admin.js --roles-only（每次例行部署执行）', () => {
     const demoted = db.addUser('admin@cms.com');
     db.grant(demoted, 'editor');
 
-    const { result } = await run(db, true);
+    const { result, warns } = await run(db, true);
 
     expect(result.admin).toBe('has-admin');
     expect(db.rolesOf('admin@cms.com')).toEqual(['editor']);
-    expect(db.statements.some((s) => s.startsWith('INSERT IGNORE INTO user_roles'))).toBe(false);
+    expect(db.rolesOf('owner@example.com')).toEqual(['admin']);
+    expect(db.userRoleWrites()).toEqual([]);
     expect(db.userWrites()).toEqual([]);
+    expect(warns).toEqual([]);
   });
 
   it.each([
     ['已禁用', { isActive: 0 }],
     ['已删除', { deletedAt: new Date('2026-01-01') }],
-  ])('唯一持有 admin 的账号%s：视为没有可用 admin，分配给 admin@cms.com', async (_label, opts) => {
+  ])('唯一持有 admin 的账号%s：视为没有可用 admin，只警告，不把 admin 分配给 admin@cms.com', async (_label, opts) => {
     const db = new FakeDb();
     db.addRole('admin', 1);
     const gone = db.addUser('old-admin@example.com', opts as Partial<UserRow>);
     db.grant(gone, 'admin');
     db.addUser('admin@cms.com');
 
-    const { result } = await run(db, true);
-    expect(result.admin).toBe('assigned');
-    expect(db.rolesOf('admin@cms.com')).toEqual(['admin']);
-  });
-
-  it('admin@cms.com 处于禁用状态：分配角色但不改启用状态，并给出警告', async () => {
-    const db = new FakeDb();
-    const admin = db.addUser('admin@cms.com', { isActive: 0 });
-
     const { result, warns } = await run(db, true);
-    expect(result.admin).toBe('assigned');
-    expect(admin.isActive).toBe(0);
-    expect(warns.join('\n')).toMatch(/禁用/);
-    expect(db.userWrites()).toEqual([]);
+    expect(result.admin).toBe('missing');
+    expect(db.rolesOf('admin@cms.com')).toEqual([]);
+    expect(db.rolesOf('old-admin@example.com')).toEqual(['admin']);
+    expect(warns.join('\n')).toContain(MANUAL_SQL);
+    expect(db.userRoleWrites()).toEqual([]);
   });
 
-  it('没有可用 admin 且找不到 admin@cms.com：不建账号、不报错，只警告并指向手工步骤', async () => {
+  it('没有可用 admin 且找不到 admin@cms.com：不建账号、不报错，只警告并给出手工 SQL', async () => {
     const db = new FakeDb();
     db.addUser('someone@example.com');
 
     const { result, warns } = await run(db, true);
-    expect(result.admin).toBe('no-user');
+    expect(result.admin).toBe('missing');
     expect(systemRoles(db)).toEqual(['admin:1', 'editor:1']);
     expect(db.users.map((u) => u.email)).toEqual(['someone@example.com']);
     expect(db.userRoles).toEqual([]);
-    expect(warns.join('\n')).toMatch(/docs\/deploy\.md/);
+    expect(warns.join('\n')).toContain(MANUAL_SQL);
     expect(db.userWrites()).toEqual([]);
   });
 
-  it('admin@cms.com 已被软删除：不当作可分配对象', async () => {
-    const db = new FakeDb();
-    db.addUser('admin@cms.com', { deletedAt: new Date('2026-01-01') });
-
-    const { result } = await run(db, true);
-    expect(result.admin).toBe('no-user');
-    expect(db.userRoles).toEqual([]);
+  it('手工 SQL 用占位符邮箱（原样执行什么也不改），与 docs/deploy.md 5.1 的那一段逐字相同', () => {
+    expect(MANUAL_SQL).toContain(`WHERE u.email = '${seedAdmin.ADMIN_EMAIL_PLACEHOLDER}';`);
+    expect(MANUAL_SQL).not.toContain(seedAdmin.ADMIN_EMAIL);
+    const docs = fs.readFileSync(path.join(REPO_ROOT, 'docs/deploy.md'), 'utf8').replace(/\r\n/g, '\n');
+    expect(docs).toContain(MANUAL_SQL);
   });
 });
 

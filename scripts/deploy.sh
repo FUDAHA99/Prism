@@ -18,7 +18,7 @@
 # 流程：拉代码（脚本自身有更新则改跑新版）→ 预检 .env.prod 的 JWT 密钥（不合格则中止，容器都不动）
 #   → 生成 nginx/nginx.active.conf
 #   → 部署前 nginx -t（一次性容器；失败则中止，生效配置换回部署前的内容，容器都不动）
-#   → up -d --build → 等 backend → 例行部署：补齐系统角色（seed-admin.js --roles-only，不改密码，失败只警告）
+#   → up -d --build → 等 backend → 例行部署：补齐系统角色（seed-admin.js --roles-only：不改密码、不分配角色，失败只警告）
 #   → 部署后 nginx -t（真实网络）→ 重建 nginx（80/443 中断数秒）
 #   → 首次部署：建管理员 + 备份 crontab → 清理旧镜像
 # =================================================================
@@ -326,17 +326,19 @@ main() {
     sleep 3
   done
 
-  # ── 例行部署：补齐系统角色（幂等，不改任何密码）────────────────────
+  # ── 例行部署：补齐系统角色（幂等，不改任何密码，不分配任何角色）──────────
   # 访问矩阵要求管理员带 admin、编辑带 editor；早于本机制的库里可能没有 editor、没有 isSystem 标记，
-  # 甚至没人持有 admin（升级后整个后台 403）。--roles-only 只建 / 标记这两个系统角色，且只在没有任何
-  # 可用账号持有 admin 时才把 admin 分配给 admin@cms.com，不建账号、不改密码与启用状态。
+  # 甚至没人持有 admin（升级后整个后台 403）。--roles-only 只建 / 标记这两个系统角色，不建账号、
+  # 不改密码与启用状态，也从不分配角色：没人持有 admin 时它只打印警告和 docs/deploy.md 5.1 的手工 SQL。
+  # 不自动分配给 admin@cms.com —— 注册接口公开，这个邮箱可能是任何人注册的，每次部署都跑的步骤不能替运维认人。
   # 首次部署由下面的完整 seed 负责。失败不中止部署：容器已经换成新版本，这里只提示手工补救。
   if ! $first_deploy; then
-    log "确保系统角色 admin / editor（seed-admin.js --roles-only，不改任何密码）..."
+    log "确保系统角色 admin / editor（seed-admin.js --roles-only：不改任何密码，不分配任何角色）..."
     if ! $COMPOSE exec -T backend node scripts/seed-admin.js --roles-only; then
       warn "补齐系统角色失败（不影响本次部署的其余步骤）。管理员若缺 admin 角色，后台会整体返回 403。"
       warn "  排查后手工重试：$COMPOSE exec -T backend node scripts/seed-admin.js --roles-only"
-      warn "  或按 docs/deploy.md 5.1 用 SQL 补角色；不要为此运行不带 --roles-only 的 seed-admin.js（会重置 admin 密码）"
+      warn "  或按 docs/deploy.md 5.1 用 SQL 建角色、把 admin 分配给你确认过的管理员账号；"
+      warn "  不要为此运行不带 --roles-only 的 seed-admin.js（会重置 admin@cms.com 的密码）"
     fi
   fi
 

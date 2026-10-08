@@ -11,9 +11,10 @@
  *
  * 2) 只补角色：node scripts/seed-admin.js --roles-only（已有环境；deploy.sh 每次例行部署在 backend 就绪后执行）
  *    - 确保 admin / editor 两个系统角色存在且 isSystem = 1（早先手工建的同名角色补上系统标记）
- *    - 库里没有任何可用账号（启用且未删除）持有 admin 时，把 admin 分配给 admin@cms.com
- *    - 不建账号，不改任何账号的密码、启用状态；已有可用账号持有 admin 时不动任何角色分配，
- *      避免运维有意撤掉的 admin 在每次部署时被加回去
+ *    - **从不分配任何角色**：不建账号，不改任何账号的密码、启用状态，也不写 user_roles
+ *    - 库里没有任何可用账号（启用且未删除）持有 admin 时，只打印警告和 docs/deploy.md 5.1 的手工 SQL，
+ *      退出码仍为 0（不让部署失败）。不自动把 admin 给 admin@cms.com：注册接口是公开的，
+ *      运维把默认管理员改成真实邮箱后，任何人都能注册 admin@cms.com，自动分配等于把后台送给他
  *
  * 用法（先 docker compose up -d，再启动后端建表，然后跑这个）：
  *   node scripts/seed-admin.js
@@ -101,7 +102,10 @@ async function ensureSystemRoles(conn, now, log) {
   log('✅ 已确保系统角色 admin / editor（isSystem = 1）');
 }
 
-/** 把 admin 角色分配给 admin@cms.com（user_roles 主键为 (user_id, role_id)，INSERT IGNORE 可重跑），并回读确认 */
+/**
+ * 完整模式专用：把 admin 角色分配给刚创建 / 重置过密码的 admin@cms.com（user_roles 主键为 (user_id, role_id)，
+ * INSERT IGNORE 可重跑），并回读确认。--roles-only 不调用它。
+ */
 async function assignAdminRole(conn) {
   await conn.execute(
     `INSERT IGNORE INTO user_roles (user_id, role_id)
@@ -121,10 +125,35 @@ async function assignAdminRole(conn) {
 }
 
 /**
- * --roles-only 的 admin 分配：只在没有任何可用账号（启用且未删除）持有 admin 时分配给 admin@cms.com。
- * @returns 'has-admin' | 'assigned' | 'no-user'
+ * 没有可用 admin 时给运维的手工 SQL：与 docs/deploy.md 5.1 的「分配 admin」那一段逐字相同（seed-admin.spec.ts 比对）。
+ * 邮箱故意是占位符：原样执行什么也不改（最后的 SELECT 仍为空），只有换成运维确认过的账号才生效。
  */
-async function ensureSomeAdmin(conn, log, warn) {
+const ADMIN_EMAIL_PLACEHOLDER = '<管理员邮箱>';
+const MANUAL_ADMIN_SQL = `docker exec -i prism-mysql sh -c 'exec mysql --default-character-set=utf8mb4 -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' <<'SQL'
+INSERT IGNORE INTO user_roles (user_id, role_id)
+SELECT u.id, r.id FROM users u JOIN roles r ON r.name = 'admin' WHERE u.email = '${ADMIN_EMAIL_PLACEHOLDER}';
+SELECT u.email, r.name AS role FROM users u
+JOIN user_roles ur ON ur.user_id = u.id
+JOIN roles r ON r.id = ur.role_id
+WHERE r.name IN ('admin', 'editor');
+SQL`;
+
+function missingAdminWarning() {
+  return [
+    '⚠️ 没有任何可用账号（启用且未删除）持有 admin 角色：管理后台的用户、角色、评论等管理接口会全部返回 403。',
+    `   --roles-only 不会自动分配 admin：注册接口是公开的，${ADMIN_EMAIL} 这类默认邮箱可能是任何人自助注册的。`,
+    `   确认线上实际在用、能用自己的密码登录的管理员邮箱后，在服务器项目目录执行（把 ${ADMIN_EMAIL_PLACEHOLDER} 换成该邮箱；`,
+    '   详见 docs/deploy.md 5.1；不要为此运行不带 --roles-only 的 seed-admin.js，它会重置 admin@cms.com 的密码）：',
+    MANUAL_ADMIN_SQL,
+  ].join('\n');
+}
+
+/**
+ * --roles-only 的 admin 检查：只读，从不分配。没有任何可用账号（启用且未删除）持有 admin 时
+ * 打印警告与手工 SQL，不报错（部署照常完成）。
+ * @returns 'has-admin' | 'missing'
+ */
+async function checkAdminHolder(conn, log, warn) {
   const [holders] = await conn.execute(
     `SELECT u.email FROM user_roles ur
      JOIN users u ON u.id = ur.user_id
@@ -133,26 +162,11 @@ async function ensureSomeAdmin(conn, log, warn) {
      LIMIT 1`,
   );
   if (holders.length > 0) {
-    log('✅ 已有可用账号持有 admin 角色，不改动任何角色分配');
+    log('✅ 已有可用账号持有 admin 角色（--roles-only 不改动任何角色分配）');
     return 'has-admin';
   }
-
-  const [users] = await conn.execute('SELECT id, isActive FROM users WHERE email = ? AND deletedAt IS NULL', [
-    ADMIN_EMAIL,
-  ]);
-  if (users.length === 0) {
-    warn(
-      `⚠️ 没有任何可用账号持有 admin 角色，且找不到 ${ADMIN_EMAIL}：` +
-        '请按 docs/deploy.md 5.1 用 SQL 把 admin 分配给线上实际在用的管理员（不要为此重跑完整的 seed-admin.js，它会重置密码）',
-    );
-    return 'no-user';
-  }
-  await assignAdminRole(conn);
-  log(`✅ 库里没有可用的 admin 账号，已把 admin 角色分配给 ${ADMIN_EMAIL}（密码与启用状态未改动）`);
-  if (!Number(users[0].isActive)) {
-    warn(`⚠️ ${ADMIN_EMAIL} 处于禁用状态，需要手工启用后才能登录（--roles-only 不改启用状态）`);
-  }
-  return 'assigned';
+  warn(missingAdminWarning());
+  return 'missing';
 }
 
 /**
@@ -162,7 +176,7 @@ async function ensureSomeAdmin(conn, log, warn) {
 async function seed(conn, { rolesOnly = false, now = new Date(), log = console.log, warn = console.warn } = {}) {
   if (rolesOnly) {
     await ensureSystemRoles(conn, now, log);
-    const admin = await ensureSomeAdmin(conn, log, warn);
+    const admin = await checkAdminHolder(conn, log, warn);
     return { mode: 'roles-only', admin };
   }
   await upsertAdminUser(conn, now, log);
@@ -175,7 +189,10 @@ async function seed(conn, { rolesOnly = false, now = new Date(), log = console.l
 async function main(argv = process.argv.slice(2)) {
   const opts = parseArgs(argv);
   if (opts.help) {
-    console.log('用法：node scripts/seed-admin.js [--roles-only]（不带参数会重置 admin@cms.com 的密码）');
+    console.log(
+      '用法：node scripts/seed-admin.js [--roles-only]（不带参数会重置 admin@cms.com 的密码并分配 admin；' +
+        '--roles-only 只确保系统角色，不分配任何角色）',
+    );
     return;
   }
   try {
@@ -187,7 +204,7 @@ async function main(argv = process.argv.slice(2)) {
   const mysql = require('mysql2/promise');
   const cfg = dbConfigFromEnv();
   console.log(
-    `[seed-admin] ${opts.rolesOnly ? '只补系统角色（--roles-only，不改密码）' : '完整模式'}，connecting ${cfg.user}@${cfg.host}:${cfg.port}/${cfg.database}`,
+    `[seed-admin] ${opts.rolesOnly ? '只补系统角色（--roles-only：不改密码，不分配角色）' : '完整模式'}，connecting ${cfg.user}@${cfg.host}:${cfg.port}/${cfg.database}`,
   );
   const conn = await mysql.createConnection(cfg);
   try {
@@ -199,11 +216,13 @@ async function main(argv = process.argv.slice(2)) {
 
 module.exports = {
   ADMIN_EMAIL,
+  ADMIN_EMAIL_PLACEHOLDER,
+  MANUAL_ADMIN_SQL,
   SYSTEM_ROLES,
   parseArgs,
   dbConfigFromEnv,
   ensureSystemRoles,
-  ensureSomeAdmin,
+  checkAdminHolder,
   seed,
   main,
 };

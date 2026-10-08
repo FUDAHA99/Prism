@@ -129,13 +129,14 @@ db.close();
 cd backend && node scripts/seed-admin.js --roles-only
 ```
 
-它只建 `admin`、`editor` 两个系统角色并补上 `isSystem = 1`（早先在后台手工建的同名角色也会补标记）；
-库里没有任何可用账号（启用且未删除）持有 `admin` 时，才把 `admin` 分配给 admin@cms.com。
-不建账号，不改任何账号的密码与启用状态；已有可用的 `admin` 时不动任何角色分配。
+它只建 `admin`、`editor` 两个系统角色并补上 `isSystem = 1`（早先在后台手工建的同名角色也会补标记），
+**不分配任何角色**，不建账号，不改任何账号的密码与启用状态。库里没有任何可用账号（启用且未删除）持有 `admin` 时，
+它只打印警告和手工分配的 SQL（与 `docs/deploy.md` 5.1 同一段），退出码仍为 0。
+不自动分配是有意的：注册接口公开，admin@cms.com 这类默认邮箱可能是任何人注册的，每次部署都跑的脚本不能替运维决定谁是管理员。
 生产上 `scripts/deploy.sh` 每次例行部署都会在 backend 就绪后自动执行它（见 `docs/deploy.md` 5.1）。
 
-不方便跑脚本时，也可以直接在 MySQL 里执行（可重复执行；开发环境容器为 `cms-mysql`，生产为 `prism-mysql`，库名换成实际值，
-`admin@cms.com` 换成要授予 `admin` 的邮箱）：
+不方便跑脚本、或要给已有账号授予 `admin` 时，直接在 MySQL 里执行（可重复执行；开发环境容器为 `cms-mysql`，生产用 `docs/deploy.md` 5.1 的命令，
+`admin@cms.com` 换成要授予 `admin` 的邮箱，只填你确认归自己所有的账号）：
 
 ```bash
 docker exec -i cms-mysql mysql --default-character-set=utf8mb4 -u cms -pcms123 cms_dev <<'SQL'

@@ -95,7 +95,7 @@ bash scripts/deploy.sh
 5. 检测是否首次部署（自动设置 `DB_SYNC=true` 建表）；`.env.prod` 里写着 `DB_SYNC=true` 时打印警告
 6. 构建三个业务镜像（backend / portal / frontend），启动全部 6 个容器
 7. 等待 backend 就绪后接到真实 Docker 网络再跑一次 `nginx -t`，通过后强制重建 nginx 容器（每次部署 80/443 中断数秒，见第 7 节「nginx 配置变更如何生效」）
-8. 首次部署：运行 `seed-admin.js` 创建管理员账户，并配置每日自动备份；例行部署：backend 就绪后运行 `seed-admin.js --roles-only` 补齐 `admin` / `editor` 系统角色（不建账号、不改密码，失败只警告、不中止部署，见 5.1）
+8. 首次部署：运行 `seed-admin.js` 创建管理员账户，并配置每日自动备份；例行部署：backend 就绪后运行 `seed-admin.js --roles-only` 补齐 `admin` / `editor` 系统角色（不建账号、不改密码、不分配任何角色；没有可用的 `admin` 时打印警告和手工分配的命令，失败只警告、不中止部署，见 5.1）
 9. 清理悬空镜像（`docker image prune -f`）
 
 首次部署仅在本次执行中临时设置 `DB_SYNC=true`（不修改 `.env.prod`）；backend 容器会一直保留 `DB_SYNC=true`，直到下一次 `up` 重建它。建完表后执行 `docker compose -f docker-compose.prod.yml --env-file .env.prod up -d backend` 关闭（`restart` 无效），再执行 `docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --no-deps --force-recreate nginx` 让 nginx 重新解析 backend 的新容器 IP（或直接再执行一次 `bash scripts/deploy.sh`，两步都会做）。
@@ -190,7 +190,7 @@ $COMPOSE up -d --no-deps --force-recreate nginx
 
 **① 确认管理员带 `admin` / `editor` 角色。** 从本批次起，评论管理的 8 个接口要求 `admin` 或 `editor` 角色（完整的 `seed-admin.js` 只在首次部署时运行，已有库里的管理员可能没有任何角色，也可能没有 `editor` 角色和 `isSystem` 标记）。缺角色时这些接口全部返回 403，而管理后台的评论页会先转圈十几秒、再显示成空列表，看起来像「没有评论」。
 
-新版 `deploy.sh` 每次例行部署都会在 backend 就绪后执行 `seed-admin.js --roles-only`：建好 `admin`、`editor` 两个系统角色并补上 `isSystem = 1`，库里没有任何可用账号（启用且未删除）持有 `admin` 时把它分配给 `admin@cms.com`；不建账号、不改任何密码与启用状态，已有可用的 `admin` 时不动任何角色分配。它失败时部署照常完成，只打印警告。线上实际在用的管理员**不是** `admin@cms.com`、或想在部署前就确认时，先在服务器的项目目录执行（库名、账号、密码取自 `prism-mysql` 容器自己的环境变量，无需手填）：
+新版 `deploy.sh` 每次例行部署都会在 backend 就绪后执行 `seed-admin.js --roles-only`：只建好 `admin`、`editor` 两个系统角色并补上 `isSystem = 1`，**不分配任何角色**，也不建账号、不改任何密码与启用状态。库里没有任何可用账号（启用且未删除）持有 `admin` 时，它打印警告和下面「分配 `admin`」那段命令，部署照常完成——`admin` 必须由运维手工分配给自己确认过的账号：注册接口是公开的，`admin@cms.com` 这类默认邮箱可能是别人自助注册的，脚本无从分辨。它失败时部署同样照常完成，只打印警告。部署前想先确认时，在服务器的项目目录执行（库名、账号、密码取自 `prism-mysql` 容器自己的环境变量，无需手填）：
 
 ```bash
 docker exec -i prism-mysql sh -c 'exec mysql --default-character-set=utf8mb4 -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' <<'SQL'
@@ -201,15 +201,22 @@ WHERE r.name IN ('admin', 'editor');
 SQL
 ```
 
-有输出（实际在用的管理员账号带 `admin` 或 `editor`）就不用处理。没有输出时补角色——把 `admin@cms.com` 换成线上实际在用的管理员邮箱，可重复执行：
+有输出（实际在用的管理员账号带 `admin` 或 `editor`）就不用处理。没有输出时分两步，都可重复执行。backend 还是旧版本（还没跑过 `--roles-only`）时先建两个系统角色：
 
 ```bash
 docker exec -i prism-mysql sh -c 'exec mysql --default-character-set=utf8mb4 -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' <<'SQL'
 INSERT IGNORE INTO roles (id, name, description, isSystem, createdAt, updatedAt)
 VALUES (UUID(), 'admin', '系统管理员', 1, NOW(6), NOW(6)), (UUID(), 'editor', '内容编辑', 1, NOW(6), NOW(6));
 UPDATE roles SET isSystem = 1 WHERE name IN ('admin', 'editor');
+SQL
+```
+
+然后分配 `admin`：把 `<管理员邮箱>` 换成线上实际在用的管理员邮箱。只填你能用自己设的密码登录的账号；`admin@cms.com` 若不是你部署时由 `seed-admin.js` 建的、或者你登不上它，就不要填它（可能是别人注册的）。占位符原样执行什么也不会改：
+
+```bash
+docker exec -i prism-mysql sh -c 'exec mysql --default-character-set=utf8mb4 -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' <<'SQL'
 INSERT IGNORE INTO user_roles (user_id, role_id)
-SELECT u.id, r.id FROM users u JOIN roles r ON r.name = 'admin' WHERE u.email = 'admin@cms.com';
+SELECT u.id, r.id FROM users u JOIN roles r ON r.name = 'admin' WHERE u.email = '<管理员邮箱>';
 SELECT u.email, r.name AS role FROM users u
 JOIN user_roles ur ON ur.user_id = u.id
 JOIN roles r ON r.id = ur.role_id
@@ -217,7 +224,7 @@ WHERE r.name IN ('admin', 'editor');
 SQL
 ```
 
-最后一条 SELECT 应列出该邮箱和 `admin`，从该账号的下一个请求起即按新角色鉴权（鉴权每个请求直接查库）。backend 已是新版本时，也可以用 `$COMPOSE exec -T backend node scripts/seed-admin.js --roles-only` 代替上面的 SQL（只对 `admin@cms.com` 生效，且只在没有任何可用 `admin` 时才分配）。不要运行不带 `--roles-only` 的 `seed-admin.js`（账号已存在时它会把密码重置为 `Admin123!`），也不要顺手创建 `user` 角色（见 `docs/dev-guide.md`「初始化管理员角色」）。
+最后一条 SELECT 应列出该邮箱和 `admin`，从该账号的下一个请求起即按新角色鉴权（鉴权每个请求直接查库）。`$COMPOSE exec -T backend node scripts/seed-admin.js --roles-only` 只能代替第一步（建角色），不会分配 `admin`。不要运行不带 `--roles-only` 的 `seed-admin.js`（账号已存在时它会把密码重置为 `Admin123!`），也不要顺手创建 `user` 角色（见 `docs/dev-guide.md`「初始化管理员角色」）。
 
 **② 第一次运行新的部署流程。** nginx 的生效配置改成了生成的 `nginx/nginx.active.conf`（第 7 节），`docker-compose.prod.yml` 挂载的是它，文件不存在时 nginx 容器会创建失败。
 
