@@ -16,7 +16,10 @@ import * as bcrypt from 'bcrypt';
 
 import { AUTH_THROTTLE, AuthController } from './auth.controller';
 import { AuthModule } from './auth.module';
-import { ThrottlerBehindProxyGuard } from '../../common/guards/throttler-behind-proxy.guard';
+import {
+  THROTTLE_MESSAGE,
+  ThrottlerBehindProxyGuard,
+} from '../../common/guards/throttler-behind-proxy.guard';
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { accessBlacklistKey, refreshBlacklistKey } from './token-blacklist.util';
@@ -1092,6 +1095,9 @@ describe('限流：只由全局 ThrottlerBehindProxyGuard 执行，额度按毫�
       statuses.push(last.status);
     }
     expect(statuses).toEqual([200, 200, 200, 200, 200, 429]);
+    // 中文文案，与 nginx 的 429 一致（不是 'ThrottlerException: Too Many Requests'）
+    expect(last!.body.message).toBe('请求过于频繁，请稍后再试');
+    expect(last!.body.message).toBe(THROTTLE_MESSAGE);
     const retryAfter = Number(last!.headers['retry-after']);
     expect(retryAfter).toBeGreaterThan(1);
     expect(retryAfter).toBeLessThanOrEqual(60);

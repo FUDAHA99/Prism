@@ -1,6 +1,9 @@
 import { Injectable, ExecutionContext } from '@nestjs/common';
 import { ThrottlerGuard } from '@nestjs/throttler';
 
+/** 与 nginx 限流（limit_req）返回的 429 文案一致 */
+export const THROTTLE_MESSAGE = '请求过于频繁，请稍后再试';
+
 @Injectable()
 export class ThrottlerBehindProxyGuard extends ThrottlerGuard {
   /**
@@ -37,5 +40,13 @@ export class ThrottlerBehindProxyGuard extends ThrottlerGuard {
    */
   protected async getTracker(req: Record<string, any>): Promise<string> {
     return req.ip;
+  }
+
+  /**
+   * 默认文案是英文的 'ThrottlerException: Too Many Requests'，admin SPA 的拦截器会原样弹给用户；
+   * 而 nginx 的 429 与登录锁定都是中文。统一成中文（Retry-After 头照常由父类设置）。
+   */
+  protected async getErrorMessage(): Promise<string> {
+    return THROTTLE_MESSAGE;
   }
 }
