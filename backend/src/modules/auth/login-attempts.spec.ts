@@ -1,13 +1,18 @@
+import { validAfterKey } from './token-revocation';
 import {
   MAX_TRUSTED_IPS,
   TRUSTED_IP_TTL_MS,
   accountAttemptsKey,
+  changePasswordFailuresKey,
+  clearChangePasswordFailures,
   forgetTrustedIps,
   ipAttemptsKey,
   isTrustedIp,
   loginSubject,
   readTrustedIps,
   rememberTrustedIp,
+  rememberTrustedIpUnlessRevoked,
+  revokeAllSessions,
   trustedIpsKey,
 } from './login-attempts';
 
@@ -100,5 +105,56 @@ describe('受信任 IP（login:trusted:<userId>）', () => {
     await forgetTrustedIps(cache as any, 'u1');
     expect(cache.store.has('login:trusted:u1')).toBe(false);
     expect(await isTrustedIp(cache as any, 'u1', '198.51.100.1', NOW)).toBe(false);
+  });
+});
+
+describe('记受信任 IP 与「吊销全部会话」同锁（1-F-1 二次复审）', () => {
+  let cache: JsonCache;
+  beforeEach(() => {
+    cache = new JsonCache();
+  });
+
+  it('本次登录开始之后发生过吊销（valid-after ≥ startedAt）：不记，返回 false', async () => {
+    const startedAt = Date.now() - 1000;
+    await revokeAllSessions(cache as any, 'u1');
+    expect(await rememberTrustedIpUnlessRevoked(cache as any, 'u1', '198.51.100.7', startedAt)).toBe(false);
+    expect(cache.store.has(trustedIpsKey('u1'))).toBe(false);
+  });
+
+  it('吊销早于本次登录开始（用新口令的正常登录）：照常记', async () => {
+    await revokeAllSessions(cache as any, 'u1');
+    const startedAt = Date.now() + 1;
+    expect(await rememberTrustedIpUnlessRevoked(cache as any, 'u1', '198.51.100.7', startedAt)).toBe(true);
+    expect(await isTrustedIp(cache as any, 'u1', '198.51.100.7')).toBe(true);
+  });
+
+  it('吊销发生在读列表与写回之间：吊销 + 清空排在写入之后，IP 不会留下', async () => {
+    const startedAt = Date.now() - 1000;
+    const hooked = new JsonCache();
+    let revoking: Promise<void> | undefined;
+    const originalGet = (key: string) => JsonCache.prototype.get.call(hooked, key);
+    hooked.get = async <T>(key: string): Promise<T | undefined> => {
+      if (key === trustedIpsKey('u1') && !revoking) {
+        revoking = revokeAllSessions(hooked as any, 'u1');
+        // 给它充分的机会抢在下面的写入之前做完（有锁时它只能等）
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      return (await originalGet(key)) as T | undefined;
+    };
+    expect(await rememberTrustedIpUnlessRevoked(hooked as any, 'u1', '198.51.100.8', startedAt)).toBe(true);
+    await revoking;
+    expect(hooked.store.has(trustedIpsKey('u1'))).toBe(false);
+    expect(hooked.store.has(validAfterKey('u1'))).toBe(true);
+  });
+
+  it('revokeAllSessions：写入吊销标记并清空受信任 IP；clearChangePasswordFailures 清掉改密失败计数', async () => {
+    await rememberTrustedIp(cache as any, 'u1', '198.51.100.1');
+    await revokeAllSessions(cache as any, 'u1');
+    expect(cache.store.has(trustedIpsKey('u1'))).toBe(false);
+    expect(Number(await cache.get(validAfterKey('u1')))).toBeGreaterThan(0);
+
+    await cache.set(changePasswordFailuresKey('u1'), 5);
+    await clearChangePasswordFailures(cache as any, 'u1');
+    expect(cache.store.has(changePasswordFailuresKey('u1'))).toBe(false);
   });
 });

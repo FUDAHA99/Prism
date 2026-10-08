@@ -1,4 +1,6 @@
 import { Cache } from 'cache-manager';
+import { KeyedMutex } from '../../common/utils/keyed-mutex';
+import { readValidAfter, revokeTokensIssuedBefore } from './token-revocation';
 
 /**
  * 登录失败计数的缓存键（生产在 Redis；经 Keyv 写入后真实键名带 `keyv::keyv:` 前缀，解锁步骤见 docs/deploy.md）。
@@ -89,10 +91,54 @@ export async function forgetTrustedIps(cache: Cache, userId: string): Promise<vo
 }
 
 /**
+ * 「记受信任 IP」与「吊销全部会话 + 清空受信任 IP」按用户串行（批次 1-F-1 二次复审）。
+ *
+ * 登录在签发 token 之后才记 IP。若改密恰好落在「签发之后、记 IP 之前」，或落在记 IP 的读与写之间，
+ * 清空会先于这次写入发生，用旧口令登录的人（token 已被吊销）的 IP 却又被写回、受信任 30 天，
+ * 改密「清空受信任 IP」就失效了。两者在同一把按 userId 的锁里执行，再加上与签发前检查相同的判定
+ * （本次登录开始之后发生过吊销就不记），任何交错下都不会留下这种 IP。
+ * 进程内锁：生产只有一个 backend 实例（见 KeyedMutex 的说明）。
+ */
+const trustedIpLocks = new KeyedMutex();
+
+/**
+ * 登录签发成功后调用：startedAt 是这次登录读口令哈希之前记下的时刻。此后发生过吊销
+ * （改密、管理员重置密码、改密失败达到上限；valid-after ≥ startedAt）就不记，返回 false。
+ */
+export async function rememberTrustedIpUnlessRevoked(
+  cache: Cache,
+  userId: string,
+  ip: string,
+  startedAt: number,
+): Promise<boolean> {
+  return trustedIpLocks.run(userId, async () => {
+    const validAfter = await readValidAfter(cache, userId);
+    if (validAfter !== undefined && validAfter >= startedAt) return false;
+    await rememberTrustedIp(cache, userId, ip);
+    return true;
+  });
+}
+
+/** 吊销该用户此刻之前签发的全部 token（access 与 refresh）并清空受信任 IP；与上面的记 IP 同一把锁 */
+export async function revokeAllSessions(cache: Cache, userId: string): Promise<void> {
+  await trustedIpLocks.run(userId, async () => {
+    await revokeTokensIssuedBefore(cache, userId);
+    await forgetTrustedIps(cache, userId);
+  });
+}
+
+/**
  * 修改密码时「当前密码」校验失败的计数（按 userId，15 分钟窗口，每次失败重新计时）。
  * 拿到别人 access token 的人可以在 /auth/change-password 上猜当前密码，猜中即可改密接管账号；
  * 此前这里只有每 IP 每分钟 5 次的限流，换 IP 就能并行猜，完全不受登录锁定约束。
+ *
+ * 达到上限时吊销该用户的全部会话（revokeAllSessions）：拿着盗来的 access / refresh token 的人就此出局，
+ * 本人用口令重新登录即可（见 AuthService.login 对计数的清理）。
  */
 export const MAX_CHANGE_PASSWORD_FAILURES = 5;
 
 export const changePasswordFailuresKey = (userId: string) => `change_password_failures:${userId}`;
+
+export async function clearChangePasswordFailures(cache: Cache, userId: string): Promise<void> {
+  await cache.del(changePasswordFailuresKey(userId));
+}

@@ -23,6 +23,7 @@ import {
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { accessBlacklistKey, refreshBlacklistKey } from './token-blacklist.util';
+import * as loginAttempts from './login-attempts';
 import {
   accountAttemptsKey,
   changePasswordFailuresKey,
@@ -66,10 +67,12 @@ class MemoryCache {
   readonly store = new Map<string, string>();
   readonly ttls = new Map<string, number | undefined>();
   hooks: {
+    beforeGet?: (key: string) => Promise<void> | void;
     beforeSet?: (key: string) => Promise<void> | void;
     beforeDel?: (key: string) => Promise<void> | void;
   } = {};
   async get<T>(key: string): Promise<T | undefined> {
+    await this.hooks.beforeGet?.(key);
     const raw = this.store.get(key);
     return raw === undefined ? undefined : (JSON.parse(raw) as T);
   }
@@ -554,12 +557,17 @@ describe('认证核心安全行为', () => {
       expect((await change(undefined, { currentPassword: 'Start123!', newPassword: 'Changed2026' })).status).toBe(401);
     });
 
-    describe('当前密码错误按用户计数：15 分钟内错 5 次 → 429 并吊销发起请求的会话', () => {
+    describe('当前密码错误按用户计数：15 分钟内错 5 次 → 429 并吊销该用户的全部会话', () => {
       const wrong = (token: string) => change(token, { currentPassword: 'Wrong1234', newPassword: 'Changed2026' });
+      const loginFrom = (who: { email: string; password: string }, ip: string) =>
+        h.http().post('/auth/login').set('X-Forwarded-For', ip).send({ email: who.email, password: who.password });
 
-      it('前 4 次 400，第 5 次 429 且该 access token 作废；换会话也只能等窗口过去', async () => {
+      it('前 4 次 400，第 5 次 429：盗用者手里的 access 与 refresh、本人的会话全部作废，受信任 IP 清空', async () => {
         const u = await freshUser();
-        const attacker = await login(u);
+        const owner = (await loginFrom(u, '198.51.100.10').expect(200)).body as Awaited<ReturnType<typeof login>>;
+        const attacker = await login(u); // 盗来的会话
+        const trustedBefore = (await h.cache.get<Array<{ ip: string }>>(trustedIpsKey(u.id))) ?? [];
+        expect(trustedBefore.map((entry) => entry.ip)).toContain('198.51.100.10');
         for (let i = 0; i < 4; i += 1) {
           const res = await wrong(attacker.tokens.accessToken);
           expect(res.status).toBe(400);
@@ -568,23 +576,52 @@ describe('认证核心安全行为', () => {
         const fifth = await wrong(attacker.tokens.accessToken);
         expect(fifth.status).toBe(429);
         expect(fifth.body.message).toBe('当前密码错误次数过多，请15分钟后再试');
-        expect((await me(attacker.tokens.accessToken)).status).toBe(401);
+
+        // 1-F-1 二次复审：此前只吊销发起请求的 access token，盗用者拿 refresh 换一个新的接着猜
+        for (const s of [attacker, owner]) {
+          expect((await me(s.tokens.accessToken)).status).toBe(401);
+          expect((await refresh(s.tokens.refreshToken)).status).toBe(401);
+        }
+        expect(await h.cache.get(trustedIpsKey(u.id))).toBeUndefined();
 
         const key = changePasswordFailuresKey(u.id);
         expect(key).toBe(`change_password_failures:${u.id}`);
         expect(await h.cache.get(key)).toBe(5);
         expect(h.cache.ttls.get(key)).toBe(15 * 60 * 1000);
+      });
 
-        // 另一个会话（哪怕当前密码正确）在窗口内也是 429，不再比对口令
-        const other = await login(u);
-        const blocked = await change(other.tokens.accessToken, { currentPassword: u.password, newPassword: 'Changed2026' });
-        expect(blocked.status).toBe(429);
-        expect((await me(other.tokens.accessToken)).status).toBe(200);
-        await login(u); // 密码没被改
+      it('达到上限后，本人用口令重新登录即清零计数，可以立刻改密；盗用者的旧会话仍然无效', async () => {
+        const u = await freshUser();
+        const attacker = await login(u);
+        for (let i = 0; i < 5; i += 1) await wrong(attacker.tokens.accessToken);
+        expect(await h.cache.get(changePasswordFailuresKey(u.id))).toBe(5);
 
-        // 窗口过去（计数过期）后照常可改
-        await h.cache.del(key);
-        await change(other.tokens.accessToken, { currentPassword: u.password, newPassword: 'Changed2026' }).expect(200);
+        const owner = await login(u);
+        expect(await h.cache.get(changePasswordFailuresKey(u.id))).toBeUndefined();
+        await change(owner.tokens.accessToken, { currentPassword: u.password, newPassword: 'Changed2026' }).expect(200);
+        expect((await refresh(attacker.tokens.refreshToken)).status).toBe(401);
+        await login({ email: u.email, password: 'Changed2026' });
+      });
+
+      it('未达上限时，本人登录不清零（盗用会话的人不能等本人登录一次就重新拿满额度）', async () => {
+        const u = await freshUser();
+        const attacker = await login(u);
+        for (let i = 0; i < 3; i += 1) expect((await wrong(attacker.tokens.accessToken)).status).toBe(400);
+        await login(u);
+        expect(await h.cache.get(changePasswordFailuresKey(u.id))).toBe(3);
+        expect((await wrong(attacker.tokens.accessToken)).status).toBe(400);
+        expect((await wrong(attacker.tokens.accessToken)).status).toBe(429);
+        expect((await refresh(attacker.tokens.refreshToken)).status).toBe(401);
+      });
+
+      it('管理员重置密码清零计数（并吊销全部会话）', async () => {
+        const u = await freshUser();
+        const attacker = await login(u);
+        for (let i = 0; i < 5; i += 1) await wrong(attacker.tokens.accessToken);
+        await h.userService.update(u.id, { password: 'Reset2026x' } as any, h.adminId);
+        expect(await h.cache.get(changePasswordFailuresKey(u.id))).toBeUndefined();
+        const owner = await login({ email: u.email, password: 'Reset2026x' });
+        await change(owner.tokens.accessToken, { currentPassword: 'Reset2026x', newPassword: 'Mine2026xx' }).expect(200);
       });
 
       it('改密成功清零计数；只影响本人', async () => {
@@ -667,6 +704,80 @@ describe('认证核心安全行为', () => {
         // 新口令照常可用
         const fresh = await login({ email: u.email, password: 'Changed2026' });
         expect((await me(fresh.tokens.accessToken)).status).toBe(200);
+      });
+
+      it('login：签发之后、记受信任 IP 之前对方改了密码 → 这次的 token 作废，IP 也不记（复审 T3b）', async () => {
+        const u = await freshUser();
+        const victim = await login(u);
+        let changed = 0;
+        const service = h.authService as unknown as { afterPasswordLogin: (...args: unknown[]) => Promise<void> };
+        const original = service.afterPasswordLogin;
+        const spy = jest.spyOn(service, 'afterPasswordLogin').mockImplementationOnce(async function (
+          this: unknown,
+          ...args: unknown[]
+        ) {
+          // token 已签出、IP 还没记：受害者此刻完成改密（吊销 + 清空受信任 IP）
+          changed = (await change(victim.tokens.accessToken, { currentPassword: u.password, newPassword: 'Changed2026' }))
+            .status;
+          return original.apply(this, args);
+        });
+        try {
+          const res = await h
+            .http()
+            .post('/auth/login')
+            .set('X-Forwarded-For', '203.0.113.151')
+            .send({ email: u.email, password: u.password });
+          expect(changed).toBe(200);
+          expect(res.status).toBe(200);
+          expect((await me(res.body.tokens.accessToken)).status).toBe(401);
+          expect((await refresh(res.body.tokens.refreshToken)).status).toBe(401);
+          // 此前这里会把 203.0.113.151 写回受信任列表（30 天，豁免账号级锁定）
+          expect(await h.cache.get(trustedIpsKey(u.id))).toBeUndefined();
+        } finally {
+          spy.mockRestore();
+        }
+      });
+
+      it('login：记受信任 IP 的读与写之间对方改了密码 → 改密的「吊销 + 清空」排到这次写入之后，IP 不会留下', async () => {
+        const u = await freshUser();
+        const victim = await login(u);
+        const real = loginAttempts.revokeAllSessions;
+        let entered!: () => void;
+        const enteredP = new Promise<void>((resolve) => (entered = resolve));
+        let revokeDone = false;
+        const spy = jest.spyOn(loginAttempts, 'revokeAllSessions').mockImplementationOnce((cache, userId) => {
+          entered();
+          return real(cache, userId).then(() => {
+            revokeDone = true;
+          });
+        });
+        let pending: Promise<request.Response> | undefined;
+        h.cache.hooks.beforeGet = async (key) => {
+          if (key !== trustedIpsKey(u.id) || pending) return;
+          h.cache.hooks.beforeGet = undefined;
+          // 登录正在「读受信任列表 → 写回」之间：受害者的改密一路跑到「吊销 + 清空」
+          pending = change(victim.tokens.accessToken, { currentPassword: u.password, newPassword: 'Changed2026' }).then(
+            (r) => r,
+          );
+          await enteredP;
+          // 没有锁的话，吊销 + 清空会在这段时间里做完、早于下面的写入；有锁时它要等这次登录写完
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          expect(revokeDone).toBe(false);
+        };
+        try {
+          const res = await h
+            .http()
+            .post('/auth/login')
+            .set('X-Forwarded-For', '203.0.113.152')
+            .send({ email: u.email, password: u.password });
+          expect(res.status).toBe(200);
+          expect((await pending)?.status).toBe(200);
+          expect(revokeDone).toBe(true);
+          expect((await me(res.body.tokens.accessToken)).status).toBe(401);
+          expect(await h.cache.get(trustedIpsKey(u.id))).toBeUndefined();
+        } finally {
+          spy.mockRestore();
+        }
       });
 
       it('没有并发改密时不受影响：签发前的复查放行，改密后立刻用新密码登录、刷新都正常', async () => {

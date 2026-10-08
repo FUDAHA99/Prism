@@ -29,10 +29,12 @@ import {
   MAX_CHANGE_PASSWORD_FAILURES,
   accountAttemptsKey,
   changePasswordFailuresKey,
+  clearChangePasswordFailures,
   ipAttemptsKey,
   isTrustedIp,
   loginSubject,
-  rememberTrustedIp,
+  rememberTrustedIpUnlessRevoked,
+  revokeAllSessions,
 } from './login-attempts';
 
 import { AuthIdentity, SafeUser, toSafeUser } from '../user/user-fields';
@@ -135,8 +137,7 @@ export class AuthService {
     const tokens = await this.generateTokens(user, this.refreshLifetimeSec(rememberMe), () =>
       this.assertNotRevokedSince(user.id, startedAt),
     );
-    // 签发成功才算「成功登录过」：此后该 IP 不受账号级上限影响（与失败计数同一把锁，读-改-写不丢）
-    await this.loginLocks.run(subject, () => rememberTrustedIp(this.cacheManager, user.id, ip));
+    await this.afterPasswordLogin(user.id, ip, startedAt);
     await this.recordSuccessfulLogin(user, ip, userAgent);
     await this.userService.updateLastLogin(user.id);
 
@@ -276,9 +277,10 @@ export class AuthService {
    * 修改本人密码。当前密码错误返回 400（不是 401：admin 前端遇 401 会直接登出），
    * 成功后 updatePassword 吊销该用户此前签发的全部 token（含发起本次请求的这个），需重新登录。
    *
-   * 当前密码错误按 userId 计数（15 分钟窗口）：第 MAX_CHANGE_PASSWORD_FAILURES 次错误起返回 429，
-   * 并吊销发起请求的这个 access token —— 拿着盗来的 token 猜当前密码的人就此失去这个会话；
-   * 窗口内该用户的任何会话都不能再试。改密成功清零。accessToken 由控制器用 extractAccessToken 取出。
+   * 当前密码错误按 userId 计数（15 分钟窗口）：第 MAX_CHANGE_PASSWORD_FAILURES 次错误返回 429，
+   * 并吊销该用户此前签发的全部 access / refresh token、清空受信任 IP —— 拿着盗来的会话猜当前密码的人
+   * 就此出局（refresh 也换不出新的）。本人用口令重新登录时计数清零（见 afterPasswordLogin），
+   * 可以立刻改密；改密成功、管理员重置密码同样清零。accessToken 由控制器用 extractAccessToken 取出。
    */
   async changePassword(
     userId: string,
@@ -308,6 +310,9 @@ export class AuthService {
         const next = failures + 1;
         await this.cacheManager.set(failuresKey, next, LOGIN_BLOCK_TIME_MS);
         if (next >= MAX_CHANGE_PASSWORD_FAILURES) {
+          // 吊销该用户的全部会话（含攻击者手里的 refresh token）并清空受信任 IP：只吊销发起请求的
+          // access token 的话，盗用者拿 refresh 换一个新的，等窗口过去再来 5 次，本人一直改不了密码
+          await revokeAllSessions(this.cacheManager, userId);
           const access = this.tryVerifyAccessToken(accessToken);
           if (access && access.sub === userId) {
             await blacklistUntilExpiry(this.cacheManager, accessBlacklistKey(access.jti), access.exp);
@@ -409,6 +414,26 @@ export class AuthService {
       expiresIn: exp - iat,
       tokenType: 'Bearer',
     };
+  }
+
+  /**
+   * 口令登录签发成功之后：
+   * - 把该 IP 记为受信任（此后不受账号级失败上限影响）。与改密的「吊销 + 清空受信任 IP」同一把锁，
+   *   且本次登录开始后发生过吊销就不记（见 rememberTrustedIpUnlessRevoked）：用旧口令登录的人
+   *   拿到的 token 已作废，他的 IP 也不能被写回受信任列表。
+   * - 改密失败计数已达上限时清零：达到上限会吊销该用户全部会话，此后能拿到新会话的只有知道口令的人，
+   *   本人重新登录后可以立刻改密。未达上限时不清（与账号级登录计数同理：不让盗用会话的人等本人
+   *   登录一次就重新拿满猜测额度）。
+   * 吊销发生在本次登录开始之后时两件事都不做：这次签出的 token 本就已作废。
+   */
+  private async afterPasswordLogin(userId: string, ip: string, startedAt: number): Promise<void> {
+    if (!(await rememberTrustedIpUnlessRevoked(this.cacheManager, userId, ip, startedAt))) return;
+    await this.changePasswordLocks.run(userId, async () => {
+      const failures = (await this.cacheManager.get<number>(changePasswordFailuresKey(userId))) || 0;
+      if (failures >= MAX_CHANGE_PASSWORD_FAILURES) {
+        await clearChangePasswordFailures(this.cacheManager, userId);
+      }
+    });
   }
 
   /**
