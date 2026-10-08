@@ -10,6 +10,7 @@ import { TransformInterceptor } from './common/interceptors/transform.intercepto
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { parseCorsOrigins } from './common/utils/cors-origins';
 import { globalValidationPipeOptions } from './common/pipes/global-validation';
+import { API_GLOBAL_PREFIX } from './common/api-prefix';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
@@ -70,7 +71,7 @@ async function bootstrap() {
   });
   
   // 全局前缀
-  app.setGlobalPrefix('api/v1');
+  app.setGlobalPrefix(API_GLOBAL_PREFIX);
   
   // 全局管道 - 数据验证
   app.useGlobalPipes(new ValidationPipe(globalValidationPipeOptions()));

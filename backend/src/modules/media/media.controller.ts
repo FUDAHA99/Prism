@@ -14,7 +14,8 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiConsumes } from '@nestjs/swagger';
-import { v4 as uuidv4 } from 'uuid';
+// Node 内置的 v4 UUID；不用 uuid@14（纯 ESM，jest 的 CJS 环境加载不了本 controller）
+import { randomUUID } from 'crypto';
 
 import { MediaService, QueryMediaDto } from './media.service';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -73,7 +74,7 @@ export class MediaController {
     }
 
     const ext = MIME_EXTENSIONS[file.mimetype];
-    const filename = `${uuidv4()}${ext}`;
+    const filename = `${randomUUID()}${ext}`;
     const url = `/uploads/${filename}`;
 
     const media = await this.mediaService.saveFileRecord({
