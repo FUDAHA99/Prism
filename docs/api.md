@@ -256,21 +256,18 @@
 
 ## 三、分类模块 `/categories`
 
+读接口公开（门户导航、分类页）；写接口需要后台角色（admin / editor）。
+
 ### 3.1 获取分类列表
 `GET /categories`
 
-返回平铺列表，包含 `parentId`、`sortOrder`、`children` 信息。
+返回平铺列表，包含 `parentId`、`sortOrder`。
 
-### 3.2 获取分类树
-`GET /categories/tree`
-
-返回嵌套树形结构。
-
-### 3.3 获取分类详情
+### 3.2 获取分类详情
 `GET /categories/:id`
 
-### 3.4 创建分类
-`POST /categories`  🔒 需要认证
+### 3.3 创建分类
+`POST /categories`  🔒 admin / editor
 
 ```json
 {
@@ -282,30 +279,48 @@
 }
 ```
 
-### 3.5 更新分类
-`PATCH /categories/:id`  🔒
+| 字段 | 规则 |
+|------|------|
+| `name` | 必填，≤ 100 字符 |
+| `slug` | 必填，≤ 100 字符，只能是小写字母、数字、连字符；重复 409 |
+| `description` | 可选，可为 `null` |
+| `parentId` | 可选，已有分类的 ID；`null` 为顶级分类；不存在 400 |
+| `sortOrder` | 可选整数，`null` 按 0 |
 
-### 3.6 删除分类
-`DELETE /categories/:id`  🔒
+其余字段（`id`、`createdAt`、`children` 等）一律 400。
+
+### 3.4 更新分类
+`PATCH /categories/:id`  🔒 admin / editor
+
+字段同新建、都可省略；`name` / `slug` 不能为 `null` 或空串。`parentId: null` 改为顶级分类；
+不能把分类设为自己或自己子孙的子分类（400）。
+
+### 3.5 删除分类
+`DELETE /categories/:id`  🔒 admin / editor
 
 ---
 
 ## 四、标签模块 `/tags`
 
+读接口公开；写接口需要后台角色（admin / editor）。
+
 ### 4.1 获取标签列表
 `GET /tags?search=关键词`
 
 ### 4.2 创建标签
-`POST /tags`  🔒
+`POST /tags`  🔒 admin / editor
 ```json
 { "name": "JavaScript", "slug": "javascript" }
 ```
+`name`、`slug` 必填，≤ 100 字符；`slug` 只能是小写字母、数字、连字符；名称或 slug 重复 409。`usageCount` 等其余字段 400。
 
 ### 4.3 更新标签
-`PATCH /tags/:id`  🔒
+`PATCH /tags/:id`  🔒 admin / editor
+
+字段同新建、都可省略，不能为 `null` 或空串。
 
 ### 4.4 删除标签
-`DELETE /tags/:id`  🔒
+`DELETE /tags/:id`  🔒 admin / editor
 
 ---
 

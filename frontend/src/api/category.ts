@@ -4,9 +4,11 @@ import type { Category } from '../types'
 export interface CreateCategoryData {
   name: string
   slug: string
-  description?: string
-  parentId?: string
-  sortOrder?: number
+  description?: string | null
+  /** null：顶级分类（编辑时用来清除父分类） */
+  parentId?: string | null
+  /** null 按 0 处理 */
+  sortOrder?: number | null
 }
 
 export async function getCategories(): Promise<Category[]> {

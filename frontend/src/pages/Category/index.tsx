@@ -73,8 +73,8 @@ export default function CategoryPage() {
       form.resetFields()
       queryClient.invalidateQueries({ queryKey: ['categories'] })
     },
-    onError: () => {
-      message.error('创建失败，请重试')
+    onError: (err: Error) => {
+      message.error(err.message || '创建失败，请重试')
     },
   })
 
@@ -84,7 +84,8 @@ export default function CategoryPage() {
         name: values.name,
         slug: values.slug,
         description: values.description,
-        parentId: values.parentId,
+        // 清空「父分类」时 Select 给的是 undefined，JSON 里会被丢掉、后端当作「不修改」：显式传 null 才能改回顶级分类
+        parentId: values.parentId ?? null,
         sortOrder: values.sortOrder,
       }),
     onSuccess: () => {
@@ -94,8 +95,8 @@ export default function CategoryPage() {
       form.resetFields()
       queryClient.invalidateQueries({ queryKey: ['categories'] })
     },
-    onError: () => {
-      message.error('更新失败，请重试')
+    onError: (err: Error) => {
+      message.error(err.message || '更新失败，请重试')
     },
   })
 
@@ -105,8 +106,8 @@ export default function CategoryPage() {
       message.success('分类已删除')
       queryClient.invalidateQueries({ queryKey: ['categories'] })
     },
-    onError: () => {
-      message.error('删除失败，请重试')
+    onError: (err: Error) => {
+      message.error(err.message || '删除失败，请重试')
     },
   })
 

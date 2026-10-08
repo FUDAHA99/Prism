@@ -11,7 +11,8 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 
-import { CategoryService, CreateCategoryDto, UpdateCategoryDto } from './category.service';
+import { CategoryService } from './category.service';
+import { CreateCategoryDto, UpdateCategoryDto } from './dto/category.dto';
 import { Access } from '../../common/authz/access.decorator';
 
 @ApiTags('分类管理')
@@ -41,6 +42,8 @@ export class CategoryController {
   @ApiBearerAuth()
   @ApiOperation({ summary: '创建分类' })
   @ApiResponse({ status: 201, description: '创建成功' })
+  @ApiResponse({ status: 400, description: '参数不合法 / 父分类不存在' })
+  @ApiResponse({ status: 409, description: 'slug 已存在' })
   async create(@Body() dto: CreateCategoryDto) {
     return this.categoryService.create(dto);
   }
@@ -50,7 +53,9 @@ export class CategoryController {
   @ApiBearerAuth()
   @ApiOperation({ summary: '更新分类' })
   @ApiResponse({ status: 200, description: '更新成功' })
+  @ApiResponse({ status: 400, description: '参数不合法 / 父分类不存在或会形成环' })
   @ApiResponse({ status: 404, description: '分类不存在' })
+  @ApiResponse({ status: 409, description: 'slug 已存在' })
   async update(@Param('id') id: string, @Body() dto: UpdateCategoryDto) {
     return this.categoryService.update(id, dto);
   }

@@ -44,7 +44,8 @@ export class TagService {
       throw new ConflictException(`标签slug已存在: ${dto.slug}`);
     }
 
-    const tag = this.tagRepository.create(dto);
+    // 逐字段写库：usageCount 由引用方维护，id / createdAt 由库生成
+    const tag = this.tagRepository.create({ name: dto.name, slug: dto.slug });
     return this.tagRepository.save(tag);
   }
 
@@ -52,20 +53,26 @@ export class TagService {
     const tag = await this.findOne(id);
 
     if (dto.name && dto.name !== tag.name) {
+      // 库的排序规则不区分大小写：只改大小写时查到的是自己，不算重名
       const existing = await this.tagRepository.findOne({ where: { name: dto.name } });
-      if (existing) {
+      if (existing && existing.id !== id) {
         throw new ConflictException(`标签名称已存在: ${dto.name}`);
       }
     }
 
     if (dto.slug && dto.slug !== tag.slug) {
       const existing = await this.tagRepository.findOne({ where: { slug: dto.slug } });
-      if (existing) {
+      if (existing && existing.id !== id) {
         throw new ConflictException(`标签slug已存在: ${dto.slug}`);
       }
     }
 
-    await this.tagRepository.update(id, dto);
+    const patch: Partial<Pick<Tag, 'name' | 'slug'>> = {};
+    if (dto.name !== undefined) patch.name = dto.name;
+    if (dto.slug !== undefined) patch.slug = dto.slug;
+    if (Object.keys(patch).length > 0) {
+      await this.tagRepository.update(id, patch);
+    }
     return this.findOne(id);
   }
 
