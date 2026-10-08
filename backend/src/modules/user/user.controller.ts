@@ -18,6 +18,7 @@ import { UserService } from './user.service';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { QueryUserDto } from './dto/query-user.dto';
+import { UserRoleIdsDto } from './dto/user-role-ids.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthUser } from '../auth/interfaces/auth.interface';
 import { Access } from '../../common/authz/access.decorator';
@@ -99,26 +100,28 @@ export class UserController {
   }
 
   @Post(':id/assign-roles')
-  @ApiOperation({ summary: '分配角色给用户' })
-  @ApiResponse({ status: 200, description: '角色分配成功' })
-  @ApiResponse({ status: 404, description: '用户不存在' })
+  @ApiOperation({ summary: '分配角色给用户（已有的跳过，立即生效）' })
+  @ApiResponse({ status: 201, description: '角色分配成功，返回用户（含最新 roles）' })
+  @ApiResponse({ status: 400, description: 'roleIds 校验失败' })
+  @ApiResponse({ status: 404, description: '用户或部分角色不存在' })
   async assignRoles(
     @Param('id') id: string,
-    @Body('roleIds') roleIds: string[],
+    @Body() dto: UserRoleIdsDto,
     @CurrentUser() currentUser: AuthUser,
   ) {
-    return this.userService.assignRoles(id, roleIds, currentUser.id);
+    return this.userService.assignRoles(id, dto.roleIds, currentUser.id);
   }
 
   @Post(':id/remove-roles')
-  @ApiOperation({ summary: '移除用户的角色' })
-  @ApiResponse({ status: 200, description: '角色移除成功' })
+  @ApiOperation({ summary: '移除用户的角色（立即生效）' })
+  @ApiResponse({ status: 201, description: '角色移除成功，返回用户（含最新 roles）' })
+  @ApiResponse({ status: 400, description: 'roleIds 校验失败，或移除自己的管理员角色' })
   @ApiResponse({ status: 404, description: '用户不存在' })
   async removeRoles(
     @Param('id') id: string,
-    @Body('roleIds') roleIds: string[],
+    @Body() dto: UserRoleIdsDto,
     @CurrentUser() currentUser: AuthUser,
   ) {
-    return this.userService.removeRoles(id, roleIds, currentUser.id);
+    return this.userService.removeRoles(id, dto.roleIds, currentUser.id);
   }
 }

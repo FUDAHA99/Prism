@@ -20,13 +20,14 @@ import { AuditService } from '../audit/audit.service';
 import { changedAuditFields, pickAuditFields } from '../audit/audit-summary';
 import { SafeUser, toSafeUser } from './user-fields';
 import { revokeTokensIssuedBefore } from '../auth/token-revocation';
+import { ADMIN_ROLES } from '../../common/authz/access.decorator';
+import { userCacheKey } from './user-cache';
 
 /** USER_UPDATE 审计允许记录值的字段（资料类，不含任何凭据） */
 const USER_AUDIT_FIELDS = ['username', 'email', 'nickname', 'avatarUrl', 'isActive'] as const;
 
 @Injectable()
 export class UserService {
-  private readonly CACHE_PREFIX = 'user:';
   // 毫秒（cache-manager v5+ 语义）。此前写 300，实际只缓存 0.3 秒。
   private readonly CACHE_TTL = 5 * 60 * 1000;
 
@@ -115,7 +116,7 @@ export class UserService {
   }
 
   async findOne(id: string): Promise<SafeUser> {
-    const cacheKey = `${this.CACHE_PREFIX}${id}`;
+    const cacheKey = userCacheKey(id);
     const cachedUser = await this.cacheManager.get<SafeUser>(cacheKey);
     if (cachedUser) {
       // 旧版本写入的缓存条目是展开的整个实体（含 passwordHash），TTL 内读到也要过白名单
@@ -318,6 +319,16 @@ export class UserService {
     currentUserId?: string,
   ): Promise<SafeUser> {
     await this.findOne(id);
+
+    // 角色变更即时生效：管理员给自己去掉 admin，下一个请求起就进不了任何管理接口，
+    // 而能把 admin 加回来的只有管理员自己。与「不能删除 / 禁用自己」同理，拒绝自我降权
+    if (currentUserId && currentUserId === id) {
+      const removing = await this.roleService.getRoleNamesByIds(roleIds);
+      if (removing.some((name) => ADMIN_ROLES.includes(name))) {
+        throw new BadRequestException('不能移除自己的管理员角色');
+      }
+    }
+
     await this.roleService.removeRolesFromUser(id, roleIds);
     await this.clearUserCache(id);
 
@@ -340,7 +351,7 @@ export class UserService {
 
   private async clearUserCache(userId?: string): Promise<void> {
     if (userId) {
-      await this.cacheManager.del(`${this.CACHE_PREFIX}${userId}`);
+      await this.cacheManager.del(userCacheKey(userId));
     }
   }
 }

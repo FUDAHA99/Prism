@@ -230,15 +230,11 @@ const PORTAL_PATHS: readonly string[] = [
 ];
 
 /**
- * admin SPA 里已知解析不到后端路由的调用（不是本测试引入的问题，登记在此避免掩盖其他回归）：
- * 前端调 POST/DELETE /users/:id/roles，后端是 POST /users/:id/assign-roles、/remove-roles，
- * 角色分配功能因此 404。修复（本批的角色分配提交）对齐路由后，从这里删除对应条目 ——
- * 下面的测试会在条目「已能解析」时失败，提醒清理。
+ * admin SPA 里已知解析不到后端路由的调用（登记在此避免掩盖其他回归）。应保持为空：
+ * 曾登记过前端的 POST/DELETE /users/:id/roles（后端是 POST /users/:id/assign-roles、/remove-roles，
+ * 角色分配因此 404），已改为前端调用后端现有路由。新登记的条目在「已能解析」时下面的测试会失败，提醒清理。
  */
-const KNOWN_UNRESOLVED_ADMIN_CALLS: readonly string[] = [
-  'POST /api/v1/users/:param/roles',
-  'DELETE /api/v1/users/:param/roles',
-];
+const KNOWN_UNRESOLVED_ADMIN_CALLS: readonly string[] = [];
 
 // ───────────────────────── 从代码枚举路由 ─────────────────────────
 

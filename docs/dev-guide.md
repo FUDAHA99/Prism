@@ -118,7 +118,9 @@ db.close();
 ### 初始化管理员角色
 
 后台的评论管理、用户/角色管理和内容发布都要求账号带 `admin` 或 `editor` 角色。
-`node scripts/seed-admin.js` 会幂等地创建 `admin` 角色并分配给 admin@cms.com，新环境跑它即可。
+`node scripts/seed-admin.js` 会幂等地创建 `admin`、`editor` 两个系统角色并把 `admin` 分配给 admin@cms.com，新环境跑它即可。
+之后给其他账号分配角色在后台「用户管理 → 编辑」里操作，保存后对方的下一个请求起就按新角色鉴权，无需重新登录。
+系统角色（`admin` / `editor`）不能改名或删除，接口返回 400；管理员也不能移除自己的 `admin` 角色。
 
 已有环境只想补角色时，**不要**为此重跑 seed-admin.js（账号已存在时它会把密码重置为 `Admin123!`），
 直接在 MySQL 里执行下面两条（可重复执行；开发环境容器为 `cms-mysql`，生产为 `prism-mysql`，库名换成实际值）：
@@ -135,10 +137,9 @@ JOIN roles r ON r.id = ur.role_id;
 SQL
 ```
 
-> 不要顺手创建 `user` 角色：`role.service.ts` 的 `assignRolesToUser` 仍是 Postgres 语法，
-> 一旦存在 `user` 角色，注册流程的 `assignDefaultRole` 会在 MySQL 上报错。
+> 不要顺手创建 `user` 角色：注册流程会把它自动分配给每个自助注册的账号，而角色模型只用 `admin` / `editor`。
 >
-> 角色补上后让该账号重新登录（登录会清掉 5 分钟的用户缓存），新角色才会生效。
+> 直接改库补上的角色要让该账号重新登录（登录会清掉 5 分钟的用户缓存）才生效；走后台分配则立即生效。
 
 ---
 

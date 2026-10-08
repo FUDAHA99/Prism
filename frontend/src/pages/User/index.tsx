@@ -88,8 +88,11 @@ export default function UserPage() {
       setEditingUser(null)
       queryClient.invalidateQueries({ queryKey: ['users'] })
     },
-    onError: () => {
-      message.error('更新失败，请重试')
+    onError: (err: Error) => {
+      // 资料与角色分两步提交，角色那步失败时资料可能已经改了：刷新列表并展示后端给的原因
+      // （例如「不能移除自己的管理员角色」）
+      queryClient.invalidateQueries({ queryKey: ['users'] })
+      message.error(err.message || '更新失败，请重试')
     },
   })
 

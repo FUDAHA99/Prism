@@ -35,14 +35,14 @@ export async function deleteUser(id: string): Promise<void> {
   await apiClient.delete(`/users/${id}`)
 }
 
+/** 追加角色（后端已有的跳过），对方下一个请求起即按新角色鉴权 */
 export async function assignRoles(userId: string, roleIds: string[]): Promise<User> {
-  const res = await apiClient.post<User>(`/users/${userId}/roles`, { roleIds })
+  const res = await apiClient.post<User>(`/users/${userId}/assign-roles`, { roleIds })
   return res.data
 }
 
+/** 撤销角色；不能撤销自己的 admin（后端返回 400） */
 export async function removeRoles(userId: string, roleIds: string[]): Promise<User> {
-  const res = await apiClient.delete<User>(`/users/${userId}/roles`, {
-    data: { roleIds },
-  })
+  const res = await apiClient.post<User>(`/users/${userId}/remove-roles`, { roleIds })
   return res.data
 }

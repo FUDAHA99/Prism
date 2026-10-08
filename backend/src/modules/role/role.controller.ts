@@ -52,9 +52,11 @@ export class RoleController {
   }
 
   @Patch(':id')
-  @ApiOperation({ summary: '更新角色' })
+  @ApiOperation({ summary: '更新角色（只接受 name / description；系统角色不能改名）' })
   @ApiResponse({ status: 200, description: '更新成功' })
+  @ApiResponse({ status: 400, description: '系统角色不能改名' })
   @ApiResponse({ status: 404, description: '角色不存在' })
+  @ApiResponse({ status: 409, description: '角色名已存在' })
   async update(
     @Param('id') id: string,
     @Body() body: { name?: string; description?: string },
@@ -66,8 +68,8 @@ export class RoleController {
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: '删除角色' })
   @ApiResponse({ status: 204, description: '删除成功' })
+  @ApiResponse({ status: 400, description: '系统角色不能删除' })
   @ApiResponse({ status: 404, description: '角色不存在' })
-  @ApiResponse({ status: 409, description: '不能删除系统角色' })
   async remove(@Param('id') id: string) {
     await this.roleService.remove(id);
   }

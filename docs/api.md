@@ -402,12 +402,14 @@
 ```json
 { "roleIds": ["uuid1"] }
 ```
+`roleIds` 为 1–50 个角色 ID；用户已有的角色跳过。返回更新后的用户（含 `roles`），该用户的下一个请求起即按新角色鉴权。
 
 ### 7.8 移除角色
 `POST /users/:id/remove-roles`
 ```json
 { "roleIds": ["uuid1"] }
 ```
+不能移除自己的 `admin` 角色（400）。
 
 ---
 
@@ -426,9 +428,15 @@
 
 ### 8.3 更新角色
 `PATCH /roles/:id`
+```json
+{ "name": "reviewer", "description": "审核员" }
+```
+只接受 `name` / `description`。系统角色（`admin`、`editor`）不能改名（400）。
 
 ### 8.4 删除角色
 `DELETE /roles/:id`
+
+系统角色（`admin`、`editor`）不能删除（400）。
 
 ### 8.5 分配权限
 `POST /roles/:id/permissions`

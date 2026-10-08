@@ -78,8 +78,9 @@ describe('AuditService 脱敏、截断与列表字段', () => {
     auditRepo = ds.getRepository(AuditLog);
     const userRepo = ds.getRepository(User);
     auditService = new AuditService(auditRepo, userRepo);
-    const roleService = new RoleService(ds.getRepository(Role), ds.getRepository(Permission));
-    userService = new UserService(userRepo, roleService, auditService, new MemoryCache() as any);
+    const cache = new MemoryCache();
+    const roleService = new RoleService(ds.getRepository(Role), ds.getRepository(Permission), cache as any);
+    userService = new UserService(userRepo, roleService, auditService, cache as any);
     contentService = new ContentService(ds.getRepository(Content), auditService);
 
     const admin = await userService.create({

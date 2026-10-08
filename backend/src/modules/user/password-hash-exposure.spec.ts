@@ -109,7 +109,7 @@ describe('密码哈希不出库：用户与关联查询只取安全字段', () =
 
     userRepo = ds.getRepository(User);
     cache = new JsonCache();
-    roleService = new RoleService(ds.getRepository(Role), ds.getRepository(Permission));
+    roleService = new RoleService(ds.getRepository(Role), ds.getRepository(Permission), cache as any);
     auditService = new AuditService(ds.getRepository(AuditLog), userRepo);
     userService = new UserService(userRepo, roleService, auditService, cache as any);
     authService = new AuthService(

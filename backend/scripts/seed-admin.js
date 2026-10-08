@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 在数据库中创建/重置 admin 用户，并确保其拥有 admin 角色（幂等）
+ * 在数据库中创建/重置 admin 用户，确保 admin / editor 两个系统角色存在，并给该账号分配 admin（幂等）
  *   账号: admin@cms.com
  *   密码: Admin123!
  *
@@ -60,15 +60,37 @@ const ADMIN_NICKNAME = '系统管理员';
     console.log(`✅ 已创建 admin 用户: ${ADMIN_EMAIL} / ${ADMIN_PASSWORD}`);
   }
 
-  // 幂等地确保 admin 角色存在并分配给该账号：评论管理（#29）、用户/角色管理、内容发布都要求 admin/editor。
-  // 不要在这里创建 'user' 角色：role.service.ts 的 assignRolesToUser 仍是 Postgres 语法，
-  // 一旦存在 'user' 角色，注册流程的 assignDefaultRole 会在 MySQL 上报错。
+  // 幂等地确保两个系统角色存在：访问矩阵只认 admin（系统管理）与 editor（内容管理，staff 级别）。
+  // editor 建好后在后台「用户管理」里分配给编辑账号即可，不必再手写 SQL。
+  // 不要在这里创建 'user' 角色：注册流程会把它自动分配给每个自助注册的账号，而角色模型只用这两个系统角色。
   // roles.name 唯一、user_roles 主键为 (user_id, role_id)，所以 INSERT IGNORE 重跑无副作用。
+  const SYSTEM_ROLES = [
+    ['admin', '系统管理员'],
+    ['editor', '内容编辑'],
+  ];
+  for (const [name, description] of SYSTEM_ROLES) {
+    await my.execute(
+      `INSERT IGNORE INTO roles (id, name, description, isSystem, createdAt, updatedAt)
+       VALUES (?, ?, ?, 1, ?, ?)`,
+      [randomUUID(), name, description, now, now],
+    );
+  }
+  // 早先在后台手工建的同名角色 INSERT IGNORE 会跳过，这里补上系统标记（后台据此禁用改名 / 删除按钮）
   await my.execute(
-    `INSERT IGNORE INTO roles (id, name, description, isSystem, createdAt, updatedAt)
-     VALUES (?, 'admin', '系统管理员', 1, ?, ?)`,
-    [randomUUID(), now, now],
+    `UPDATE roles SET isSystem = 1 WHERE name IN (?, ?) AND isSystem <> 1`,
+    SYSTEM_ROLES.map(([name]) => name),
   );
+  const [systemRoles] = await my.execute(
+    'SELECT name FROM roles WHERE name IN (?, ?) AND isSystem = 1',
+    SYSTEM_ROLES.map(([name]) => name),
+  );
+  if (systemRoles.length !== SYSTEM_ROLES.length) {
+    throw new Error(
+      `系统角色不完整，只有: ${systemRoles.map((r) => r.name).join(', ') || '（无）'}`,
+    );
+  }
+  console.log('✅ 已确保系统角色 admin / editor');
+
   await my.execute(
     `INSERT IGNORE INTO user_roles (user_id, role_id)
      SELECT u.id, r.id FROM users u JOIN roles r ON r.name = 'admin' WHERE u.email = ?`,
