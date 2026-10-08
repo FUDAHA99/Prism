@@ -196,9 +196,10 @@ export class StatsService {
       .limit(5)
       .getMany();
 
+    // 仪表盘对 editor 也开放，不带邮箱（后台没有任何地方展示这里的邮箱）
     const recentUsers = await this.userRepository
       .createQueryBuilder('user')
-      .select(['user.id', 'user.username', 'user.email', 'user.createdAt'])
+      .select(['user.id', 'user.username', 'user.createdAt'])
       .where('user.deletedAt IS NULL')
       .orderBy('user.createdAt', 'DESC')
       .limit(5)

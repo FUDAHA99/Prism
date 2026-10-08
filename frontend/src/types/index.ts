@@ -234,7 +234,6 @@ export interface DashboardStats {
   recentUsers: Array<{
     id: string
     username: string
-    email: string
     createdAt: string
   }>
 }

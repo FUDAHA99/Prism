@@ -10,7 +10,7 @@ import {
   JoinTable,
 } from 'typeorm';
 import { Exclude } from 'class-transformer';
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiHideProperty, ApiProperty } from '@nestjs/swagger';
 
 import { Content } from '../../content/entities/content.entity';
 import { MediaFile } from '../../media/entities/media-file.entity';
@@ -31,8 +31,12 @@ export class User {
   @Column({ type: 'varchar', length: 100, unique: true, nullable: false })
   email: string;
 
-  @ApiProperty({ description: '密码哈希' })
-  @Column({ type: 'varchar', length: 255, nullable: false })
+  // select: false：默认查询不取哈希，只有显式 addSelect 的口令校验路径能拿到
+  // （UserService.findByEmailWithPassword / findByIdWithPassword）。
+  // 只改读取行为，不改列定义（类型 / 长度 / 可空不变），不产生 schema 变更。
+  // @Exclude 只对 class 实例生效，对象展开或纯 JSON 都会失效，不能作为唯一防线。
+  @ApiHideProperty()
+  @Column({ type: 'varchar', length: 255, nullable: false, select: false })
   @Exclude()
   passwordHash: string;
 

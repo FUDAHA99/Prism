@@ -17,6 +17,7 @@ import { UpdateUserDto } from './dto/update-user.dto';
 import { QueryUserDto } from './dto/query-user.dto';
 import { RoleService } from '../role/role.service';
 import { AuditService } from '../audit/audit.service';
+import { SafeUser, toSafeUser } from './user-fields';
 
 @Injectable()
 export class UserService {
@@ -32,7 +33,7 @@ export class UserService {
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
   ) {}
 
-  async create(createUserDto: CreateUserDto): Promise<User> {
+  async create(createUserDto: CreateUserDto): Promise<SafeUser> {
     const { email, username } = createUserDto;
 
     const existingEmail = await this.findByEmail(email);
@@ -64,11 +65,12 @@ export class UserService {
       newValues: { email: savedUser.email, username: savedUser.username },
     });
 
-    return this.sanitizeUser(savedUser);
+    // save() 返回的内存实体仍带着刚算出的 passwordHash（select:false 只管读库）
+    return toSafeUser(savedUser);
   }
 
   async findAll(queryDto: QueryUserDto): Promise<{
-    data: User[];
+    data: SafeUser[];
     meta: { total: number; page: number; limit: number; totalPages: number };
   }> {
     const { search, isActive, page, limit } = queryDto;
@@ -97,7 +99,7 @@ export class UserService {
     const enrichedUsers = await Promise.all(
       users.map(async (user) => {
         const roles = await this.roleService.getUserRoleNames(user.id);
-        return { ...user, roles };
+        return toSafeUser(user, { roles });
       }),
     );
 
@@ -107,11 +109,12 @@ export class UserService {
     };
   }
 
-  async findOne(id: string): Promise<User> {
+  async findOne(id: string): Promise<SafeUser> {
     const cacheKey = `${this.CACHE_PREFIX}${id}`;
-    const cachedUser = await this.cacheManager.get<User>(cacheKey);
+    const cachedUser = await this.cacheManager.get<SafeUser>(cacheKey);
     if (cachedUser) {
-      return cachedUser;
+      // 旧版本写入的缓存条目是展开的整个实体（含 passwordHash），TTL 内读到也要过白名单
+      return toSafeUser(cachedUser);
     }
 
     const user = await this.userRepository.findOne({
@@ -125,10 +128,10 @@ export class UserService {
     const permissions = await this.roleService.getUserPermissions(id);
     const roles = await this.roleService.getUserRoleNames(id);
 
-    const userWithMeta = { ...user, permissions, roles };
+    const safeUser = toSafeUser(user, { permissions, roles });
 
-    await this.cacheManager.set(cacheKey, userWithMeta, this.CACHE_TTL);
-    return userWithMeta;
+    await this.cacheManager.set(cacheKey, safeUser, this.CACHE_TTL);
+    return safeUser;
   }
 
   async findByEmail(email: string): Promise<User | null> {
@@ -143,11 +146,28 @@ export class UserService {
     });
   }
 
+  /**
+   * 仅供口令校验（登录）使用：passwordHash 是 select:false，只有这里和 findByIdWithPassword 显式取。
+   * 返回值不得原样出参，校验完立刻 toSafeUser。
+   */
+  async findByEmailWithPassword(email: string): Promise<User | null> {
+    return this.userRepository
+      .createQueryBuilder('user')
+      .addSelect('user.passwordHash')
+      .where('user.email = :email', { email })
+      .andWhere('user.deletedAt IS NULL')
+      .getOne();
+  }
+
+  /** 仅供口令校验（改密核对旧密码）使用，只取校验需要的列 */
   async findByIdWithPassword(id: string): Promise<User | null> {
-    return this.userRepository.findOne({
-      where: { id, deletedAt: IsNull() },
-      select: ['id', 'email', 'username', 'passwordHash', 'isActive'],
-    });
+    return this.userRepository
+      .createQueryBuilder('user')
+      .select(['user.id', 'user.email', 'user.username', 'user.isActive'])
+      .addSelect('user.passwordHash')
+      .where('user.id = :id', { id })
+      .andWhere('user.deletedAt IS NULL')
+      .getOne();
   }
 
   async updatePassword(id: string, newPassword: string): Promise<void> {
@@ -160,7 +180,7 @@ export class UserService {
     id: string,
     updateUserDto: UpdateUserDto,
     currentUserId?: string,
-  ): Promise<User> {
+  ): Promise<SafeUser> {
     const user = await this.findOne(id);
 
     if (updateUserDto.email && updateUserDto.email !== user.email) {
@@ -229,7 +249,7 @@ export class UserService {
     id: string,
     isActive: boolean,
     currentUserId?: string,
-  ): Promise<User> {
+  ): Promise<SafeUser> {
     const user = await this.findOne(id);
 
     if (currentUserId && user.id === currentUserId) {
@@ -256,7 +276,7 @@ export class UserService {
     id: string,
     roleIds: string[],
     currentUserId?: string,
-  ): Promise<User> {
+  ): Promise<SafeUser> {
     await this.findOne(id);
     await this.roleService.assignRolesToUser(id, roleIds);
     await this.clearUserCache(id);
@@ -278,7 +298,7 @@ export class UserService {
     id: string,
     roleIds: string[],
     currentUserId?: string,
-  ): Promise<User> {
+  ): Promise<SafeUser> {
     await this.findOne(id);
     await this.roleService.removeRolesFromUser(id, roleIds);
     await this.clearUserCache(id);
@@ -304,10 +324,5 @@ export class UserService {
     if (userId) {
       await this.cacheManager.del(`${this.CACHE_PREFIX}${userId}`);
     }
-  }
-
-  private sanitizeUser(user: User): User {
-    const { passwordHash, ...sanitizedUser } = user;
-    return sanitizedUser as User;
   }
 }

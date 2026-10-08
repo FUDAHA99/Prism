@@ -7,6 +7,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { MediaFile } from './entities/media-file.entity';
 import { AuditService } from '../audit/audit.service';
+import { userSummaryColumns } from '../user/user-fields';
 
 export interface QueryMediaDto {
   mimeType?: string;
@@ -32,9 +33,11 @@ export class MediaService {
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
 
+    // 上传者只取公开资料列：此前 leftJoinAndSelect 整个 User，email 与 passwordHash 随列表一起出库
     const qb = this.mediaRepository
       .createQueryBuilder('media')
-      .leftJoinAndSelect('media.uploader', 'uploader');
+      .leftJoin('media.uploader', 'uploader')
+      .addSelect(userSummaryColumns('uploader'));
 
     if (mimeType) qb.andWhere('media.mimeType LIKE :mimeType', { mimeType: `${mimeType}%` });
     if (uploaderId) qb.andWhere('media.uploaderId = :uploaderId', { uploaderId });
@@ -53,10 +56,12 @@ export class MediaService {
   }
 
   async findOne(id: string): Promise<MediaFile> {
-    const file = await this.mediaRepository.findOne({
-      where: { id },
-      relations: ['uploader'],
-    });
+    const file = await this.mediaRepository
+      .createQueryBuilder('media')
+      .leftJoin('media.uploader', 'uploader')
+      .addSelect(userSummaryColumns('uploader'))
+      .where('media.id = :id', { id })
+      .getOne();
     if (!file) {
       throw new NotFoundException(`媒体文件不存在: ${id}`);
     }

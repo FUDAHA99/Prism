@@ -14,7 +14,7 @@ import {
   refreshBlacklistKey,
 } from './token-blacklist.util';
 
-import { User } from '../user/entities/user.entity';
+import { SafeUser, toSafeUser } from '../user/user-fields';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import {
@@ -217,8 +217,8 @@ export class AuthService {
     email: string,
     password: string,
     loginData: LoginAttemptData,
-  ): Promise<User | null> {
-    const user = await this.userService.findByEmail(email);
+  ): Promise<SafeUser | null> {
+    const user = await this.userService.findByEmailWithPassword(email);
     if (!user || !user.isActive) {
       return null;
     }
@@ -228,10 +228,11 @@ export class AuthService {
       return null;
     }
 
-    return user;
+    // 哈希只用于上面的比对，不随 user 继续流转（req.user、token 签发、登录响应）
+    return toSafeUser(user);
   }
 
-  async validateUserFromPayload(payload: JwtPayload): Promise<User | null> {
+  async validateUserFromPayload(payload: JwtPayload): Promise<SafeUser | null> {
     const user = await this.userService.findOne(payload.sub);
     if (!user || !user.isActive) {
       return null;
@@ -243,7 +244,10 @@ export class AuthService {
     return this.roleService.getUserPermissions(userId);
   }
 
-  private async generateTokens(user: User, rememberMe: boolean): Promise<AuthTokens> {
+  private async generateTokens(
+    user: Pick<SafeUser, 'id' | 'email' | 'username' | 'roles'>,
+    rememberMe: boolean,
+  ): Promise<AuthTokens> {
     const payload: JwtPayload = {
       sub: user.id,
       email: user.email,
@@ -280,7 +284,7 @@ export class AuthService {
   }
 
   private async recordSuccessfulLogin(
-    user: User,
+    user: SafeUser,
     ip: string,
     userAgent?: string,
   ): Promise<void> {
