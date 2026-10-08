@@ -11,7 +11,6 @@ import {
 } from '@nestjs/common/constants';
 import { Reflector } from '@nestjs/core';
 import { AuthGuard } from '@nestjs/passport';
-import { ThrottlerGuard } from '@nestjs/throttler';
 import { ACCESS_LEVEL_KEY, ACCESS_LEVELS, AccessLevel, ROLES_FOR_LEVEL } from './access.decorator';
 import { API_GLOBAL_PREFIX } from '../api-prefix';
 import { JwtOptionalGuard } from '../guards/jwt-optional.guard';
@@ -272,9 +271,6 @@ const splitPath = (...parts: string[]) => parts.join('/').split('/').filter(Bool
 const isController = (v: unknown): v is AnyClass =>
   typeof v === 'function' && Reflect.getMetadata(CONTROLLER_WATERMARK, v) === true;
 
-/** 限流守卫与访问级别无关（auth 的登录/注册/刷新另挂了 ThrottlerGuard），比对守卫链时排除 */
-const isThrottlerGuard = (g: unknown) =>
-  typeof g === 'function' && (g === ThrottlerGuard || g.prototype instanceof ThrottlerGuard);
 
 function walkFiles(dir: string, accept: (file: string) => boolean, skipDirs: string[] = []): string[] {
   return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -352,7 +348,9 @@ function routesOf(controller: AnyClass): RouteInfo[] {
             methodLevel,
             classLevel,
             level: methodLevel ?? classLevel,
-            guards: [...classGuards, ...methodGuards].filter((g) => !isThrottlerGuard(g)),
+            // 限流只由全局 ThrottlerBehindProxyGuard 执行（额度用 @Throttle 覆盖）。路由上若再挂 ThrottlerGuard，
+            // 同一请求会按两套配置、两份存储重复计数 —— 不排除它，守卫链比对会直接失败
+            guards: [...classGuards, ...methodGuards],
             roles: methodRoles ?? classRoles,
           };
         }),

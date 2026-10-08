@@ -2,7 +2,6 @@ import {
   Controller,
   Post,
   Body,
-  UseGuards,
   Request,
   HttpCode,
   HttpStatus,
@@ -11,7 +10,7 @@ import {
   ClassSerializerInterceptor,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
-import { ThrottlerGuard, Throttle } from '@nestjs/throttler';
+import { Throttle } from '@nestjs/throttler';
 
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
@@ -21,6 +20,19 @@ import { ChangePasswordDto } from './dto/change-password.dto';
 import { LoginResponse, AuthUser } from './interfaces/auth.interface';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Access } from '../../common/authz/access.decorator';
+import { clientIp } from '../../common/utils/client-ip';
+
+/**
+ * 认证接口的限流额度，由 AppModule 的全局 ThrottlerBehindProxyGuard 执行（按 req.ip 计、每个接口各自一个桶）。
+ * throttler v5 的 ttl 单位是毫秒：此前写的 60 / 300 是「秒」的写法，实际窗口只有 60ms / 300ms，
+ * 反而把全局 100 次/分钟放宽了。
+ */
+export const AUTH_THROTTLE = {
+  login: { limit: 5, ttl: 60_000 },
+  register: { limit: 3, ttl: 300_000 },
+  refresh: { limit: 10, ttl: 60_000 },
+  changePassword: { limit: 5, ttl: 60_000 },
+} as const;
 
 @ApiTags('认证管理')
 @Controller('auth')
@@ -31,8 +43,7 @@ export class AuthController {
   @Post('login')
   @Access('public')
   @HttpCode(HttpStatus.OK)
-  @UseGuards(ThrottlerGuard)
-  @Throttle({ default: { limit: 5, ttl: 60 } })
+  @Throttle({ default: AUTH_THROTTLE.login })
   @ApiOperation({ summary: '用户登录' })
   @ApiResponse({
     status: 200,
@@ -63,11 +74,11 @@ export class AuthController {
     @Body() loginDto: LoginDto,
     @Request() req: any,
   ): Promise<LoginResponse> {
-    const clientIp = this.getClientIp(req);
+    const ip = clientIp(req);
     const userAgent = req.headers['user-agent'];
     
     return this.authService.login(loginDto, {
-      ip: clientIp,
+      ip,
       userAgent,
     });
   }
@@ -75,8 +86,7 @@ export class AuthController {
   @Post('register')
   @Access('public')
   @HttpCode(HttpStatus.CREATED)
-  @UseGuards(ThrottlerGuard)
-  @Throttle({ default: { limit: 3, ttl: 300 } })
+  @Throttle({ default: AUTH_THROTTLE.register })
   @ApiOperation({ summary: '用户注册' })
   @ApiResponse({
     status: 201,
@@ -107,15 +117,17 @@ export class AuthController {
     @Body() registerDto: RegisterDto,
     @Request() req: any,
   ): Promise<LoginResponse> {
-    // 这里可以添加注册限制逻辑
-    return this.authService.register(registerDto);
+    // 注册开关（enable_register）由 1-F-3 收口；这里只把真实 IP / UA 记进审计（此前写死 'unknown'）
+    return this.authService.register(registerDto, {
+      ip: clientIp(req),
+      userAgent: req.headers['user-agent'],
+    });
   }
 
   @Post('refresh')
   @Access('public')
   @HttpCode(HttpStatus.OK)
-  @UseGuards(ThrottlerGuard)
-  @Throttle({ default: { limit: 10, ttl: 60 } })
+  @Throttle({ default: AUTH_THROTTLE.refresh })
   @ApiOperation({ summary: '刷新Token' })
   @ApiResponse({
     status: 200,
@@ -134,10 +146,10 @@ export class AuthController {
     @Body() dto: RefreshTokenDto,
     @Request() req: any,
   ) {
-    const clientIp = this.getClientIp(req);
+    const ip = clientIp(req);
     const userAgent = req.headers['user-agent'];
 
-    return this.authService.refreshToken(dto.refreshToken, clientIp, userAgent);
+    return this.authService.refreshToken(dto.refreshToken, ip, userAgent);
   }
 
   @Post('logout')
@@ -153,14 +165,14 @@ export class AuthController {
     @Request() req: any,
   ): Promise<{ message: string }> {
     const accessToken = req.headers.authorization?.replace('Bearer ', '');
-    const clientIp = this.getClientIp(req);
+    const ip = clientIp(req);
     const userAgent = req.headers['user-agent'];
 
     await this.authService.logout(
       user.id,
       accessToken,
       dto?.refreshToken,
-      clientIp,
+      ip,
       userAgent,
     );
     
@@ -196,6 +208,7 @@ export class AuthController {
 
   @Post('change-password')
   @Access('authenticated')
+  @Throttle({ default: AUTH_THROTTLE.changePassword })
   @HttpCode(HttpStatus.OK)
   @ApiBearerAuth()
   @ApiOperation({ summary: '修改密码（成功后本人已签发的全部 token 作废，需重新登录）' })
@@ -207,41 +220,17 @@ export class AuthController {
     @Body() changePasswordDto: ChangePasswordDto,
     @Request() req: any,
   ): Promise<{ message: string }> {
-    const clientIp = this.getClientIp(req);
+    const ip = clientIp(req);
     const userAgent = req.headers['user-agent'];
 
     await this.authService.changePassword(
       user.id,
       changePasswordDto.currentPassword,
       changePasswordDto.newPassword,
-      clientIp,
+      ip,
       userAgent,
     );
 
     return { message: '密码修改成功' };
-  }
-
-  /**
-   * 获取客户端IP地址
-   */
-  private getClientIp(req: any): string {
-    const ip =
-      req.headers['x-forwarded-for'] ||
-      req.headers['x-real-ip'] ||
-      req.connection?.remoteAddress ||
-      req.socket?.remoteAddress ||
-      (req.connection?.socket ? req.connection.socket.remoteAddress : null);
-
-    // 处理IPv6的本地地址
-    if (ip === '::1' || ip === '::ffff:127.0.0.1') {
-      return '127.0.0.1';
-    }
-
-    // 处理多个IP的情况（x-forwarded-for可能包含多个IP）
-    if (typeof ip === 'string' && ip.includes(',')) {
-      return ip.split(',')[0].trim();
-    }
-
-    return ip || 'unknown';
   }
 }

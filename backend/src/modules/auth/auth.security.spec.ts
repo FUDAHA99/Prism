@@ -1,16 +1,21 @@
 import 'reflect-metadata';
-import { Controller, Get, INestApplication, ValidationPipe } from '@nestjs/common';
+import { Controller, Get, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { JwtModule, JwtService } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import { ThrottlerGuard } from '@nestjs/throttler';
+import { ThrottlerModule } from '@nestjs/throttler';
+import { APP_GUARD } from '@nestjs/core';
+import { NestExpressApplication } from '@nestjs/platform-express';
+import { GUARDS_METADATA } from '@nestjs/common/constants';
 import { TypeOrmModule, getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import * as request from 'supertest';
 
-import { AuthController } from './auth.controller';
+import { AUTH_THROTTLE, AuthController } from './auth.controller';
+import { AuthModule } from './auth.module';
+import { ThrottlerBehindProxyGuard } from '../../common/guards/throttler-behind-proxy.guard';
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { accessBlacklistKey, refreshBlacklistKey } from './token-blacklist.util';
@@ -70,7 +75,7 @@ class ProbeController {
 }
 
 interface Harness {
-  app: INestApplication;
+  app: NestExpressApplication;
   http: () => request.SuperTest<request.Test>;
   cache: MemoryCache;
   ds: DataSource;
@@ -80,7 +85,11 @@ interface Harness {
   otherId: string;
 }
 
-async function createHarness(): Promise<Harness> {
+/**
+ * throttle=true 时与 AppModule 一样注册 ThrottlerModule（全局 100 次/分钟）+ 全局 ThrottlerBehindProxyGuard；
+ * 默认不挂限流，免得干扰认证断言。两种都与 main.ts 一样 trust proxy = 1。
+ */
+async function createHarness({ throttle = false } = {}): Promise<Harness> {
   const cache = new MemoryCache();
   const config = new ConfigService({
     app: {
@@ -107,6 +116,7 @@ async function createHarness(): Promise<Harness> {
       PassportModule,
       // 与 AuthModule.registerAsync 相同的取值：access 密钥 + access 有效期（秒）
       JwtModule.register({ secret: ACCESS_SECRET, signOptions: { expiresIn: ACCESS_TTL } }),
+      ...(throttle ? [ThrottlerModule.forRoot([{ ttl: 60_000, limit: 100 }])] : []),
     ],
     controllers: [AuthController, ProbeController],
     providers: [
@@ -117,14 +127,12 @@ async function createHarness(): Promise<Harness> {
       AuditService,
       { provide: ConfigService, useValue: config },
       { provide: CACHE_MANAGER, useValue: cache },
+      ...(throttle ? [{ provide: APP_GUARD, useClass: ThrottlerBehindProxyGuard }] : []),
     ],
-  })
-    // 限流单独测（见「限流」一节），这里不让它干扰认证断言
-    .overrideGuard(ThrottlerGuard)
-    .useValue({ canActivate: () => true })
-    .compile();
+  }).compile();
 
-  const app = moduleRef.createNestApplication();
+  const app = moduleRef.createNestApplication<NestExpressApplication>();
+  app.set('trust proxy', 1);
   app.useGlobalPipes(new ValidationPipe(globalValidationPipeOptions()));
   app.useGlobalFilters(new HttpExceptionFilter());
   await app.init();
@@ -469,5 +477,200 @@ describe('认证核心安全行为', () => {
       expect(user.roles).toEqual([]);
       expect(accessJwt.verify(tokens.accessToken).roles).toEqual([]);
     });
+  });
+
+  describe('登录失败计数（按归一化邮箱 + req.ip）', () => {
+    let seq = 0;
+    async function freshUser() {
+      seq += 1;
+      const email = `locked${seq}@cms.test`;
+      const password = 'Locked123!';
+      const user = await h.userService.create({ username: `locked${seq}`, email, password } as any);
+      return { id: user.id, email, password };
+    }
+    const attempt = (email: string, password: string, xff?: string) => {
+      const req = h.http().post('/auth/login');
+      if (xff) req.set('X-Forwarded-For', xff);
+      return req.send({ email, password });
+    };
+    const LOCK_MESSAGE = '登录尝试次数过多，请15分钟后再试';
+
+    it('同一 IP 失败 5 次后锁定（429），连正确密码也拒绝；邮箱大小写 / 首尾空格是同一个计数', async () => {
+      const u = await freshUser();
+      const variants = [u.email, u.email.toUpperCase(), ` ${u.email} `, 'Locked' + u.email.slice(6), u.email];
+      for (const email of variants) {
+        expect((await attempt(email, 'Wrong1234')).status).toBe(401);
+      }
+      const locked = await attempt(u.email, u.password);
+      expect(locked.status).toBe(429);
+      expect(locked.body.message).toBe(LOCK_MESSAGE);
+      // 锁 15 分钟（毫秒），不是 0.9 秒
+      expect(h.cache.ttls.get(`login_attempts:account:${u.email}`)).toBe(15 * 60 * 1000);
+    });
+
+    it('伪造 X-Forwarded-For 最左值不能换出新计数', async () => {
+      const u = await freshUser();
+      for (let i = 0; i < 5; i += 1) {
+        expect((await attempt(u.email, 'Wrong1234', `10.9.${i}.1, 198.51.100.20`)).status).toBe(401);
+      }
+      expect((await attempt(u.email, u.password, '6.6.6.6, 198.51.100.20')).status).toBe(429);
+      // 另一个真实 IP 不受该 IP 的锁定影响
+      expect((await attempt(u.email, u.password, '198.51.100.21')).status).toBe(200);
+    });
+
+    it('换真实 IP 分布式猜测：同一账号累计失败 20 次后任何 IP 都锁定', async () => {
+      const u = await freshUser();
+      for (let ipIndex = 0; ipIndex < 4; ipIndex += 1) {
+        for (let i = 0; i < 5; i += 1) {
+          expect((await attempt(u.email, 'Wrong1234', `203.0.113.${ipIndex}`)).status).toBe(401);
+        }
+      }
+      expect((await attempt(u.email, u.password, '203.0.113.200')).status).toBe(429);
+    });
+
+    it('并发猜密码按顺序计数，不会因读写竞争多试', async () => {
+      const u = await freshUser();
+      const results = await Promise.all(
+        Array.from({ length: 10 }, () => attempt(u.email, 'Wrong1234', '192.0.2.77')),
+      );
+      expect(results.filter((r) => r.status === 401)).toHaveLength(5);
+      expect(results.filter((r) => r.status === 429)).toHaveLength(5);
+      expect(await h.cache.get(`login_attempts:account:${u.email}`)).toBe(5);
+    });
+
+    it('登录成功清掉该 IP 的计数（账号级计数保留到过期）', async () => {
+      const u = await freshUser();
+      for (let i = 0; i < 4; i += 1) await attempt(u.email, 'Wrong1234', '192.0.2.88');
+      expect((await attempt(u.email, u.password, '192.0.2.88')).status).toBe(200);
+      expect(await h.cache.get(`login_attempts:ip:192.0.2.88:${u.email}`)).toBeUndefined();
+      expect(await h.cache.get(`login_attempts:account:${u.email}`)).toBe(4);
+      for (let i = 0; i < 5; i += 1) {
+        expect((await attempt(u.email, 'Wrong1234', '192.0.2.88')).status).toBe(401);
+      }
+      expect((await attempt(u.email, 'Wrong1234', '192.0.2.88')).status).toBe(429);
+    });
+  });
+
+  describe('客户端 IP 取 req.ip（审计日志）', () => {
+    const lastAudit = async (action: string, userId: string) => {
+      const rows = await h.ds.getRepository(AuditLog).find({ where: { action, userId } });
+      return rows[rows.length - 1];
+    };
+
+    it('登录 / 注销 / 注册的审计 IP 是 nginx 追加的那一跳，不是客户端伪造的最左值', async () => {
+      const xff = '6.6.6.6, 203.0.113.99';
+      const res = await h.http().post('/auth/login').set('X-Forwarded-For', xff).send(ADMIN);
+      expect(res.status).toBe(200);
+      expect((await lastAudit('USER_LOGIN', h.adminId)).ipAddress).toBe('203.0.113.99');
+
+      await h
+        .http()
+        .post('/auth/logout')
+        .set('X-Forwarded-For', xff)
+        .set('Authorization', `Bearer ${res.body.tokens.accessToken}`)
+        .expect(200);
+      expect((await lastAudit('USER_LOGOUT', h.adminId)).ipAddress).toBe('203.0.113.99');
+
+      const reg = await h
+        .http()
+        .post('/auth/register')
+        .set('X-Forwarded-For', xff)
+        .set('User-Agent', 'probe-agent')
+        .send({ username: 'newbie', email: '  NewBie@CMS.test ', password: 'Newbie123!', nickname: '新人' });
+      expect(reg.status).toBe(201);
+      // 注册邮箱同样归一化
+      expect(reg.body.user.email).toBe('newbie@cms.test');
+      const audit = await lastAudit('USER_REGISTER', reg.body.user.id);
+      expect(audit.ipAddress).toBe('203.0.113.99');
+      expect(audit.userAgent).toBe('probe-agent');
+    });
+  });
+});
+
+describe('限流：只由全局 ThrottlerBehindProxyGuard 执行，额度按毫秒', () => {
+  let h: Harness;
+
+  beforeAll(async () => {
+    h = await createHarness({ throttle: true });
+  });
+
+  afterAll(async () => {
+    await h?.app.close();
+  });
+
+  const post = (path: string, xff: string | undefined, body: Record<string, unknown>) => {
+    const req = h.http().post(path);
+    if (xff) req.set('X-Forwarded-For', xff);
+    return req.send(body);
+  };
+
+  it('额度声明：ttl 是毫秒（不是秒的写法）', () => {
+    expect(AUTH_THROTTLE).toEqual({
+      login: { limit: 5, ttl: 60_000 },
+      register: { limit: 3, ttl: 300_000 },
+      refresh: { limit: 10, ttl: 60_000 },
+      changePassword: { limit: 5, ttl: 60_000 },
+    });
+  });
+
+  it('AuthModule 不再自带 ThrottlerModule，AuthController 上没有路由级 ThrottlerGuard', () => {
+    const imports: unknown[] = Reflect.getMetadata('imports', AuthModule) ?? [];
+    expect(imports.some((m: any) => (m?.module ?? m)?.name === 'ThrottlerModule')).toBe(false);
+    expect(Reflect.getMetadata(GUARDS_METADATA, AuthController)).toBeUndefined();
+    for (const name of Object.getOwnPropertyNames(AuthController.prototype)) {
+      const guards: unknown[] =
+        Reflect.getMetadata(GUARDS_METADATA, (AuthController.prototype as any)[name]) ?? [];
+      expect(guards.map((g: any) => g?.name)).not.toContain('ThrottlerGuard');
+    }
+  });
+
+  it('经代理的同一 IP：登录第 6 次 429，Retry-After 是秒级窗口', async () => {
+    const statuses: number[] = [];
+    let last: request.Response | undefined;
+    for (let i = 0; i < 6; i += 1) {
+      last = await post('/auth/login', '203.0.113.10', ADMIN);
+      statuses.push(last.status);
+    }
+    expect(statuses).toEqual([200, 200, 200, 200, 200, 429]);
+    const retryAfter = Number(last!.headers['retry-after']);
+    expect(retryAfter).toBeGreaterThan(1);
+    expect(retryAfter).toBeLessThanOrEqual(60);
+  });
+
+  it('伪造的 X-Forwarded-For 最左值不会产生新桶', async () => {
+    const statuses: number[] = [];
+    for (let i = 0; i < 6; i += 1) {
+      statuses.push((await post('/auth/login', `10.0.${i}.${i + 1}, 203.0.113.11`, ADMIN)).status);
+    }
+    expect(statuses).toEqual([200, 200, 200, 200, 200, 429]);
+    // 换一个真实 IP（最右一跳）才是另一个桶
+    expect((await post('/auth/login', '203.0.113.12', ADMIN)).status).toBe(200);
+  });
+
+  it('注册 3 次 / 5 分钟、刷新 10 次 / 分钟、改密 5 次 / 分钟', async () => {
+    const run = async (n: number, path: string, xff: string, body: Record<string, unknown>) => {
+      const statuses: number[] = [];
+      for (let i = 0; i < n; i += 1) statuses.push((await post(path, xff, body)).status);
+      return statuses;
+    };
+    // 请求体非法（400）同样计数：限流在校验之前
+    expect(await run(4, '/auth/register', '203.0.113.20', {})).toEqual([400, 400, 400, 429]);
+    expect(await run(11, '/auth/refresh', '203.0.113.21', { refreshToken: 'x' })).toEqual([
+      ...Array(10).fill(401),
+      429,
+    ]);
+    // 未登录（401）同样计数：全局限流守卫排在认证守卫之前
+    expect(await run(6, '/auth/change-password', '203.0.113.22', {})).toEqual([
+      ...Array(5).fill(401),
+      429,
+    ]);
+  });
+
+  it('没有代理头的内网直连（portal SSR）不限流', async () => {
+    const statuses: number[] = [];
+    for (let i = 0; i < 7; i += 1) {
+      statuses.push((await post('/auth/refresh', undefined, { refreshToken: 'x' })).status);
+    }
+    expect(statuses).toEqual(Array(7).fill(401));
   });
 });

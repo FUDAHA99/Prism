@@ -3,6 +3,8 @@ import {
   UnauthorizedException,
   BadRequestException,
   NotFoundException,
+  HttpException,
+  HttpStatus,
   Inject,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
@@ -21,6 +23,7 @@ import {
   waitUntilIssuable,
 } from './token-revocation';
 import { KeyedMutex } from '../../common/utils/keyed-mutex';
+import { normalizeEmail } from '../../common/utils/normalize-email';
 
 import { SafeUser, toSafeUser } from '../user/user-fields';
 import { LoginDto } from './dto/login.dto';
@@ -45,10 +48,24 @@ const SESSION_REFRESH_MAX_SEC = 24 * 60 * 60;
 
 @Injectable()
 export class AuthService {
-  private readonly MAX_LOGIN_ATTEMPTS = 5;
+  /**
+   * 登录失败锁定（15 分钟滑动窗口，每次失败重新计时）：
+   * - 同一账号 + 同一 IP 失败 MAX_LOGIN_ATTEMPTS 次 → 该 IP 对该账号锁定；
+   * - 同一账号（任意 IP）失败 MAX_ACCOUNT_FAILURES 次 → 该账号锁定，挡住换 IP 的分布式猜测。
+   * 账号按归一化邮箱计（大小写 / 首尾空格不同仍是同一个），IP 取 req.ip（客户端无法伪造）。
+   * 账号级上限故意放宽：定点锁死别人的账号需要从多个真实 IP 各失败几次。
+   */
+  static readonly MAX_LOGIN_ATTEMPTS = 5;
+  static readonly MAX_ACCOUNT_FAILURES = 20;
   // cache-manager v5+ 的 TTL 一律以毫秒计（底层 Keyv）。
   // 此前写的是 15 * 60（被当作 900 毫秒），登录锁定实际只有 0.9 秒。
   private readonly LOGIN_BLOCK_TIME = 15 * 60 * 1000;
+
+  /**
+   * 同一账号的「查失败计数 → 校验口令 → 记失败」串行执行。缓存没有原子 incr，并发的错误口令
+   * 会读到同一个旧计数、互相覆盖而少记，并发一波就能多试好几次。
+   */
+  private readonly loginLocks = new KeyedMutex();
 
   /** 同一个 refresh token 的「查黑名单 → 轮换」串行执行，并发刷新只有一个能成功 */
   private readonly refreshLocks = new KeyedMutex();
@@ -66,14 +83,22 @@ export class AuthService {
     loginDto: LoginDto,
     loginData: LoginAttemptData,
   ): Promise<LoginResponse> {
-    const { email, password, rememberMe } = loginDto;
+    const { password, rememberMe } = loginDto;
+    // DTO 已归一化，这里再做一次：计数 key 不能依赖调用方
+    const email = normalizeEmail(loginDto.email) as string;
     const { ip, userAgent } = loginData;
 
-    await this.checkLoginAttempts(email, ip);
-
-    const validated = await this.validateUser(email, password, { ip, userAgent });
+    const validated = await this.loginLocks.run(email, async () => {
+      await this.checkLoginAttempts(email, ip);
+      const user = await this.validateUser(email, password, { ip, userAgent });
+      if (user) {
+        await this.cacheManager.del(this.ipAttemptsKey(email, ip));
+      } else {
+        await this.recordFailedLogin(email, ip);
+      }
+      return user;
+    });
     if (!validated) {
-      await this.recordFailedLogin(email, ip);
       throw new UnauthorizedException('邮箱或密码错误');
     }
 
@@ -102,7 +127,10 @@ export class AuthService {
     };
   }
 
-  async register(registerDto: RegisterDto): Promise<LoginResponse> {
+  async register(
+    registerDto: RegisterDto,
+    requestInfo: LoginAttemptData = { ip: 'unknown' },
+  ): Promise<LoginResponse> {
     const user = await this.userService.create({
       username: registerDto.username,
       email: registerDto.email,
@@ -120,8 +148,8 @@ export class AuthService {
       action: 'USER_REGISTER',
       resourceType: 'user',
       resourceId: user.id,
-      ipAddress: 'unknown',
-      userAgent: 'unknown',
+      ipAddress: requestInfo.ip,
+      userAgent: requestInfo.userAgent ?? 'unknown',
       newValues: { email: user.email, username: user.username },
     });
 
@@ -373,28 +401,46 @@ export class AuthService {
     }
   }
 
+  /** 账号级失败计数（任意 IP） */
+  private accountAttemptsKey(email: string): string {
+    return `login_attempts:account:${email}`;
+  }
+
+  /** 账号 + IP 的失败计数 */
+  private ipAttemptsKey(email: string, ip: string): string {
+    return `login_attempts:ip:${ip}:${email}`;
+  }
+
+  /** 锁定期间直接 429，不再校验口令（不给继续猜的机会，也不白耗 bcrypt） */
   private async checkLoginAttempts(email: string, ip: string): Promise<void> {
-    const key = `login_attempts:${email}:${ip}`;
-    const attempts = (await this.cacheManager.get<number>(key)) || 0;
-    if (attempts >= this.MAX_LOGIN_ATTEMPTS) {
-      throw new UnauthorizedException('登录尝试次数过多，请15分钟后再试');
+    const [byIp, byAccount] = await Promise.all([
+      this.cacheManager.get<number>(this.ipAttemptsKey(email, ip)),
+      this.cacheManager.get<number>(this.accountAttemptsKey(email)),
+    ]);
+    if (
+      (byIp || 0) >= AuthService.MAX_LOGIN_ATTEMPTS ||
+      (byAccount || 0) >= AuthService.MAX_ACCOUNT_FAILURES
+    ) {
+      throw new HttpException('登录尝试次数过多，请15分钟后再试', HttpStatus.TOO_MANY_REQUESTS);
     }
   }
 
+  /** 必须在 loginLocks 内调用：读-改-写不是原子的 */
   private async recordFailedLogin(email: string, ip: string): Promise<void> {
-    const key = `login_attempts:${email}:${ip}`;
-    const attempts = ((await this.cacheManager.get<number>(key)) || 0) + 1;
-    await this.cacheManager.set(key, attempts, this.LOGIN_BLOCK_TIME);
+    for (const key of [this.ipAttemptsKey(email, ip), this.accountAttemptsKey(email)]) {
+      const attempts = ((await this.cacheManager.get<number>(key)) || 0) + 1;
+      await this.cacheManager.set(key, attempts, this.LOGIN_BLOCK_TIME);
+    }
   }
 
+  /**
+   * 成功登录只清该 IP 的计数；账号级计数留到自然过期，否则攻击者可以等真用户登录一次就重新拿满额度。
+   */
   private async recordSuccessfulLogin(
     user: SafeUser,
     ip: string,
     userAgent?: string,
   ): Promise<void> {
-    const key = `login_attempts:${user.email}:${ip}`;
-    await this.cacheManager.del(key);
-
     await this.auditService.log({
       userId: user.id,
       action: 'USER_LOGIN',
