@@ -8,8 +8,9 @@ import { createHash } from 'crypto';
  * 任何人都能伪造任意用户的 token。现在：
  *
  * - NODE_ENV=production：JWT_SECRET / JWT_REFRESH_SECRET 缺失、等于仓库里出现过的示例/默认值、
- *   看起来是占位符、短于 32 字符、不同字符少于 12 个、含 8 个以上连续递增 / 递减字符、是已泄露的密钥，
- *   或两者相同、有 16 个以上字符的公共片段、一把是另一把的移位 —— 一律抛错，应用拒绝启动。
+ *   看起来是占位符、短于 32 字符、不同字符少于 12 个、含 8 个以上连续递增 / 递减字符、
+ *   相邻字节 / 字符的差值种类过少（按规律生成）、由一小段重复拼成、是已泄露的密钥，
+ *   或两者相同、有 16 个以上字符的公共片段、一把是另一把的移位或简单变换 —— 一律抛错，应用拒绝启动。
  *   scripts/deploy.sh 在 up 之前用其中的基本规则先预检一遍，弱密钥不会等到容器已替换才暴露。
  * - 其他环境：缺失时用开发默认值、弱密钥照常使用，但都打一条 warn，本地开发和测试不受影响。
  *
@@ -62,7 +63,7 @@ export const LEAKED_JWT_SECRET_SHA256: readonly string[] = Object.freeze([
 ]);
 
 /**
- * 弱密钥的结构特征（批次 1-F-1 复审：泄露的那对密钥长 64、不是占位符，却是按「连续递增」生成的，
+ * 弱密钥的结构特征（批次 1-F-1 复审：泄露的那对密钥长 64、不是占位符，却是按规律生成的，
  * refresh 只是 access 移位一字节，原先的校验全部放行）。阈值对 `openssl rand -hex 32` 的输出
  * 几乎不可能误判：64 个随机十六进制字符里不同字符少于 12 个、或出现 8 个连续递增 / 递减字符，
  * 概率都在 1e-7 量级（jwt.spec.ts 用大量样本验证）；真碰上了，重新生成一次即可。
@@ -72,6 +73,28 @@ export const MIN_DISTINCT_SECRET_CHARS = 12;
 export const MAX_SEQUENTIAL_RUN = 8;
 /** 两把密钥有这么长的公共片段即拒绝（一把是另一把移位、截取、拼接改出来的） */
 export const MAX_SHARED_SUBSTRING = 16;
+
+/**
+ * 「相邻差值种类」规则（批次 1-F-1 二次复审）。泄露的那把密钥按「每个字节的高半字节在 a..f 循环、
+ * 低半字节在 0..9 循环、各自逐字节 +1」生成：字母数字交替，16 种字符，没有 ±1 连续片段，
+ * 上面三条全部放过，换个起点（约 6 bit 熵）就是一把「合格」的新密钥。这类按规律生成的串有个共同点：
+ * 相邻两个单位之间的差值只有寥寥几种（这个家族 4 种，等差数列 1 种，短周期重复不超过周期长度），
+ * 而随机串的相邻差值几乎各不相同。
+ *
+ * - 十六进制串（偶数长度、只含 0-9a-fA-F）按字节解码，数「相邻字节差（模 256）」有几种；
+ * - 其他串按字符码数「相邻字符码差」有几种。
+ * 少于 min(阈值, ⌊(单位数 − 1) / 2⌋) 即拒绝；后一项让短输入（如 `openssl rand -hex 16` 的 16 字节）
+ * 不被按 32 字节的标准误判。
+ *
+ * 实测（以 sha256(种子-序号) 计数器作确定性随机源，每种形态 30 万个样本；jwt.spec.ts 用同一方法抽样回归）：
+ * - `openssl rand -hex 32`（32 字节）相邻字节差种类最少 23 种（均值 29.3）；16 字节最少 10 种（均值 14.6，
+ *   阈值按上式取 7）；
+ * - 字符级：base64(32 字节) 最少 26、base64url 25、62 字母数字×32 19、可打印 ASCII×32 20、
+ *   小写+数字×32 16、纯小写×32 14、两个 UUID 拼接 26，连只有 12 种符号的随机串×32 也最少 9。
+ * 字节级阈值 12、字符级阈值 8 与这些最小值都隔着好几档，误判概率可以忽略；按规律生成的家族只有 1~4 种。
+ */
+export const MIN_DISTINCT_BYTE_DELTAS = 12;
+export const MIN_DISTINCT_CHAR_DELTAS = 8;
 
 const sha256Hex = (value: string) => createHash('sha256').update(value, 'utf8').digest('hex');
 
@@ -110,6 +133,52 @@ export function longestSequentialRun(secret: string): number {
   return longest;
 }
 
+/** 偶数长度、只含十六进制字符（不分大小写）：按字节解码后再看相邻差值 */
+export function isHexSecret(secret: string): boolean {
+  return secret.length > 0 && secret.length % 2 === 0 && /^[0-9a-f]+$/i.test(secret);
+}
+
+/** 相邻两个单位的差值共有几种；mod 为 0 时按普通差值，否则取模（字节用 256） */
+function distinctAdjacentDeltas(units: number[], mod: number): number {
+  const deltas = new Set<number>();
+  for (let i = 1; i < units.length; i += 1) {
+    const d = units[i] - units[i - 1];
+    deltas.add(mod > 0 ? (d + mod) % mod : d);
+  }
+  return deltas.size;
+}
+
+/**
+ * 「相邻差值种类」检查（规则见 MIN_DISTINCT_BYTE_DELTAS 的说明）。
+ * @returns 实际的种类数与阈值，以及是按字节还是按字符数的
+ */
+export function adjacentDeltaShape(secret: string): { unit: 'byte' | 'char'; distinct: number; min: number } {
+  const hex = isHexSecret(secret);
+  const units = hex ? Array.from(Buffer.from(secret, 'hex')) : [...secret].map((c) => c.codePointAt(0) as number);
+  const base = hex ? MIN_DISTINCT_BYTE_DELTAS : MIN_DISTINCT_CHAR_DELTAS;
+  return {
+    unit: hex ? 'byte' : 'char',
+    distinct: distinctAdjacentDeltas(units, hex ? 256 : 0),
+    min: Math.min(base, Math.floor((units.length - 1) / 2)),
+  };
+}
+
+/** 是否由一个不超过一半长度的片段整段重复构成（如 16 个十六进制字符重复 4 次，熵只有 64 bit） */
+export function hasShortPeriod(secret: string): boolean {
+  const chars = [...secret];
+  for (let p = 1; p <= chars.length / 2; p += 1) {
+    let periodic = true;
+    for (let i = p; i < chars.length; i += 1) {
+      if (chars[i] !== chars[i - p]) {
+        periodic = false;
+        break;
+      }
+    }
+    if (periodic) return true;
+  }
+  return false;
+}
+
 /** 两个字符串是否有长度 ≥ minLength 的公共片段 */
 export function hasSharedSubstring(a: string, b: string, minLength: number): boolean {
   if (a.length < minLength || b.length < minLength) return false;
@@ -144,6 +213,29 @@ export function isConstantOffset(a: string, b: string): boolean {
   return constant(ba.map((x, i) => (bb[i] - x + 256) % 256));
 }
 
+/**
+ * b 是否是 a 经过简单可逆变换得到的（1-F-1 二次复审）：只差大小写、整串反转、按位异或同一个值
+ * （含逐位取反 / 十六进制逐位 15-x）、十六进制按字节反转或每个字节内两个半字节互换。
+ * 知道其中一把就能推出另一把，等于两种 token 共用一把密钥。
+ */
+export function isSimpleTransform(a: string, b: string): boolean {
+  if (a === b || a.length === 0 || b.length === 0) return false;
+  if (a.toLowerCase() === b.toLowerCase()) return true;
+  const ca = [...a].map((c) => c.codePointAt(0) as number);
+  const cb = [...b].map((c) => c.codePointAt(0) as number);
+  if (ca.length !== cb.length) return false;
+  const reversed = [...ca].reverse();
+  if (reversed.every((x, i) => x === cb[i])) return true;
+  if (ca.every((x, i) => (x ^ cb[i]) === (ca[0] ^ cb[0]))) return true;
+
+  if (!isHexSecret(a) || !isHexSecret(b)) return false;
+  const ba = Array.from(Buffer.from(a, 'hex'));
+  const bb = Array.from(Buffer.from(b, 'hex'));
+  if (ba.every((x, i) => (x ^ bb[i]) === (ba[0] ^ bb[0]))) return true;
+  if ([...ba].reverse().every((x, i) => x === bb[i])) return true;
+  return ba.every((x, i) => (((x & 0x0f) << 4) | (x >> 4)) === bb[i]);
+}
+
 /** 两把密钥之间的问题（为空表示合格）；只描述问题，不回显密钥 */
 export function jwtSecretPairProblems(secret: string, refreshSecret: string): string[] {
   if (secret === refreshSecret) {
@@ -157,6 +249,9 @@ export function jwtSecretPairProblems(secret: string, refreshSecret: string): st
   }
   if (isConstantOffset(secret, refreshSecret)) {
     problems.push('JWT_REFRESH_SECRET 是 JWT_SECRET 逐位加同一偏移得到的（移位）');
+  }
+  if (isSimpleTransform(secret, refreshSecret)) {
+    problems.push('JWT_REFRESH_SECRET 是 JWT_SECRET 简单变换得到的（大小写、反转、按位取反 / 异或、半字节互换）');
   }
   return problems;
 }
@@ -209,6 +304,16 @@ export function jwtSecretProblems(secret: string | undefined): string[] {
   }
   if (longestSequentialRun(secret) >= MAX_SEQUENTIAL_RUN) {
     problems.push(`含 ${MAX_SEQUENTIAL_RUN} 个以上连续递增或递减的字符`);
+  }
+  const shape = adjacentDeltaShape(secret);
+  if (shape.distinct < shape.min) {
+    problems.push(
+      `相邻${shape.unit === 'byte' ? '字节' : '字符'}的差值只有 ${shape.distinct} 种（少于 ${shape.min} 种：` +
+        '像是按规律生成的，不是随机值）',
+    );
+  }
+  if (hasShortPeriod(secret)) {
+    problems.push('由一小段重复拼成');
   }
   if (isLeakedJwtSecret(secret)) {
     problems.push('是已泄露的密钥（已列入拒绝清单）');

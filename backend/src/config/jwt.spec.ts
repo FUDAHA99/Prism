@@ -1,17 +1,23 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { createHash, randomBytes } from 'crypto';
+import { createHash } from 'crypto';
 import {
   DEV_JWT_REFRESH_SECRET,
   DEV_JWT_SECRET,
   KNOWN_PLACEHOLDER_SECRETS,
   LEAKED_JWT_SECRET_SHA256,
   MAX_TOKEN_LIFETIME_SEC,
+  MIN_DISTINCT_BYTE_DELTAS,
+  MIN_DISTINCT_CHAR_DELTAS,
   MIN_JWT_SECRET_LENGTH,
   PLACEHOLDER_PATTERN,
+  adjacentDeltaShape,
   hasSharedSubstring,
+  hasShortPeriod,
   isConstantOffset,
+  isHexSecret,
   isLeakedJwtSecret,
+  isSimpleTransform,
   jwtSecretPairProblems,
   jwtSecretProblems,
   longestSequentialRun,
@@ -26,6 +32,39 @@ const STRONG = 'f0b8d3aae70ccc37490b844ae982ccc32530d8b95fb33dd4255add09479a6f8d
 const STRONG_REFRESH = '024289c9abf62e60a497f05b00f502fcb483792d13ece065550a3dc82e75a892';
 
 const prod = (extra: Record<string, string | undefined>) => ({ NODE_ENV: 'production', ...extra });
+
+/**
+ * 确定性的「随机」字节流：sha256(种子-序号) 首尾相接。统计上等同随机，但每次运行结果相同 ——
+ * 测试里不用 crypto.randomBytes 现生成，避免偶发的误判让 CI 时红时绿。
+ */
+function detBytes(seed: string, n: number): Buffer {
+  const chunks: Buffer[] = [];
+  for (let i = 0; chunks.length * 32 < n; i += 1) {
+    chunks.push(createHash('sha256').update(`${seed}-${i}`).digest());
+  }
+  return Buffer.concat(chunks).subarray(0, n);
+}
+
+const ALNUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+const PRINTABLE = Array.from({ length: 94 }, (_, i) => String.fromCharCode(0x21 + i)).join('');
+
+/** UUID 形态（8-4-4-4-12 个十六进制字符） */
+function uuidLike(seed: string): string {
+  const h = detBytes(seed, 16).toString('hex');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
+/** 从字母表里均匀地取 n 个字符（拒绝采样，没有取模偏差） */
+function detString(seed: string, alphabet: string, n: number): string {
+  const limit = 256 - (256 % alphabet.length);
+  let out = '';
+  for (let block = 0; out.length < n; block += 1) {
+    for (const b of detBytes(`${seed}#${block}`, 64)) {
+      if (b < limit && out.length < n) out += alphabet[b % alphabet.length];
+    }
+  }
+  return out;
+}
 
 /** 从仓库里的 env 模板读出 KEY=VALUE（模板是受 git 跟踪的那两份） */
 function readEnvTemplate(relative: string): Record<string, string> {
@@ -120,11 +159,14 @@ describe('JWT 配置：弱密钥的结构特征（1-F-1 复审：泄露的那对
   const hexSample = (seed: string, i: number) => sha256(`${seed}-${i}`);
 
   it('不同字符少于 12 个 → 拒绝；恰好 12 个且无其他问题 → 通过', () => {
-    const eleven = 'q8w3e7r1t5y'; // 11 个不同字符，彼此不相邻
-    const twelve = `${eleven}u`;
+    const alphabet = 'q8w3e7r1t5yu'; // 12 个不同字符，彼此不相邻
+    // 从这些字符里按固定的伪随机序列取 64 个（不是短片段重复，相邻差值也够多）
+    const twelve = detString('twelve-chars', alphabet, 64);
+    const eleven = detString('eleven-chars', alphabet.slice(0, 11), 64);
+    expect(new Set(twelve).size).toBe(12);
     expect(new Set(eleven).size).toBe(11);
-    expect(jwtSecretProblems(eleven.repeat(6))).toContain('不同字符少于 12 个');
-    expect(jwtSecretProblems(twelve.repeat(6))).toEqual([]);
+    expect(jwtSecretProblems(eleven)).toEqual(['不同字符少于 12 个']);
+    expect(jwtSecretProblems(twelve)).toEqual([]);
   });
 
   it.each([
@@ -214,13 +256,167 @@ describe('JWT 配置：弱密钥的结构特征（1-F-1 复审：泄露的那对
     expect(failures).toEqual([]);
   });
 
-  it('crypto.randomBytes(32) 现生成的 200 对也都通过', () => {
-    for (let i = 0; i < 200; i += 1) {
-      const a = randomBytes(32).toString('hex');
-      const b = randomBytes(32).toString('hex');
-      expect(jwtSecretProblems(a)).toEqual([]);
-      expect(jwtSecretPairProblems(a, b)).toEqual([]);
+  it.each([
+    ['openssl rand -base64 32', (i: number) => detBytes(`b64-${i}`, 32).toString('base64')],
+    ['base64url 32 字节', (i: number) => detBytes(`b64url-${i}`, 32).toString('base64url')],
+    ['62 个字母数字 × 40', (i: number) => detString(`alnum-${i}`, ALNUM, 40)],
+    ['两个 UUID 拼接', (i: number) => `${uuidLike(`u1-${i}`)}-${uuidLike(`u2-${i}`)}`],
+  ])('其他常见的随机密钥形态（%s，各 5000 个，固定种子）也都通过', (_name, gen) => {
+    const failures: string[] = [];
+    for (let i = 0; i < 5000; i += 1) {
+      const problems = jwtSecretProblems(gen(i));
+      if (problems.length > 0) failures.push(`${i}: ${problems.join('、')}`);
     }
+    expect(failures).toEqual([]);
+  });
+
+  describe('相邻差值种类过少（1-F-1 二次复审：泄露密钥所属的生成规律整族都要拦住）', () => {
+    /**
+     * 按公开文档里描述过的规律重建整个家族（不含、也不需要那两把已泄露的原值）：
+     * 第 i 个字节的高半字节在 a..f 里循环、低半字节在 0..9 里循环，各自每字节走一步。
+     * 同时覆盖所有起点（6 × 10 = 60 个）、反方向、高低半字节互换、大写、多种长度。
+     */
+    const LETTER_NIBBLES = [0xa, 0xb, 0xc, 0xd, 0xe, 0xf];
+    const family = (hiStart: number, loStart: number, bytes: number, step: 1 | -1, digitsHigh: boolean) => {
+      const out: number[] = [];
+      for (let i = 0; i < bytes; i += 1) {
+        const letter = LETTER_NIBBLES[(((hiStart + step * i) % 6) + 6) % 6];
+        const digit = (((loStart + step * i) % 10) + 10) % 10;
+        out.push(digitsHigh ? (digit << 4) | letter : (letter << 4) | digit);
+      }
+      return Buffer.from(out).toString('hex');
+    };
+    const structural = (secret: string) => jwtSecretProblems(secret).filter((p) => !p.includes('已泄露'));
+    const DELTA_PROBLEM = /相邻字节的差值只有 \d+ 种/;
+
+    it('家族里每一把（60 个起点 × 2 个方向 × 2 种半字节顺序 × 大小写 × 16/24/32/48/64 字节）都被结构规则拒绝，不靠拒绝清单', () => {
+      const missed: string[] = [];
+      let checked = 0;
+      for (const bytes of [16, 24, 32, 48, 64]) {
+        for (const step of [1, -1] as const) {
+          for (const digitsHigh of [false, true]) {
+            for (let h = 0; h < 6; h += 1) {
+              for (let l = 0; l < 10; l += 1) {
+                const lower = family(h, l, bytes, step, digitsHigh);
+                for (const secret of [lower, lower.toUpperCase()]) {
+                  checked += 1;
+                  const shape = adjacentDeltaShape(secret);
+                  if (shape.unit !== 'byte' || shape.distinct > 4 || !structural(secret).some((p) => DELTA_PROBLEM.test(p))) {
+                    missed.push(`bytes=${bytes} step=${step} digitsHigh=${digitsHigh} start=${h}/${l}`);
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      expect(checked).toBe(5 * 2 * 2 * 60 * 2);
+      expect(missed).toEqual([]);
+    });
+
+    it('家族里任取两把（不同轨道）配成一对，生产环境同样拒绝启动', () => {
+      const a = family(0, 0, 32, 1, false);
+      const b = family(0, 1, 32, 1, false); // (h - l) 奇偶不同：两条轨道，原先的两两比对也拦不住
+      expect(jwtSecretPairProblems(a, b)).toEqual([]);
+      expect(() => resolveJwtConfig(prod({ JWT_SECRET: a, JWT_REFRESH_SECRET: b }), jest.fn())).toThrow(
+        /相邻字节的差值只有 4 种/,
+      );
+    });
+
+    it.each([
+      ['字节等差 +0x11', Buffer.from(Array.from({ length: 32 }, (_, i) => (0x3c + 0x11 * i) & 255)).toString('hex')],
+      ['字节等差 +0x07', Buffer.from(Array.from({ length: 32 }, (_, i) => (0x21 + 7 * i) & 255)).toString('hex')],
+      ['字节等差 +0x25', Buffer.from(Array.from({ length: 32 }, (_, i) => (0x90 + 0x25 * i) & 255)).toString('hex')],
+      ['8 字节循环 0f1e2d3c4b5a6978 × 4', '0f1e2d3c4b5a6978'.repeat(4)],
+      ['字母数字交替递增（非十六进制）', Array.from({ length: 32 }, (_, i) => 'ghijklmnopqrstuvwxyz'[i % 20] + String(i % 10)).join('')],
+      ['字母按步长 7 循环（非十六进制）', Array.from({ length: 40 }, (_, i) => String.fromCharCode(97 + ((i * 7) % 26))).join('')],
+    ])('其他按规律生成的形态（%s）→ 拒绝', (_name, secret) => {
+      const shape = adjacentDeltaShape(secret);
+      expect(shape.distinct).toBeLessThan(shape.min);
+      expect(jwtSecretProblems(secret).join('、')).toMatch(/相邻(字节|字符)的差值只有/);
+    });
+
+    it('按字节还是按字符：偶数长度的十六进制（不分大小写）按字节，其余按字符', () => {
+      expect(isHexSecret(STRONG)).toBe(true);
+      expect(isHexSecret(STRONG.toUpperCase())).toBe(true);
+      expect(isHexSecret(STRONG.slice(1))).toBe(false);
+      expect(isHexSecret(`${STRONG.slice(2)}zz`)).toBe(false);
+      expect(adjacentDeltaShape(STRONG)).toEqual(expect.objectContaining({ unit: 'byte', min: MIN_DISTINCT_BYTE_DELTAS }));
+      expect(adjacentDeltaShape(detBytes('b64', 32).toString('base64'))).toEqual(
+        expect.objectContaining({ unit: 'char', min: MIN_DISTINCT_CHAR_DELTAS }),
+      );
+      // openssl rand -hex 16（16 字节、32 个字符）只有 15 个相邻差：阈值按 ⌊15 / 2⌋ = 7 算，不拿 32 字节的标准误判
+      expect(adjacentDeltaShape(detBytes('hex16', 16).toString('hex')).min).toBe(7);
+    });
+
+    it.each([
+      ['openssl rand -hex 32', 32, 20_000],
+      ['openssl rand -hex 24', 24, 20_000],
+      ['openssl rand -hex 16', 16, 20_000],
+    ])('随机十六进制（%s，%i 字节，固定种子 %i 个）从不因差值种类被拒', (_name, bytes, n) => {
+      let min = Infinity;
+      for (let i = 0; i < n; i += 1) {
+        const shape = adjacentDeltaShape(detBytes(`hex${bytes}-${i}`, bytes).toString('hex'));
+        expect(shape.unit).toBe('byte');
+        min = Math.min(min, shape.distinct - shape.min);
+      }
+      // 实测 30 万个样本：32 字节最少 23 种（阈值 12）、24 字节最少 15 种（阈值 11）、16 字节最少 10 种（阈值 7）
+      expect(min).toBeGreaterThanOrEqual(3);
+    });
+
+    it.each([
+      ['base64 32 字节', (i: number) => detBytes(`c64-${i}`, 32).toString('base64')],
+      ['62 个字母数字 × 32', (i: number) => detString(`c62-${i}`, ALNUM, 32)],
+      ['可打印 ASCII × 32', (i: number) => detString(`c94-${i}`, PRINTABLE, 32)],
+      ['纯小写字母 × 32', (i: number) => detString(`c26-${i}`, 'abcdefghijklmnopqrstuvwxyz', 32)],
+      ['只有 12 种符号 × 32（最坏情形）', (i: number) => detString(`c12-${i}`, 'abcdefghijkl', 32)],
+    ])('随机的非十六进制串（%s，固定种子 20000 个）从不因字符差值种类被拒', (_name, gen) => {
+      let min = Infinity;
+      for (let i = 0; i < 20_000; i += 1) {
+        const shape = adjacentDeltaShape(gen(i));
+        expect(shape.unit).toBe('char');
+        min = Math.min(min, shape.distinct - shape.min);
+      }
+      // 实测 30 万个样本的最少种类：base64 26、字母数字 19、可打印 20、纯小写 14、12 种符号 9（阈值 8）
+      expect(min).toBeGreaterThanOrEqual(1);
+    });
+
+    it('由一小段重复拼成 → 拒绝（随机的 16 / 32 个十六进制字符重复），整串不重复的不算', () => {
+      const r16 = detBytes('period-16', 8).toString('hex');
+      const r32 = detBytes('period-32', 16).toString('hex');
+      expect(hasShortPeriod(r16.repeat(4))).toBe(true);
+      expect(hasShortPeriod(r32.repeat(2))).toBe(true);
+      expect(jwtSecretProblems(r32.repeat(2))).toContain('由一小段重复拼成');
+      expect(hasShortPeriod(`${r32}${r32.slice(0, 31)}x`)).toBe(false);
+      expect(hasShortPeriod(STRONG)).toBe(false);
+    });
+  });
+
+  describe('两把密钥之间的简单变换（1-F-1 二次复审）', () => {
+    const swapNibbles = (hex: string) => hex.match(/../g)!.map((p) => p[1] + p[0]).join('');
+    it.each([
+      ['只差大小写', (a: string) => a.toUpperCase()],
+      ['整串反转', (a: string) => [...a].reverse().join('')],
+      ['逐位 15 - x（半字节取反）', (a: string) => [...a].map((c) => (15 - parseInt(c, 16)).toString(16)).join('')],
+      ['按字节异或同一个值', (a: string) => Buffer.from(Buffer.from(a, 'hex').map((x) => x ^ 0x5a)).toString('hex')],
+      ['按字节倒序', (a: string) => Buffer.from(a, 'hex').reverse().toString('hex')],
+      ['每个字节内两个半字节互换', swapNibbles],
+    ])('JWT_REFRESH_SECRET = %s(JWT_SECRET) → 拒绝', (_name, transform) => {
+      const b = transform(STRONG);
+      expect(b).not.toBe(STRONG);
+      expect(isSimpleTransform(STRONG, b)).toBe(true);
+      expect(() => resolveJwtConfig(prod({ JWT_SECRET: STRONG, JWT_REFRESH_SECRET: b }), jest.fn())).toThrow(
+        /简单变换/,
+      );
+    });
+
+    it('非十六进制：字符码异或同一个值、反转同样拒绝；两把无关的随机密钥不算', () => {
+      const a = detString('pair-a', ALNUM, 40);
+      expect(isSimpleTransform(a, [...a].map((c) => String.fromCharCode(c.charCodeAt(0) ^ 1)).join(''))).toBe(true);
+      expect(isSimpleTransform(a, [...a].reverse().join(''))).toBe(true);
+      expect(isSimpleTransform(a, detString('pair-b', ALNUM, 40))).toBe(false);
+      expect(isSimpleTransform(STRONG, STRONG_REFRESH)).toBe(false);
+    });
   });
 
   it('两把都回落到开发默认值时不做两两比对（非生产只按各自问题告警）', () => {
