@@ -10,20 +10,106 @@ const { Text } = Typography
 
 const PAGE_SIZE = 20
 
-// 常见操作类型选项
+/**
+ * 操作类型筛选项。后端按 action 精确匹配，所以值必须与后端 auditService.log 实际写入的动作名一字不差
+ * （此前的 ROLE_ASSIGN 后端从未写过，按角色变更筛选永远为空）。
+ * backend/src/modules/audit/audit-actions.spec.ts 会扫描后端源码，与这里的 [动作名, 说明] 清单逐项比对：
+ * 后端新增或改名动作而这里没跟上，测试即失败。
+ */
+const ACTION_GROUPS: { label: string; actions: [action: string, text: string][] }[] = [
+  {
+    label: '账号与权限',
+    actions: [
+      ['USER_LOGIN', '登录'],
+      ['USER_LOGOUT', '退出登录'],
+      ['USER_REGISTER', '注册'],
+      ['USER_CHANGE_PASSWORD', '修改密码'],
+      ['USER_CREATE', '新建用户'],
+      ['USER_UPDATE', '修改用户'],
+      ['USER_DELETE', '删除用户'],
+      ['USER_ACTIVATE', '启用用户'],
+      ['USER_DEACTIVATE', '禁用用户'],
+      ['USER_ASSIGN_ROLES', '分配角色'],
+      ['USER_REMOVE_ROLES', '移除角色'],
+    ],
+  },
+  {
+    label: '文章',
+    actions: [
+      ['CONTENT_CREATE', '新建文章'],
+      ['CONTENT_UPDATE', '修改文章'],
+      ['CONTENT_PUBLISH', '发布文章'],
+      ['CONTENT_UNPUBLISH', '下线文章'],
+      ['CONTENT_DELETE', '删除文章'],
+    ],
+  },
+  {
+    label: '影视',
+    actions: [
+      ['MOVIE_CREATE', '新建影视'],
+      ['MOVIE_UPDATE', '修改影视'],
+      ['MOVIE_UPDATE_POSTER', '更换海报'],
+      ['MOVIE_PUBLISH', '发布影视'],
+      ['MOVIE_UNPUBLISH', '下线影视'],
+      ['MOVIE_DELETE', '删除影视'],
+      ['MOVIE_SOURCE_CREATE', '新建播放源'],
+      ['MOVIE_SOURCE_DELETE', '删除播放源'],
+      ['MOVIE_EPISODE_CREATE', '新建剧集'],
+      ['MOVIE_EPISODE_UPDATE', '修改剧集'],
+      ['MOVIE_EPISODE_DELETE', '删除剧集'],
+    ],
+  },
+  {
+    label: '小说',
+    actions: [
+      ['NOVEL_CREATE', '新建小说'],
+      ['NOVEL_UPDATE', '修改小说'],
+      ['NOVEL_PUBLISH', '发布小说'],
+      ['NOVEL_UNPUBLISH', '下线小说'],
+      ['NOVEL_DELETE', '删除小说'],
+      ['NOVEL_CHAPTER_CREATE', '新建小说章节'],
+      ['NOVEL_CHAPTER_UPDATE', '修改小说章节'],
+      ['NOVEL_CHAPTER_DELETE', '删除小说章节'],
+    ],
+  },
+  {
+    label: '漫画',
+    actions: [
+      ['COMIC_CREATE', '新建漫画'],
+      ['COMIC_UPDATE', '修改漫画'],
+      ['COMIC_PUBLISH', '发布漫画'],
+      ['COMIC_UNPUBLISH', '下线漫画'],
+      ['COMIC_DELETE', '删除漫画'],
+      ['COMIC_CHAPTER_CREATE', '新建漫画章节'],
+      ['COMIC_CHAPTER_UPDATE', '修改漫画章节'],
+      ['COMIC_CHAPTER_DELETE', '删除漫画章节'],
+    ],
+  },
+  {
+    label: '媒体',
+    actions: [
+      ['MEDIA_UPLOAD', '上传文件'],
+      ['MEDIA_DELETE', '删除文件'],
+    ],
+  },
+  {
+    // 采集模块写的是通用动作名，资源类型列区分 collect_source / collect_category_mapping
+    label: '采集',
+    actions: [
+      ['CREATE', '新建采集源'],
+      ['UPDATE', '修改采集源'],
+      ['DELETE', '删除采集源或分类映射'],
+      ['UPSERT', '保存分类映射'],
+    ],
+  },
+]
+
 const ACTION_OPTIONS = [
   { label: '全部操作', value: '' },
-  { label: 'USER_LOGIN', value: 'USER_LOGIN' },
-  { label: 'USER_LOGOUT', value: 'USER_LOGOUT' },
-  { label: 'USER_REGISTER', value: 'USER_REGISTER' },
-  { label: 'CONTENT_CREATE', value: 'CONTENT_CREATE' },
-  { label: 'CONTENT_UPDATE', value: 'CONTENT_UPDATE' },
-  { label: 'CONTENT_DELETE', value: 'CONTENT_DELETE' },
-  { label: 'CONTENT_PUBLISH', value: 'CONTENT_PUBLISH' },
-  { label: 'MEDIA_UPLOAD', value: 'MEDIA_UPLOAD' },
-  { label: 'MEDIA_DELETE', value: 'MEDIA_DELETE' },
-  { label: 'USER_UPDATE', value: 'USER_UPDATE' },
-  { label: 'ROLE_ASSIGN', value: 'ROLE_ASSIGN' },
+  ...ACTION_GROUPS.map((group) => ({
+    label: group.label,
+    options: group.actions.map(([value, text]) => ({ label: `${text}（${value}）`, value })),
+  })),
 ]
 
 export default function AuditLogPage() {
@@ -98,7 +184,9 @@ export default function AuditLogPage() {
         <Select
           value={action}
           options={ACTION_OPTIONS}
-          style={{ width: 200 }}
+          showSearch
+          optionFilterProp="label"
+          style={{ width: 280 }}
           onChange={(val) => {
             setAction(val)
             setPage(1)
