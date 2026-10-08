@@ -55,16 +55,15 @@
 
 ```
 prism-cms/
-├── backend/          # NestJS API 服务（端口 3001）
-├── frontend/         # React 管理后台（端口 5173）
-├── portal/           # Next.js 前台门户（端口 3002）
-├── docs/             # 文档
-│   ├── api.md
-│   ├── architecture.md
-│   ├── dev-guide.md
-│   ├── user-guide.md
-│   └── test-report.md
-└── docker-compose.yml  # MySQL + Redis 一键启动
+├── backend/                 # NestJS API（端口 3001）
+├── frontend/                # React 管理后台（开发端口 5173）
+├── portal/                  # Next.js 前台门户（端口 3002）
+├── nginx/                   # 生产反向代理配置（nginx.conf；nginx-ssl.conf 为 HTTPS 模板）
+├── scripts/                 # 生产运维脚本：deploy.sh / setup-ssl.sh / backup.sh
+├── database/init/           # 仅本地开发：MySQL 首次初始化脚本
+├── docs/                    # 文档
+├── docker-compose.yml       # 仅本地开发：MySQL + Redis + Adminer
+└── docker-compose.prod.yml  # 生产编排（由 scripts/deploy.sh 调用）
 ```
 
 ---
@@ -96,7 +95,7 @@ node backend/scripts/seed-demo.js    # 演示影视/小说/漫画内容
 |------|------|
 | 前台门户 | http://localhost:3002 |
 | 管理后台 | http://localhost:5173 |
-| API 文档 | http://localhost:3001/api-docs |
+| API | http://localhost:3001/api/v1（接口说明见 docs/api.md）|
 
 ---
 
@@ -110,11 +109,15 @@ cp .env.prod.example .env.prod   # 编辑填入域名、密码、JWT 密钥
 bash scripts/deploy.sh
 ```
 
-部署完成后访问 `http://<服务器IP>`，管理后台在 `/admin/`。
+> ⚠️ **唯一的生产部署入口是 `scripts/deploy.sh`**，它固定使用 `docker-compose.prod.yml` + `.env.prod`；GitHub Actions 自动部署（`.github/workflows/deploy.yml`）用的也是这一份编排。
+> - 根目录的 `docker-compose.yml` 只用于本地开发：它把 MySQL(3306) / Redis(6379) / Adminer(8080) 直接发布到宿主机，且使用弱口令，**切勿在服务器上运行**。
+> - 手动执行 compose 命令时必须带 `--env-file .env.prod`。Compose 只会自动读取 `.env`，漏掉这个参数时 `DOMAIN`、数据库密码、JWT 密钥都会按空串处理。
+
+部署完成后访问 `.env.prod` 中 `DOMAIN` 对应的地址（脚本结束时会打印），管理后台在 `/admin/`。
 
 > 详细步骤、运维命令、备份方案见 **[部署指南](docs/deploy.md)**。
 
-**管理员账户**：`admin@cms.com` / `Admin123!`（首次登录请立即改密）
+**管理员账户**：`admin@cms.com` / `Admin123!`（首次登录请立即改密，登录框填邮箱）
 
 ---
 
