@@ -15,10 +15,11 @@
 #                             本脚本 re-exec 前的自己）做过 nginx/nginx.conf 一次性迁移时传入备份路径，
 #                             nginx 在新 compose 上重建成功之前部署失败就把它拷回（见 on_exit）
 #
-# 流程：拉代码（脚本自身有更新则改跑新版）→ 预检 .env.prod 的 JWT 密钥（不合格则中止，容器都不动）
+# 流程：拉代码（脚本自身有更新则改跑新版）→ 预检 .env.prod 的 JWT 密钥基本规则（不合格则中止，容器都不动）
+#   → 构建全部镜像 → 在一次性 backend 容器里用 backend 自己的规则校验 compose 插值后的 JWT 密钥（同上）
 #   → 生成 nginx/nginx.active.conf
 #   → 部署前 nginx -t（一次性容器；失败则中止，生效配置换回部署前的内容，容器都不动）
-#   → up -d --build → 等 backend → 例行部署：补齐系统角色（seed-admin.js --roles-only：不改密码、不分配角色，失败只警告）
+#   → up -d（不再构建）→ 等 backend → 例行部署：补齐系统角色（seed-admin.js --roles-only：不改密码、不分配角色，失败只警告）
 #   → 部署后 nginx -t（真实网络）→ 重建 nginx（80/443 中断数秒）
 #   → 首次部署：建管理员 + 备份 crontab → 清理旧镜像
 # =================================================================
@@ -140,8 +141,12 @@ pull_code() {
 
 # ── JWT 密钥预检（up 之前，容器一个都不动）────────────────────────────
 # backend 在 NODE_ENV=production 下遇到弱密钥会拒绝启动（backend/src/config/jwt.ts），但那时 up -d
-# 已经替换掉旧容器，新容器反复崩溃，整站 API 502。这里先用其中的基本规则拦一遍：长度、占位符、
-# 两把相同、已泄露清单。其余规则（字符种类、连续字符、公共片段、移位）以 backend 启动校验为准。
+# 已经替换掉旧容器，新容器反复崩溃，整站 API 502。分两道：
+# 1) check_jwt_secrets：bash 快速拦基本规则（长度、占位符、两把相同、已泄露清单），不用等构建；
+# 2) check_jwt_in_image：构建完镜像后，在一次性 backend 容器里直接调用 backend 自己的 resolveJwtConfig。
+#    值取自 compose 渲染出的配置，插值规则与 up 相同（shell 里导出的同名变量优先于 --env-file、未加引号的
+#    $ 会被展开），与 up 之后 backend 真正拿到的完全一致；全部规则（字符种类、连续字符、差值种类、
+#    公共片段、移位……）都只有 backend 这一份实现，不在 bash 里重抄。
 # 下面三项与 jwt.ts 必须一致，backend/src/config/jwt.spec.ts 会比对。
 JWT_MIN_LENGTH=32
 JWT_PLACEHOLDER_PATTERN='change[-_ ]?(this|me|in[-_ ]?production)|请替换|^your[-_]'
@@ -210,7 +215,58 @@ check_jwt_secrets() {
     for p in "${problems[@]}"; do echo -e "${RED}[✗]${NC} .env.prod：$p" >&2; done
     die "JWT 密钥不合格，部署中止（容器均未改动）。用 openssl rand -hex 32 分别生成两把新密钥写入 .env.prod 后重新部署（见 docs/deploy.md 5.3）"
   fi
-  log "JWT 密钥预检通过（完整规则由 backend 启动时校验）"
+  log "JWT 密钥基本规则预检通过（完整规则待镜像构建后用 backend 自己的校验再查一遍）"
+}
+
+# 在一次性容器里跑 backend 的启动校验：只 require dist/config/jwt（不连数据库、不起 Nest）。
+# 从 stdin 读 `compose config --format json`（compose 插值后的完整配置），取 backend 服务的 environment：
+# 渲染结果里每个字面量 $ 都被转义成 $$（为了能再被 compose 读回），这里还原成容器实际拿到的值。
+# 不合格时只打印问题清单（resolveJwtConfig 的报错从不回显密钥本身），退出码 1。
+JWT_VALIDATOR_JS='
+let raw = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => (raw += chunk));
+process.stdin.on("end", () => {
+  let environment;
+  try {
+    environment = JSON.parse(raw).services.backend.environment || {};
+  } catch (e) {
+    console.error("读不到 compose 渲染出的 backend 配置");
+    process.exit(2);
+  }
+  const env = {};
+  for (const [key, value] of Object.entries(environment)) {
+    if (typeof value === "string") env[key] = value.split("$$").join("$");
+  }
+  env.NODE_ENV = "production";
+  const { resolveJwtConfig } = require("./dist/config/jwt");
+  try {
+    resolveJwtConfig(env, () => {});
+  } catch (e) {
+    console.error(String((e && e.message) || e));
+    process.exit(1);
+  }
+});
+'
+
+# 为什么不用 `$COMPOSE run --rm --no-deps backend`：实测 compose run 即使带 --no-deps，也会先建出项目网络和
+# backend 及其依赖（mysql、redis）的命名卷。首次部署时 prism_mysql_data 因此在 up 之前就存在了，下面按
+# 「这个卷在不在」判断的首次部署会被误判成例行部署（不开 DB_SYNC、不建管理员，backend 因缺表反复重启）；
+# 校验没过、运维改完密钥重跑时同样会误判。所以改为：配置由 compose 渲染（插值规则与 up 完全相同），
+# 经管道交给用新 backend 镜像起的一次性容器（--network none、不挂任何卷、--rm），密钥不进命令行、不落盘。
+# 镜像名按 compose 的命名规则是「<项目名>-backend」（docker-compose.prod.yml 的 backend 只有 build、没有 image）。
+check_jwt_in_image() {
+  local project image
+  project=$($COMPOSE config 2>/dev/null | sed -n 's/^name: //p' | head -n 1) || true
+  [ -n "$project" ] || die "读不到 compose 项目名，无法定位新构建的 backend 镜像，部署中止，容器均未改动"
+  image="${project}-backend"
+  docker image inspect "$image" &>/dev/null \
+    || die "找不到新构建的 backend 镜像 $image，部署中止，容器均未改动"
+  log "用新镜像 $image 里 backend 自己的规则校验 JWT 密钥（一次性容器，不联网、不挂卷，现有容器不动）..."
+  if ! $COMPOSE config --format json | docker run --rm -i --network none --entrypoint node "$image" -e "$JWT_VALIDATOR_JS"; then
+    die "JWT 密钥未通过 backend 的启动校验（问题见上方，backend 若照此启动会拒绝启动、API 502），部署中止，容器均未改动。用 openssl rand -hex 32 分别生成两把新密钥写入 .env.prod 后重新部署（见 docs/deploy.md 5.3）"
+  fi
+  log "JWT 密钥通过 backend 启动校验"
 }
 
 # ── 部署后 nginx -t：接到真实 Docker 网络，确认 upstream 主机名都能解析 ─────
@@ -275,6 +331,21 @@ main() {
   # ── JWT 密钥预检：不合格就在动任何容器、任何 nginx 配置之前中止 ──────────
   check_jwt_secrets
 
+  # ── 首次部署：自动开启 DB_SYNC ────────────────────────────────
+  # 按 MySQL 数据卷在不在判断，所以必须在任何可能建卷的命令（up；compose run 也会建，见 check_jwt_in_image）之前
+  local first_deploy=false
+  if ! docker volume inspect prism_mysql_data &>/dev/null; then
+    first_deploy=true
+    warn "检测到首次部署，将临时启用 DB_SYNC=true 自动建表"
+    export DB_SYNC=true
+  fi
+
+  # ── 构建全部镜像（后面的 up 不再构建），再用新 backend 镜像跑一遍完整的密钥校验 ──
+  # build 只产出新镜像，不碰运行中的容器；构建或校验失败都在这里中止
+  log "构建镜像（可能需要几分钟；运行中的容器不受影响）..."
+  $COMPOSE build || die "镜像构建失败（见上方输出），部署中止，容器均未改动"
+  check_jwt_in_image
+
   # ── 生成 nginx 生效配置 ───────────────────────────────────────
   # 先给原来的 nginx.active.conf 留快照：开始 up 之前失败由 on_exit 恢复（render 自身失败时不动它）
   if [ -f nginx/nginx.active.conf ]; then
@@ -291,23 +362,16 @@ main() {
     warn ".env.prod 中 DB_SYNC=true：TypeORM 会在 backend 启动时 ALTER 生产库，改类型或删列会静默丢数据。首次建表完成后应改回 false"
   fi
 
-  # ── 首次部署：自动开启 DB_SYNC ────────────────────────────────
-  local first_deploy=false
-  if ! docker volume inspect prism_mysql_data &>/dev/null; then
-    first_deploy=true
-    warn "检测到首次部署，将临时启用 DB_SYNC=true 自动建表"
-    export DB_SYNC=true
-  fi
-
   # ── 部署前 nginx -t：一次性容器 + --add-host 占位，不依赖业务容器，首次部署也能跑 ──
   log "部署前校验 nginx 配置..."
   bash scripts/check-nginx-conf.sh \
     || die "nginx 配置校验失败（见上方 nginx -t 输出），部署中止。修正 nginx/ 下的配置后重新部署"
 
-  # ── 构建并启动 ────────────────────────────────────────────────
-  log "构建镜像并启动服务（可能需要几分钟）..."
+  # ── 启动 ──────────────────────────────────────────────────────
+  # 不带 --build：镜像上面已经构建并校验过，up 直接用它们（compose 只在镜像缺失时才会构建）
+  log "启动服务..."
   UP_STARTED=true   # 从这里起容器可能被改动：失败时不再恢复 nginx.active.conf，也不再说「容器均未改动」
-  $COMPOSE up -d --build --remove-orphans
+  $COMPOSE up -d --remove-orphans
 
   # ── 等待 backend（用 Node.js 内置 http 模块，无需 wget/curl）──────
   log "等待 backend 启动..."

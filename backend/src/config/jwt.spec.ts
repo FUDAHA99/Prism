@@ -456,12 +456,133 @@ describe('scripts/deploy.sh 的部署前预检与 jwt.ts 规则一致', () => {
     expect(/^JWT_MIN_LENGTH=(\d+)$/m.exec(script)?.[1]).toBe(String(MIN_JWT_SECRET_LENGTH));
   });
 
-  it('预检在 up -d --build 之前执行', () => {
+  it('流程顺序：bash 预检 → build → 镜像内校验 → 渲染 nginx → up -d（不再带 --build）', () => {
     const main = script.slice(script.indexOf('main() {'));
-    const check = main.indexOf('check_jwt_secrets');
-    expect(check).toBeGreaterThan(0);
-    expect(check).toBeLessThan(main.indexOf('up -d --build'));
-    expect(check).toBeLessThan(main.indexOf('render-nginx-conf.sh'));
+    const steps = [
+      'check_jwt_secrets',
+      '$COMPOSE build ||',
+      '\n  check_jwt_in_image\n',
+      'render-nginx-conf.sh',
+      '$COMPOSE up -d --remove-orphans',
+    ].map((step) => ({ step, at: main.indexOf(step) }));
+    for (const s of steps) expect(s.at).toBeGreaterThan(0);
+    expect(steps.map((s) => s.step)).toEqual([...steps].sort((a, b) => a.at - b.at).map((s) => s.step));
+    expect(script).not.toMatch(/up -d --build/);
+  });
+
+  describe('镜像内校验（check_jwt_in_image）', () => {
+    const js = /^JWT_VALIDATOR_JS='([^']*)'$/m.exec(script)?.[1] as string;
+
+    /**
+     * 按 deploy.sh 里的原文执行那段 node -e 脚本：stdin 喂 `compose config --format json` 形状的配置，
+     * ./dist/config/jwt 换成本模块（dist 就是它编译出来的）。
+     */
+    function runValidator(stdin: string) {
+      const errors: string[] = [];
+      let exitCode: number | undefined;
+      const handlers: Record<string, (arg?: string) => void> = {};
+      const fakeRequire = (id: string) => {
+        expect(id).toBe('./dist/config/jwt');
+        return { resolveJwtConfig };
+      };
+      const fakeProcess = {
+        env: {},
+        stdin: {
+          setEncoding: () => undefined,
+          on: (event: string, cb: (arg?: string) => void) => {
+            handlers[event] = cb;
+          },
+        },
+        exit: (code: number) => {
+          exitCode = code;
+          throw new Error('__exit__');
+        },
+      };
+      const fakeConsole = { error: (m: string) => errors.push(m), log: () => undefined, warn: () => undefined };
+      new Function('require', 'process', 'console', js)(fakeRequire, fakeProcess, fakeConsole);
+      try {
+        // 分两块送进去，确认按流拼接
+        handlers.data(stdin.slice(0, 7));
+        handlers.data(stdin.slice(7));
+        handlers.end();
+      } catch (e) {
+        if ((e as Error).message !== '__exit__') throw e;
+      }
+      return { exitCode, errors };
+    }
+    /** compose config 渲染结果的形状；字面量 $ 在渲染结果里是 $$ */
+    const rendered = (environment: Record<string, string | null>) =>
+      JSON.stringify({ name: 'prism-cms', services: { backend: { environment }, mysql: {} } });
+
+    it('一次性容器的调用方式：compose 渲染的配置经管道交给新 backend 镜像，不联网、不挂卷、用完即删', () => {
+      expect(js).toBeTruthy();
+      expect(script).toContain(
+        '$COMPOSE config --format json | docker run --rm -i --network none --entrypoint node "$image" -e "$JWT_VALIDATOR_JS"',
+      );
+      // compose run 即使带 --no-deps 也会建项目的命名卷，会让首次部署被误判（见 deploy.sh 注释）
+      const code = script
+        .split('\n')
+        .filter((line) => !line.trim().startsWith('#'))
+        .join('\n');
+      expect(code).not.toMatch(/\$COMPOSE run\b/);
+      // require 的是 backend 镜像里 dist/config/jwt.js，即本文件旁的 jwt.ts 编译产物
+      expect(fs.existsSync(path.join(__dirname, 'jwt.ts'))).toBe(true);
+      expect(js).toContain('require("./dist/config/jwt")');
+      // 镜像名按 compose 规则推出（<项目名>-backend），前提是 backend 服务只有 build、没有 image
+      const compose = fs.readFileSync(path.join(REPO_ROOT, 'docker-compose.prod.yml'), 'utf8');
+      const backend = compose.slice(compose.indexOf('\n  backend:'), compose.indexOf('\n  portal:'));
+      expect(backend).toMatch(/\n    build:/);
+      expect(backend).not.toMatch(/\n    image:/);
+    });
+
+    it('首次部署的判断在构建与校验之前（它们不能先建出 MySQL 数据卷）', () => {
+      const main = script.slice(script.indexOf('main() {'));
+      expect(main.indexOf('docker volume inspect prism_mysql_data')).toBeGreaterThan(0);
+      expect(main.indexOf('docker volume inspect prism_mysql_data')).toBeLessThan(main.indexOf('$COMPOSE build ||'));
+    });
+
+    it('不合格：退出码 1，只输出问题清单，不回显密钥', () => {
+      const weak = '0f1e2d3c4b5a6978'.repeat(4);
+      const { exitCode, errors } = runValidator(
+        rendered({ NODE_ENV: 'production', JWT_SECRET: weak, JWT_REFRESH_SECRET: STRONG_REFRESH }),
+      );
+      expect(exitCode).toBe(1);
+      expect(errors.join('\n')).toMatch(/JWT_SECRET .*相邻字节的差值只有/);
+      expect(errors.join('\n')).not.toContain(weak);
+      expect(errors.join('\n')).not.toContain(STRONG_REFRESH);
+    });
+
+    it('合格：不退出、不输出；NODE_ENV 一律按 production 校验', () => {
+      const ok = runValidator(rendered({ NODE_ENV: 'development', JWT_SECRET: STRONG, JWT_REFRESH_SECRET: STRONG_REFRESH }));
+      expect(ok).toEqual({ exitCode: undefined, errors: [] });
+      const weak = runValidator(rendered({ NODE_ENV: 'development', JWT_SECRET: 'weak', JWT_REFRESH_SECRET: STRONG_REFRESH }));
+      expect(weak.exitCode).toBe(1);
+    });
+
+    it('渲染结果里的 $$ 还原成容器实际拿到的 $（否则校验的不是同一个值）', () => {
+      // 容器拿到的是 STRONG 中间夹一个 $；渲染结果写作 $$
+      const withDollar = `${STRONG.slice(0, 30)}$${STRONG.slice(30)}`;
+      const escaped = withDollar.split('$').join('$$');
+      expect(runValidator(rendered({ JWT_SECRET: escaped, JWT_REFRESH_SECRET: STRONG_REFRESH }))).toEqual({
+        exitCode: undefined,
+        errors: [],
+      });
+      // 两把实际相同、只是渲染写法不同（$ 与 $$）时照样判为相同
+      const same = runValidator(rendered({ JWT_SECRET: escaped, JWT_REFRESH_SECRET: withDollar.split('$').join('$$') }));
+      expect(same.exitCode).toBe(1);
+      expect(same.errors.join('\n')).toMatch(/相同/);
+    });
+
+    it('stdin 不是合法的配置：退出码 2，不抛异常', () => {
+      expect(runValidator('')).toEqual({ exitCode: 2, errors: ['读不到 compose 渲染出的 backend 配置'] });
+      expect(runValidator('{"services":{}}').exitCode).toBe(2);
+    });
+
+    it('校验失败与构建失败都在 up 之前中止，提示容器均未改动', () => {
+      const fn = script.slice(script.indexOf('check_jwt_in_image() {'));
+      expect(fn.slice(0, fn.indexOf('\n}'))).toMatch(/die "[^"]*容器均未改动/);
+      expect(script).toMatch(/\$COMPOSE build \|\| die "[^"]*容器均未改动/);
+    });
   });
 });
 

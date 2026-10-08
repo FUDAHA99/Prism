@@ -89,11 +89,11 @@ bash scripts/deploy.sh
 
 脚本会自动完成（手工部署与 CI 部署执行的是同一份脚本）：
 1. `git pull` 拉取最新代码；`scripts/deploy.sh` 自身有更新时，自动改用新版本继续（`--skip-pull` 跳过这一步）
-2. 预检 `.env.prod` 的 JWT 密钥：两把都要设置、不短于 32 个字符、不是仓库里的示例/占位值、互不相同、不在已泄露清单里；不通过则中止，容器和 nginx 配置都不动（backend 启动时还会按完整规则再校验一次，见 5.3）
+2. 预检 JWT 密钥，两道都在动任何容器之前，不通过则中止，容器和 nginx 配置都不动（规则见 5.3）：先由脚本快速检查 `.env.prod` 的基本规则（两把都要设置、不短于 32 个字符、不是仓库里的示例/占位值、互不相同、不在已泄露清单里）；再构建全部镜像（backend / portal / frontend，此时运行中的容器不受影响），用新 backend 镜像起一个一次性容器（不联网、不挂卷、用完即删）直接调用 backend 的启动校验，被校验的值取自 compose 渲染出的配置，插值方式与 `up` 相同（shell 里导出的同名变量、未加引号的 `$` 都与 backend 实际拿到的一致），失败时只打印问题清单、不回显密钥
 3. 生成 nginx 生效配置 `nginx/nginx.active.conf`（`scripts/render-nginx-conf.sh`；HTTP / HTTPS 模式见第 7 节）
 4. 部署前校验：在一次性容器里对生成的配置跑 `nginx -t`，不依赖业务容器；不通过则中止，`nginx/nginx.active.conf` 换回部署前的内容，容器一个都不动（运行中的 nginx 重启后仍是原配置）
 5. 检测是否首次部署（自动设置 `DB_SYNC=true` 建表）；`.env.prod` 里写着 `DB_SYNC=true` 时打印警告
-6. 构建三个业务镜像（backend / portal / frontend），启动全部 6 个容器
+6. 用上一步构建好的镜像启动全部 6 个容器（`up -d` 不再构建）
 7. 等待 backend 就绪后接到真实 Docker 网络再跑一次 `nginx -t`，通过后强制重建 nginx 容器（每次部署 80/443 中断数秒，见第 7 节「nginx 配置变更如何生效」）
 8. 首次部署：运行 `seed-admin.js` 创建管理员账户，并配置每日自动备份；例行部署：backend 就绪后运行 `seed-admin.js --roles-only` 补齐 `admin` / `editor` 系统角色（不建账号、不改密码、不分配任何角色；没有可用的 `admin` 时打印警告和手工分配的命令，失败只警告、不中止部署，见 5.1）
 9. 清理悬空镜像（`docker image prune -f`）
@@ -160,7 +160,7 @@ $COMPOSE down
 ### 拉取最新代码并重部署
 
 ```bash
-bash scripts/deploy.sh   # 内含 git pull、生成并校验 nginx 配置、带 --env-file 的 up -d --build、重建 nginx
+bash scripts/deploy.sh   # 内含 git pull、JWT 密钥预检、构建镜像、生成并校验 nginx 配置、带 --env-file 的 up -d、重建 nginx
 ```
 
 > 已有服务器第一次升级到「nginx 生效配置改为 `nginx.active.conf`」的版本时，不要直接运行服务器上的旧 `deploy.sh`，先看第 5.1 节。
@@ -265,7 +265,7 @@ $COMPOSE exec -T backend node scripts/scrub-audit-logs.js --apply   # 写回
 
 ### 5.3 1-F 升级须知（已有部署升级到本版本前必读）
 
-**① 先轮换两把 JWT 密钥，再部署。** 从本版本起，backend 在 `NODE_ENV=production` 下拒绝启动的情形包括：密钥缺失、是仓库里的示例/占位值、短于 32 个字符、不同字符少于 12 个、含 8 个以上连续递增或递减的字符（如 `01234567`、`6789abcd`）、相邻字节（十六进制密钥）或相邻字符的差值种类过少（等差、字母数字交替循环这类按规律生成的值）、由一小段重复拼成、在已泄露清单里，以及两把相同、有 16 个以上字符的公共片段、一把是另一把的移位或简单变换（只差大小写、反转、按位取反 / 异或、半字节互换）。`scripts/deploy.sh` 会在 `up` 之前先按其中的基本规则预检，不合格时中止且不动任何容器。曾有一对密钥的前缀和生成规律出现在公开文档里，这对密钥已列入拒绝清单，按同一规律换个起点生成的值也会被上面的差值规则拒绝。所以不管现有密钥看起来是否合格，都请在部署前重新生成两把：
+**① 先轮换两把 JWT 密钥，再部署。** 从本版本起，backend 在 `NODE_ENV=production` 下拒绝启动的情形包括：密钥缺失、是仓库里的示例/占位值、短于 32 个字符、不同字符少于 12 个、含 8 个以上连续递增或递减的字符（如 `01234567`、`6789abcd`）、相邻字节（十六进制密钥）或相邻字符的差值种类过少（等差、字母数字交替循环这类按规律生成的值）、由一小段重复拼成、在已泄露清单里，以及两把相同、有 16 个以上字符的公共片段、一把是另一把的移位或简单变换（只差大小写、反转、按位取反 / 异或、半字节互换）。`scripts/deploy.sh` 会在 `up` 之前先用 bash 查一遍基本规则，再在新构建的 backend 镜像里按上面的完整规则校验 compose 实际传给 backend 的值，不合格时中止且不动任何容器。曾有一对密钥的前缀和生成规律出现在公开文档里，这对密钥已列入拒绝清单，按同一规律换个起点生成的值也会被上面的差值规则拒绝。所以不管现有密钥看起来是否合格，都请在部署前重新生成两把：
 
 ```bash
 cd /opt/prism-cms   # 项目目录
@@ -348,7 +348,7 @@ bash scripts/setup-ssl.sh admin@example.com
 - **不要在服务器上手改** `nginx/` 下的任何文件：`nginx.active.conf` 每次部署都会重新生成；两份受跟踪的配置手改后，HTTP 模式会原样生效且让下次 `git pull` 可能中止。改动一律走仓库提交。
 - **部署时两道 `nginx -t`**：
   1. 部署前（`scripts/check-nginx-conf.sh`）：一次性 `nginx:alpine` 容器，不接任何网络，upstream 主机名 `backend` / `portal` / `frontend` 用 `--add-host` 指到 127.0.0.1，只检查语法与语义（指令、正则、证书能否加载），不依赖业务容器是否在跑，首次部署也能用。不通过则部署中止，`nginx/nginx.active.conf` 换回部署前的内容，容器一个都不动。
-  2. 部署后：`up -d --build` 之后，接到 `prism-backend` 所在的真实网络、挂载与 nginx 服务一致再跑一次，通过后 `up -d --no-deps --force-recreate nginx`。这一步失败几乎都是 `host not found in upstream "xxx"`——对应的业务容器没在运行，不是配置问题；此时脚本不重建 nginx（重建了也起不来），线上旧 nginx 可能还指向业务容器的旧 IP（502），修好业务容器后手工执行下面最后一条命令。
+  2. 部署后：`up -d` 之后，接到 `prism-backend` 所在的真实网络、挂载与 nginx 服务一致再跑一次，通过后 `up -d --no-deps --force-recreate nginx`。这一步失败几乎都是 `host not found in upstream "xxx"`——对应的业务容器没在运行，不是配置问题；此时脚本不重建 nginx（重建了也起不来），线上旧 nginx 可能还指向业务容器的旧 IP（502），修好业务容器后手工执行下面最后一条命令。
 - **每次部署都重建 nginx，80/443 会中断数秒（已接受）**：单文件 bind mount 绑定的是 inode，render 用 `mv` 换了文件后运行中的容器仍读旧内容；upstream 也只在启动时解析一次，业务容器重建换 IP 后必须重建 nginx 才能连上。代价是每次部署都有几秒不可用：旧容器收到 SIGQUIT 后立即停止监听，最多再排空 10 秒，更长的请求（大文件上传、`/uploads/` 下视频的 Range 流）会被切断。要做到零中断，需要改为挂载 `nginx/` 目录、upstream 用 `resolver 127.0.0.11` 加变量形式的 `proxy_pass`、部署时 `nginx -t && nginx -s reload`，目前未做。
 - 手工执行的等价命令：
 
