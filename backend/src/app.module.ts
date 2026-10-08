@@ -8,6 +8,7 @@ import { ThrottlerBehindProxyGuard } from './common/guards/throttler-behind-prox
 // 配置导入
 import configuration from './config/configuration';
 import databaseConfig from './config/database.config';
+import { resolveRateLimit } from './config/rate-limit';
 
 // 模块导入
 import { AuthModule } from './modules/auth/auth.module';
@@ -48,14 +49,10 @@ import { RedisModule } from './shared/redis/redis.module';
     ThrottlerModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
+      // ttl 以毫秒计（此前默认值 60 意味着窗口只有 60 毫秒，形同没有限流）。
+      // 必须是数字：env 原样读出来是字符串，会让 Retry-After 变成垃圾值，见 resolveRateLimit
       useFactory: (configService: ConfigService) => ({
-        throttlers: [{
-          // @nestjs/throttler v5 的 ttl 以毫秒计
-          // （throttler.service.js: expiresAt = Date.now() + ttl）。
-          // 此前默认值 60 意味着限流窗口只有 60 毫秒，形同没有限流。
-          ttl: configService.get<number>('RATE_LIMIT_TTL', 60_000),
-          limit: configService.get<number>('RATE_LIMIT_COUNT', 100),
-        }],
+        throttlers: [resolveRateLimit(configService)],
       }),
     }),
     

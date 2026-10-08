@@ -18,8 +18,8 @@ export default registerAs('app', () => ({
   // 安全配置
   security: {
     bcryptSaltRounds: parseInt(process.env.BCRYPT_SALT_ROUNDS, 10) || 12,
-    rateLimitTtl: parseInt(process.env.RATE_LIMIT_TTL, 10) || 60,
-    rateLimitCount: parseInt(process.env.RATE_LIMIT_COUNT, 10) || 100,
+    // 全局限流 RATE_LIMIT_TTL（毫秒）/ RATE_LIMIT_COUNT 只在 config/rate-limit.ts 解析与校验。
+    // 这里原有的 rateLimitTtl/rateLimitCount 没有任何地方读取，且默认 60 还是「秒」时代的值，已删除
   },
   
   // 文件上传配置
