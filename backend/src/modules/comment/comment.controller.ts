@@ -11,7 +11,9 @@ import {
   HttpStatus,
   DefaultValuePipe,
   ParseIntPipe,
+  Req,
 } from '@nestjs/common';
+import { Request } from 'express';
 import {
   ApiTags,
   ApiOperation,
@@ -21,12 +23,15 @@ import {
 } from '@nestjs/swagger';
 import { CommentService, COMMENT_PAGE_SIZE_DEFAULT, COMMENT_PAGE_SIZE_MAX } from './comment.service';
 import { CreateCommentDto } from './dto/create-comment.dto';
+import { CommentBatchDto } from './dto/comment-batch.dto';
 import { Access } from '../../common/authz/access.decorator';
+import { CurrentViewer, Viewer } from '../../common/authz/viewer';
+import { clientIp } from '../../common/utils/client-ip';
 
 /**
  * 评论管理端（读全字段含 guestEmail / 审核 / 删除）只对后台角色开放：Access('staff')。
  * 前台只用 GET /public（public）与 POST /（optional：严格可选登录，带了无效 token 得 401；
- * 门户发评论从不带 token。评论身份改由服务端按 req.user 填写在 1-F-2 的后续提交）。
+ * 门户发评论从不带 token）。发评论的身份（userId）、来源 IP 与审核状态由服务端填写，见 CommentService.create。
  */
 @ApiTags('评论管理')
 @Controller('comments')
@@ -79,11 +84,13 @@ export class CommentController {
 
   @Post()
   @Access('optional')
-  @ApiOperation({ summary: '创建评论' })
-  @ApiResponse({ status: 201, description: '创建成功' })
-  async create(@Body() dto: CreateCommentDto) {
-    const comment = await this.commentService.create(dto);
-    return comment;
+  @ApiOperation({ summary: '发表评论（身份取登录态，IP 取请求来源，是否审核取站点配置）' })
+  @ApiResponse({ status: 201, description: '创建成功，返回公开视图（status 为 pending 时须审核后公开）' })
+  @ApiResponse({ status: 403, description: '评论功能已关闭' })
+  @ApiResponse({ status: 404, description: '评论的内容不存在或未发布' })
+  async create(@Body() dto: CreateCommentDto, @CurrentViewer() viewer: Viewer, @Req() req: Request) {
+    const ip = clientIp(req);
+    return this.commentService.create(dto, { viewer, ip: ip === 'unknown' ? null : ip });
   }
 
   @Patch(':id/approve')
@@ -123,26 +130,26 @@ export class CommentController {
   @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '批量审核通过' })
-  async batchApprove(@Body('ids') ids: string[]) {
-    await this.commentService.batchApprove(ids);
-    return { affected: ids.length };
+  async batchApprove(@Body() dto: CommentBatchDto) {
+    await this.commentService.batchApprove(dto.ids);
+    return { affected: dto.ids.length };
   }
 
   @Post('batch/spam')
   @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '批量标记 Spam' })
-  async batchSpam(@Body('ids') ids: string[]) {
-    await this.commentService.batchSpam(ids);
-    return { affected: ids.length };
+  async batchSpam(@Body() dto: CommentBatchDto) {
+    await this.commentService.batchSpam(dto.ids);
+    return { affected: dto.ids.length };
   }
 
   @Post('batch/delete')
   @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '批量删除' })
-  async batchDelete(@Body('ids') ids: string[]) {
-    await this.commentService.batchDelete(ids);
-    return { affected: ids.length };
+  async batchDelete(@Body() dto: CommentBatchDto) {
+    await this.commentService.batchDelete(dto.ids);
+    return { affected: dto.ids.length };
   }
 }

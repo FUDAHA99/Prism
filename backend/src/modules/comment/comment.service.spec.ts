@@ -1,5 +1,5 @@
 import { SelectQueryBuilder } from 'typeorm';
-import { CommentService } from './comment.service';
+import { CommentService, commentPolicyFrom } from './comment.service';
 import { Comment } from './entities/comment.entity';
 
 function row(p: Partial<Comment>): Comment {
@@ -18,7 +18,9 @@ describe('CommentService.findApprovedByContent（公共接口出参白名单）'
     row({ id: 'c', guestName: null, userId: 'u-1' }),
   ];
   const repo = { find: jest.fn().mockResolvedValue(rows) };
-  const svc = new CommentService(repo as any);
+  // 被评论的内容已发布：count 命中 1 行
+  const contents = { count: jest.fn().mockResolvedValue(1) };
+  const svc = new CommentService(repo as any, contents as any, {} as any);
 
   it('查询只 select 白名单列，不取 guestEmail / ipAddress', async () => {
     await svc.findApprovedByContent('c1');
@@ -38,6 +40,44 @@ describe('CommentService.findApprovedByContent（公共接口出参白名单）'
       ['body', 'children', 'contentId', 'createdAt', 'guestName', 'id', 'isRegistered', 'parentId', 'status'],
     );
   });
+
+  it('只看已发布内容：查内容时带 status=published', async () => {
+    contents.count.mockClear();
+    await svc.findApprovedByContent('c1');
+    expect(contents.count).toHaveBeenCalledWith({ where: { id: 'c1', status: 'published' } });
+  });
+
+  it('内容不存在 / 未发布 / 已删除：返回空列表，不再查评论', async () => {
+    const commentRepo = { find: jest.fn().mockResolvedValue(rows) };
+    const hidden = new CommentService(commentRepo as any, { count: jest.fn().mockResolvedValue(0) } as any, {} as any);
+    expect(await hidden.findApprovedByContent('c1')).toEqual([]);
+    expect(await hidden.findApprovedByContent('')).toEqual([]);
+    expect(commentRepo.find).not.toHaveBeenCalled();
+  });
+});
+
+describe('commentPolicyFrom（站点配置 → 评论策略）', () => {
+  const policy = (entries: Array<[string, string | null]>) => commentPolicyFrom(new Map(entries));
+
+  it('后台能写出的两种值：与门户 getSiteConfig 的解读一致', () => {
+    expect(policy([['enable_comment', 'true'], ['comment_audit', 'true']])).toEqual({ enabled: true, requireAudit: true });
+    expect(policy([['enable_comment', 'true'], ['comment_audit', 'false']])).toEqual({ enabled: true, requireAudit: false });
+    expect(policy([['enable_comment', 'false'], ['comment_audit', 'true']])).toEqual({ enabled: false, requireAudit: true });
+  });
+
+  it('没有这一行 / NULL：开关按默认开启，审核按默认需要', () => {
+    expect(policy([])).toEqual({ enabled: true, requireAudit: true });
+    expect(policy([['enable_comment', null], ['comment_audit', null]])).toEqual({ enabled: true, requireAudit: true });
+  });
+
+  it('其他写法：评论只认 "true" 才开启，审核只认 "false" 才免审', () => {
+    for (const v of ['', '1', 'TRUE', 'yes', ' true']) {
+      expect(policy([['enable_comment', v]]).enabled).toBe(false);
+    }
+    for (const v of ['', '0', 'FALSE', 'no', ' false']) {
+      expect(policy([['comment_audit', v]]).requireAudit).toBe(true);
+    }
+  });
 });
 
 describe('CommentService.findAll（管理端分页参数）', () => {
@@ -52,7 +92,7 @@ describe('CommentService.findAll（管理端分页参数）', () => {
   }
   async function run(query: Record<string, unknown>) {
     const { qb, repo } = fakeRepo();
-    const out = await new CommentService(repo as any).findAll(query as any);
+    const out = await new CommentService(repo as any, {} as any, {} as any).findAll(query as any);
     return { skip: qb.expressionMap.skip, take: qb.expressionMap.take, meta: out.meta };
   }
 

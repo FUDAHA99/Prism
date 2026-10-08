@@ -9,7 +9,6 @@ import type {
   Category,
   Comic,
   ComicChapter,
-  Comment,
   Content,
   Movie,
   MovieType,
@@ -118,16 +117,20 @@ export async function getCommentsByContent(
   })
 }
 
+/**
+ * 发评论。发评论者身份、IP、是否需要审核都由后端决定（请求体带 userId / ipAddress / status 会被 400）；
+ * 返回公开视图，status 为 pending 时须审核后才公开。
+ */
 export async function createComment(payload: {
   contentId: string
   parentId?: string
-  /** 游客昵称（必填，除非传 userId 走登录用户） */
+  /** 游客昵称 */
   guestName: string
-  /** 游客邮箱 */
+  /** 游客邮箱（不公开） */
   guestEmail: string
   body: string
-}): Promise<Comment> {
-  return request<Comment>('/comments', {
+}): Promise<PublicComment> {
+  return request<PublicComment>('/comments', {
     method: 'POST',
     body: JSON.stringify(payload),
     revalidate: 0,

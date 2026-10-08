@@ -311,30 +311,54 @@
 
 ## 五、评论模块 `/comments`
 
-🔒 全部需要认证
+门户只用 5.1 / 5.2；其余接口需要后台角色（admin / editor）。
 
-### 5.1 获取评论列表
-`GET /comments`
+### 5.1 获取某篇文章的公开评论（门户）
+`GET /comments/public?contentId=uuid`  公开
 
-**查询参数**: `status`（`pending`/`approved`/`spam`/`rejected`）、`contentId`、`page`、`limit`
+只返回**已发布且未删除**内容下 `approved` 的评论，按回复关系组成树；内容不存在、未发布或已删除时返回 `[]`。
+每条只含 `id`、`contentId`、`parentId`、`guestName`、`body`、`status`、`createdAt`、`isRegistered`、`children`，
+不含邮箱、IP、用户 ID。
 
-### 5.2 审核通过
-`PATCH /comments/:id/approve`
+### 5.2 发表评论
+`POST /comments`  可选登录（不带 token 即游客；带了 token 就必须有效，否则 401）
 
-### 5.3 标记 Spam
-`PATCH /comments/:id/spam`
+```json
+{ "contentId": "uuid", "guestName": "路人甲", "guestEmail": "a@example.com", "body": "评论内容", "parentId": "uuid（可选，回复）" }
+```
 
-### 5.4 批量审核
-`POST /comments/batch-approve`
+| 字段 | 规则 |
+|------|------|
+| `contentId` | 必填，已发布内容的 ID（否则 404「评论的内容不存在或未发布」） |
+| `parentId` | 可选，同一内容下已公开评论的 ID（否则 400） |
+| `guestName` | 可选，≤ 50 字符 |
+| `guestEmail` | 可选，填了须是合法邮箱、≤ 100 字符；空串按没填处理 |
+| `body` | 必填，不能全是空白，≤ 2000 字符 |
+
+由服务端决定、**不接受客户端提交**（带上即 400）：`userId`（取登录身份）、`ipAddress`（取请求来源 IP）、`status`。
+
+- 站点配置 `enable_comment` 不是 `true` 时 403「评论功能已关闭」；
+- `comment_audit` 为 `false` 时评论直接 `approved`（立即公开），否则为 `pending`（审核后公开）；
+- 登录用户发评论：显示名取账号昵称（没有则用户名），请求体里的 `guestName` / `guestEmail` 被忽略。
+
+返回与 5.1 相同形状的单条评论；门户据返回的 `status` 提示「审核通过后公开」或直接刷新列表。
+
+### 5.3 获取评论列表（后台）
+`GET /comments`  🔒 admin / editor
+
+**查询参数**: `status`（`pending`/`approved`/`spam`）、`contentId`、`page`（默认 1）、`limit`（默认 20，最大 100）
+
+返回完整字段（含 `guestEmail`、`ipAddress`、`userId`），供审核使用。
+
+### 5.4 审核通过 / 标记 Spam / 删除
+`PATCH /comments/:id/approve`、`PATCH /comments/:id/spam`、`DELETE /comments/:id`  🔒 admin / editor
+
+### 5.5 批量操作
+`POST /comments/batch/approve`、`POST /comments/batch/spam`、`POST /comments/batch/delete`  🔒 admin / editor
 ```json
 { "ids": ["uuid1", "uuid2"] }
 ```
-
-### 5.5 批量删除
-`DELETE /comments/batch`
-```json
-{ "ids": ["uuid1", "uuid2"] }
-```
+`ids` 为 1–100 个评论 ID，返回 `{ "affected": n }`。
 
 ---
 

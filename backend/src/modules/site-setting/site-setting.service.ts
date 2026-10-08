@@ -1,6 +1,6 @@
 import { Injectable, OnModuleInit, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { SiteSetting } from './entities/site-setting.entity';
 
 interface DefaultSetting {
@@ -66,6 +66,19 @@ export class SiteSettingService implements OnModuleInit {
     return all
       .filter((s) => PUBLIC_KEYS.includes(s.key))
       .map((s) => ({ key: s.key, value: s.value, group: s.group }));
+  }
+
+  /**
+   * 按 key 取原始值，只查这几行（服务端执行配置时用，例如评论开关）。
+   * 库里没有的 key 不出现在结果里；值为 NULL 的 key 映射为 null。调用方自己决定缺省值。
+   */
+  async findValues(keys: readonly string[]): Promise<Map<string, string | null>> {
+    if (keys.length === 0) return new Map();
+    const rows = await this.siteSettingRepository.find({
+      select: { key: true, value: true },
+      where: { key: In([...keys]) },
+    });
+    return new Map(rows.map((row) => [row.key, row.value ?? null]));
   }
 
   async findAll(): Promise<SiteSetting[]> {

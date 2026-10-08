@@ -49,23 +49,10 @@ export interface Content {
   tags?: Tag[]
 }
 
-export interface Comment {
-  id: string
-  contentId: string
-  parentId?: string | null
-  /** 游客昵称（注册用户评论时为空） */
-  guestName?: string | null
-  /** 游客邮箱（不在前台展示） */
-  guestEmail?: string | null
-  /** 注册用户 ID（与 guestName 二选一） */
-  userId?: string | null
-  body: string
-  status: 'pending' | 'approved' | 'spam' | string
-  createdAt: string
-  children?: Comment[]
-}
-
-/** GET /comments/public 的出参（后端白名单，见 backend comment.service.ts PublicComment）。不含 guestEmail / ipAddress / userId。 */
+/**
+ * GET /comments/public 与 POST /comments 的出参（后端白名单，见 backend comment.service.ts PublicComment）。
+ * 不含 guestEmail / ipAddress / userId；门户拿不到评论表的完整行。
+ */
 export interface PublicComment {
   id: string
   contentId: string | null

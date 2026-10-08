@@ -83,13 +83,16 @@ export default function CommentSection({ contentId, enabled, needAudit }: Props)
       if (json.success) {
         // 只清空正文，保留昵称/邮箱方便连续发言
         setForm((f) => ({ ...f, body: '' }))
+        // 是否需要审核以后端返回的 status 为准（后端按站点配置 comment_audit 决定）；
+        // 页面上的 needAudit 来自缓存的站点配置，后台刚改过开关时可能过期
+        const pending = (json.data as PublicComment | undefined)?.status !== 'approved'
         setHintKind('success')
         setHint(
-          needAudit
+          pending
             ? '✅ 评论已提交，审核通过后将公开显示'
             : '✅ 评论提交成功',
         )
-        if (!needAudit) await fetchComments()
+        if (!pending) await fetchComments()
       } else {
         setHintKind('error')
         // 后端校验消息可能是数组，也可能是单条字符串；统一兜底
