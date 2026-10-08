@@ -407,6 +407,31 @@ curl http://localhost/api/v1/auth/login \
   -d '{"email":"admin@cms.com","password":"Admin123!"}'
 ```
 
+### 管理员登录提示「登录尝试次数过多，请15分钟后再试」
+
+登录失败锁定的规则（计数存在 Redis，15 分钟窗口，每次失败重新计时）：
+
+- **同一账号 + 同一 IP 失败 5 次**：该 IP 对该账号锁定。对所有 IP 都生效，包括管理员自己常用的 IP。
+- **同一账号累计失败 20 次（任意 IP）**：该账号对「30 天内没有成功登录过它的 IP」锁定。成功登录过的 IP 不受这一条影响，所以别人从几个 IP 故意输错，只能挡住新 IP，挡不住管理员平时登录的地方。改密或管理员重置密码时会清空这份受信任 IP 名单，之后再登录一次即重新记入。
+- 「同一账号」按数据库里的用户 ID 认定；登录和注册的邮箱只接受 ASCII 字符（`ádmin@`、全角字母这类写法直接返回 400）。
+
+等 15 分钟会自动解除。急用时在项目目录手工删除计数。Redis 里的真实键名带缓存库加的 `keyv::keyv:` 前缀：账号级计数是 `keyv::keyv:login_attempts:account:uid:<用户ID>`，每 IP 计数是 `keyv::keyv:login_attempts:ip:<IP>:uid:<用户ID>`。
+
+```bash
+cd /opt/prism-cms   # 项目目录
+# 1) 查出被锁账号的 ID（把邮箱换成实际被锁的那个）
+docker exec -i prism-mysql sh -c 'exec mysql --default-character-set=utf8mb4 -N -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' <<'SQL'
+SELECT id FROM users WHERE email = 'admin@cms.com' AND deletedAt IS NULL;
+SQL
+uid='<上一步输出的 ID>'
+# 2) 先列出该账号的计数键，再全部删除（账号级 + 各 IP）
+rp="$(grep -E '^REDIS_PASSWORD=' .env.prod | tail -n 1 | cut -d= -f2-)"
+docker exec -e REDISCLI_AUTH="$rp" prism-redis redis-cli --scan --pattern "keyv::keyv:login_attempts:*uid:$uid"
+docker exec -e REDISCLI_AUTH="$rp" prism-redis sh -c 'redis-cli --scan --pattern "$1" | xargs -r redis-cli DEL' _ "keyv::keyv:login_attempts:*uid:$uid"
+```
+
+`.env.prod` 里的 `REDIS_PASSWORD` 如果带引号，`rp` 要去掉引号。受信任 IP 名单存在 `keyv::keyv:login:trusted:<用户ID>`（JSON 数组，每条 30 天），怀疑口令泄露时直接改密即可清空。对不存在的邮箱的失败计数记在 `keyv::keyv:login_attempts:account:email:<邮箱>`，不用处理。
+
 ### 门户图片不显示
 
 检查 `DOMAIN` 环境变量是否正确填写了服务器的实际域名/IP。

@@ -19,7 +19,7 @@ import { ThrottlerBehindProxyGuard } from '../../common/guards/throttler-behind-
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { accessBlacklistKey, refreshBlacklistKey } from './token-blacklist.util';
-import { accountAttemptsKey, ipAttemptsKey } from './login-attempts';
+import { accountAttemptsKey, ipAttemptsKey, trustedIpsKey } from './login-attempts';
 import { UserService } from '../user/user.service';
 import { RoleService } from '../role/role.service';
 import { AuditService } from '../audit/audit.service';
@@ -593,7 +593,7 @@ describe('认证核心安全行为', () => {
       expect((await attempt(u.email, u.password, '198.51.100.21')).status).toBe(200);
     });
 
-    it('换真实 IP 分布式猜测：同一账号累计失败 20 次后任何 IP 都锁定', async () => {
+    it('换真实 IP 分布式猜测：同一账号累计失败 20 次后，没成功登录过的 IP 都锁定', async () => {
       const u = await freshUser();
       for (let ipIndex = 0; ipIndex < 4; ipIndex += 1) {
         for (let i = 0; i < 5; i += 1) {
@@ -601,6 +601,55 @@ describe('认证核心安全行为', () => {
         }
       }
       expect((await attempt(u.email, u.password, '203.0.113.200')).status).toBe(429);
+    });
+
+    describe('账号级锁定不锁成功登录过的 IP（login:trusted:<userId>）', () => {
+      it('攻击者从 4 个 IP 各错 5 次把账号锁住：管理员常用 IP 仍能登录，新 IP 仍是 429', async () => {
+        const u = await freshUser();
+        expect((await attempt(u.email, u.password, '198.51.100.7')).status).toBe(200);
+        const trusted = (await h.cache.get<Array<{ ip: string }>>(trustedIpsKey(u.id))) ?? [];
+        expect(trusted.map((t) => t.ip)).toEqual(['198.51.100.7']);
+        expect(h.cache.ttls.get(trustedIpsKey(u.id))).toBe(30 * 24 * 60 * 60 * 1000);
+
+        for (let ipIndex = 0; ipIndex < 4; ipIndex += 1) {
+          for (let i = 0; i < 5; i += 1) {
+            expect((await attempt(u.email, 'Wrong1234', `203.0.113.${50 + ipIndex}`)).status).toBe(401);
+          }
+        }
+        expect(await h.cache.get(accountKey(u.id))).toBe(20);
+        expect((await attempt(u.email, u.password, '203.0.113.99')).status).toBe(429);
+        expect((await attempt(u.email, u.password, '198.51.100.7')).status).toBe(200);
+      });
+
+      it('受信任 IP 仍受每 IP 上限约束：自己错 5 次照样 429', async () => {
+        const u = await freshUser();
+        expect((await attempt(u.email, u.password, '198.51.100.8')).status).toBe(200);
+        for (let i = 0; i < 5; i += 1) {
+          expect((await attempt(u.email, 'Wrong1234', '198.51.100.8')).status).toBe(401);
+        }
+        expect((await attempt(u.email, u.password, '198.51.100.8')).status).toBe(429);
+      });
+
+      it('只有签发成功才记为受信任：口令错误、DTO 不过、被锁时都不记', async () => {
+        const u = await freshUser();
+        await attempt(u.email, 'Wrong1234', '198.51.100.9');
+        await attempt(`${u.email}\u200b`, u.password, '198.51.100.9');
+        expect(await h.cache.get(trustedIpsKey(u.id))).toBeUndefined();
+      });
+
+      it('改密后清空受信任 IP（凭旧口令登录成功过的 IP 不再豁免）', async () => {
+        const u = await freshUser();
+        const res = await attempt(u.email, u.password, '198.51.100.10');
+        expect(res.status).toBe(200);
+        expect(await h.cache.get(trustedIpsKey(u.id))).toBeDefined();
+        await h
+          .http()
+          .post('/auth/change-password')
+          .set('Authorization', `Bearer ${res.body.tokens.accessToken}`)
+          .send({ currentPassword: u.password, newPassword: 'Changed2026' })
+          .expect(200);
+        expect(await h.cache.get(trustedIpsKey(u.id))).toBeUndefined();
+      });
     });
 
     it('并发猜密码按顺序计数，不会因读写竞争多试', async () => {

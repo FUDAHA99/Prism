@@ -20,6 +20,7 @@ import { AuditService } from '../audit/audit.service';
 import { changedAuditFields, pickAuditFields } from '../audit/audit-summary';
 import { SafeUser, toSafeUser } from './user-fields';
 import { revokeTokensIssuedBefore } from '../auth/token-revocation';
+import { forgetTrustedIps } from '../auth/login-attempts';
 import { ADMIN_ROLES } from '../../common/authz/access.decorator';
 import { userCacheKey } from './user-cache';
 
@@ -176,12 +177,16 @@ export class UserService {
       .getOne();
   }
 
-  /** 改密码的唯一落库入口之一（另一处是 update 的管理员重置分支）：写完即吊销该用户之前签发的全部 token */
+  /**
+   * 改密码的唯一落库入口之一（另一处是 update 的管理员重置分支）：写完即吊销该用户之前签发的全部 token，
+   * 并清空登录的受信任 IP（此前凭旧口令登录成功过的 IP 不再豁免账号级失败上限）
+   */
   async updatePassword(id: string, newPassword: string): Promise<void> {
     const passwordHash = await this.hashPassword(newPassword);
     await this.userRepository.update(id, { passwordHash });
     await this.clearUserCache(id);
     await revokeTokensIssuedBefore(this.cacheManager, id);
+    await forgetTrustedIps(this.cacheManager, id);
   }
 
   async update(
@@ -214,8 +219,9 @@ export class UserService {
     await this.userRepository.update(id, updateData);
     await this.clearUserCache(id);
     if ((updateData as any).passwordHash) {
-      // 管理员重置密码：该用户已签发的 token（可能已经泄露）一并作废
+      // 管理员重置密码：该用户已签发的 token（可能已经泄露）一并作废，受信任 IP 一并清空
       await revokeTokensIssuedBefore(this.cacheManager, id);
+      await forgetTrustedIps(this.cacheManager, id);
     }
 
     // 只记白名单字段里真正变了的前后值，密码只记"改过"这一事实：

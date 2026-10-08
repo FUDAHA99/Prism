@@ -28,7 +28,9 @@ import {
   LOGIN_BLOCK_TIME_MS,
   accountAttemptsKey,
   ipAttemptsKey,
+  isTrustedIp,
   loginSubject,
+  rememberTrustedIp,
 } from './login-attempts';
 
 import { SafeUser, toSafeUser } from '../user/user-fields';
@@ -58,9 +60,11 @@ export class AuthService {
   /**
    * 登录失败锁定（15 分钟滑动窗口，每次失败重新计时）：
    * - 同一账号 + 同一 IP 失败 MAX_LOGIN_ATTEMPTS 次 → 该 IP 对该账号锁定；
-   * - 同一账号（任意 IP）失败 MAX_ACCOUNT_FAILURES 次 → 该账号锁定，挡住换 IP 的分布式猜测。
+   * - 同一账号（任意 IP）失败 MAX_ACCOUNT_FAILURES 次 → 该账号对「没有成功登录过它的 IP」锁定，
+   *   挡住换 IP 的分布式猜测；成功登录过的 IP（login:trusted:<userId>，30 天）不受账号级上限影响，
+   *   只受每 IP 上限约束 —— 否则攻击者从几个 IP 各错几次就能把唯一的管理员锁在外面。
    * 「同一账号」按数据库查出的 user.id 认定（见 login-attempts.ts），IP 取 req.ip（客户端无法伪造）。
-   * 账号级上限故意放宽：定点锁死别人的账号需要从多个真实 IP 各失败几次。
+   * 运维手工解锁见 docs/deploy.md「管理员登录提示登录尝试次数过多」。
    */
   static readonly MAX_LOGIN_ATTEMPTS = 5;
   static readonly MAX_ACCOUNT_FAILURES = 20;
@@ -101,7 +105,7 @@ export class AuthService {
     const subject = loginSubject(account, email);
 
     const validated = await this.loginLocks.run(subject, async () => {
-      await this.checkLoginAttempts(subject, ip);
+      await this.checkLoginAttempts(subject, ip, account?.id);
       const user = await this.checkPassword(account, password);
       if (user) {
         await this.cacheManager.del(ipAttemptsKey(subject, ip));
@@ -122,6 +126,8 @@ export class AuthService {
     };
 
     const tokens = await this.generateTokens(user, this.refreshLifetimeSec(rememberMe));
+    // 签发成功才算「成功登录过」：此后该 IP 不受账号级上限影响（与失败计数同一把锁，读-改-写不丢）
+    await this.loginLocks.run(subject, () => rememberTrustedIp(this.cacheManager, user.id, ip));
     await this.recordSuccessfulLogin(user, ip, userAgent);
     await this.userService.updateLastLogin(user.id);
 
@@ -437,16 +443,20 @@ export class AuthService {
     }
   }
 
-  /** 锁定期间直接 429，不再校验口令（不给继续猜的机会，也不白耗 bcrypt） */
-  private async checkLoginAttempts(subject: string, ip: string): Promise<void> {
+  /**
+   * 锁定期间直接 429，不再校验口令（不给继续猜的机会，也不白耗 bcrypt）。
+   * 每 IP 上限对所有人生效；账号级上限只对没有成功登录过该账号的 IP 生效（userId 为空即账号不存在）。
+   */
+  private async checkLoginAttempts(subject: string, ip: string, userId?: string): Promise<void> {
     const [byIp, byAccount] = await Promise.all([
       this.cacheManager.get<number>(ipAttemptsKey(subject, ip)),
       this.cacheManager.get<number>(accountAttemptsKey(subject)),
     ]);
-    if (
-      (byIp || 0) >= AuthService.MAX_LOGIN_ATTEMPTS ||
-      (byAccount || 0) >= AuthService.MAX_ACCOUNT_FAILURES
-    ) {
+    const ipLocked = (byIp || 0) >= AuthService.MAX_LOGIN_ATTEMPTS;
+    const accountLocked =
+      (byAccount || 0) >= AuthService.MAX_ACCOUNT_FAILURES &&
+      !(userId && (await isTrustedIp(this.cacheManager, userId, ip)));
+    if (ipLocked || accountLocked) {
       throw new HttpException('登录尝试次数过多，请15分钟后再试', HttpStatus.TOO_MANY_REQUESTS);
     }
   }
