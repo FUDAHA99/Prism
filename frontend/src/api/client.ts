@@ -38,11 +38,17 @@ apiClient.interceptors.response.use(
       }
     }
 
-    // nginx 的 413 是 HTML、后端的 413 是英文 'File too large'，统一给中文提示；
-    // 其余取后端 JSON 的 message
+    // 413 的 body 不可用（nginx 是 HTML、后端是英文），统一给中文提示，但要分来源：
+    // - 文件上传（FormData）：撞的是 nginx/multer 的上传上限 → 提示 10MB
+    // - 普通 JSON 提交：撞的是后端 body-parser 默认 100kb（如很长的小说章节），
+    //   与上传上限无关，提示 10MB 会误导
+    // axios 的 transformRequest 对 FormData 原样透传，error.config.data 仍是 FormData 实例
+    const isUpload = error.config?.data instanceof FormData
     const message =
       status === 413
-        ? '文件过大，超过服务器允许的上传上限（10MB）'
+        ? isUpload
+          ? '文件过大，超过服务器允许的上传上限（10MB）'
+          : '提交内容过大，请缩减后重试'
         : error.response?.data?.message ??
           error.response?.data?.error ??
           error.message ??
