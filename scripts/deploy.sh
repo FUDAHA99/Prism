@@ -15,7 +15,8 @@
 #                             本脚本 re-exec 前的自己）做过 nginx/nginx.conf 一次性迁移时传入备份路径，
 #                             nginx 在新 compose 上重建成功之前部署失败就把它拷回（见 on_exit）
 #
-# 流程：拉代码（脚本自身有更新则改跑新版）→ 生成 nginx/nginx.active.conf
+# 流程：拉代码（脚本自身有更新则改跑新版）→ 预检 .env.prod 的 JWT 密钥（不合格则中止，容器都不动）
+#   → 生成 nginx/nginx.active.conf
 #   → 部署前 nginx -t（一次性容器；失败则中止，生效配置换回部署前的内容，容器都不动）
 #   → up -d --build → 等 backend → 部署后 nginx -t（真实网络）→ 重建 nginx（80/443 中断数秒）
 #   → 首次部署：建管理员 + 备份 crontab → 清理旧镜像
@@ -136,6 +137,81 @@ pull_code() {
   fi
 }
 
+# ── JWT 密钥预检（up 之前，容器一个都不动）────────────────────────────
+# backend 在 NODE_ENV=production 下遇到弱密钥会拒绝启动（backend/src/config/jwt.ts），但那时 up -d
+# 已经替换掉旧容器，新容器反复崩溃，整站 API 502。这里先用其中的基本规则拦一遍：长度、占位符、
+# 两把相同、已泄露清单。其余规则（字符种类、连续字符、公共片段、移位）以 backend 启动校验为准。
+# 下面三项与 jwt.ts 必须一致，backend/src/config/jwt.spec.ts 会比对。
+JWT_MIN_LENGTH=32
+JWT_PLACEHOLDER_PATTERN='change[-_ ]?(this|me|in[-_ ]?production)|请替换|^your[-_]'
+# 已泄露密钥的 sha256（前缀与生成规律曾写在公开文档里，2026-10-08 轮换）
+LEAKED_JWT_SECRET_SHA256=(
+  745e055d58ff36ae766b8625e324c7bb6d990d9af2cd61a8b48d558ce3c87f64
+  fdeac694c933ee25a56651bf93f0cb1e49086f78a369c44aaeea9ee1af970a75
+)
+
+# 读 .env.prod 里 KEY 的最后一次赋值，按 compose env 文件的常见写法：可带 export、= 两侧空白、
+# 成对引号，未加引号时去掉行尾「 #注释」与 CRLF。没有这一行返回 1。值只经变量传递，不输出。
+env_prod_value() {
+  local key=$1 line value trimmed
+  line=$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}[[:space:]]*=" .env.prod | tail -n 1) || return 1
+  value=${line#*=}
+  value=${value%$'\r'}
+  trimmed=${value#"${value%%[![:space:]]*}"}
+  if [[ $trimmed == \"* ]]; then
+    value=${trimmed#\"}; value=${value%%\"*}
+  elif [[ $trimmed == \'* ]]; then
+    value=${trimmed#\'}; value=${value%%\'*}
+  else
+    # 先去注释再去首尾空白：「KEY=   # 说明」是空值
+    value=${value%%[[:space:]]#*}
+    value=${value#"${value%%[![:space:]]*}"}
+    value=${value%"${value##*[![:space:]]}"}
+  fi
+  printf '%s' "$value"
+}
+
+sha256_of() {
+  if command -v sha256sum &>/dev/null; then
+    printf '%s' "$1" | sha256sum | awk '{print $1}'
+  elif command -v shasum &>/dev/null; then
+    printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+  else
+    printf '%s' "$1" | openssl dgst -sha256 | awk '{print $NF}'
+  fi
+}
+
+check_jwt_secrets() {
+  command -v sha256sum &>/dev/null || command -v shasum &>/dev/null || command -v openssl &>/dev/null \
+    || die "JWT 密钥预检需要 sha256sum（coreutils）、shasum 或 openssl 之一"
+  local key value hash leaked lowered problems=() access="" refresh=""
+  for key in JWT_SECRET JWT_REFRESH_SECRET; do
+    if ! value=$(env_prod_value "$key") || [ -z "${value//[[:space:]]/}" ]; then
+      problems+=("$key 未设置")
+      continue
+    fi
+    [ "${#value}" -ge "$JWT_MIN_LENGTH" ] || problems+=("$key 短于 $JWT_MIN_LENGTH 个字符")
+    lowered=${value,,}
+    if [[ $lowered =~ $JWT_PLACEHOLDER_PATTERN ]]; then
+      problems+=("$key 是仓库里的示例/占位值")
+    fi
+    hash=$(sha256_of "$value")
+    for leaked in "${LEAKED_JWT_SECRET_SHA256[@]}"; do
+      [ "$hash" != "$leaked" ] || problems+=("$key 是已泄露的密钥（已列入拒绝清单）")
+    done
+    if [ "$key" = JWT_SECRET ]; then access=$value; else refresh=$value; fi
+  done
+  if [ -n "$access" ] && [ "$access" = "$refresh" ]; then
+    problems+=("JWT_SECRET 与 JWT_REFRESH_SECRET 相同")
+  fi
+  if [ "${#problems[@]}" -gt 0 ]; then
+    local p
+    for p in "${problems[@]}"; do echo -e "${RED}[✗]${NC} .env.prod：$p" >&2; done
+    die "JWT 密钥不合格，部署中止（容器均未改动）。用 openssl rand -hex 32 分别生成两把新密钥写入 .env.prod 后重新部署（见 docs/deploy.md 5.3）"
+  fi
+  log "JWT 密钥预检通过（完整规则由 backend 启动时校验）"
+}
+
 # ── 部署后 nginx -t：接到真实 Docker 网络，确认 upstream 主机名都能解析 ─────
 post_check_nginx() {
   local net
@@ -194,6 +270,9 @@ main() {
   else
     pull_code
   fi
+
+  # ── JWT 密钥预检：不合格就在动任何容器、任何 nginx 配置之前中止 ──────────
+  check_jwt_secrets
 
   # ── 生成 nginx 生效配置 ───────────────────────────────────────
   # 先给原来的 nginx.active.conf 留快照：开始 up 之前失败由 on_exit 恢复（render 自身失败时不动它）

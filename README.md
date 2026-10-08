@@ -111,7 +111,8 @@ bash scripts/deploy.sh
 
 > ⚠️ **唯一的生产部署入口是 `scripts/deploy.sh`**，它固定使用 `docker-compose.prod.yml` + `.env.prod`；GitHub Actions 自动部署（`.github/workflows/deploy.yml`）`git pull` 后调用的也是这一份脚本。
 > - 根目录的 `docker-compose.yml` 只用于本地开发：它把 MySQL(3306) / Redis(6379) / Adminer(8080) 直接发布到宿主机，且使用弱口令，**切勿在服务器上运行**。
-> - 手动执行 compose 命令时必须带 `--env-file .env.prod`。Compose 只会自动读取 `.env`，漏掉这个参数时 `DOMAIN`、数据库密码、JWT 密钥都会按空串处理。
+> - 手动执行 compose 命令时必须带 `--env-file .env.prod`。Compose 只会自动读取 `.env`，漏掉这个参数时 compose 会因 `JWT_SECRET` / `JWT_REFRESH_SECRET` 未设置直接报错退出，不会动任何容器。
+> - 已有部署升级到 1-F 版本前，先用 `openssl rand -hex 32` 轮换两把 JWT 密钥，部署后所有人需重新登录一次，见[部署指南 5.3](docs/deploy.md)。
 
 部署完成后访问 `.env.prod` 中 `DOMAIN` 对应的地址（脚本结束时会打印），管理后台在 `/admin/`。
 

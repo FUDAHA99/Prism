@@ -1,3 +1,5 @@
+import { createHash } from 'crypto';
+
 /**
  * JWT 密钥与有效期的解析和启动期校验（批次 1-F-1）。
  *
@@ -6,7 +8,9 @@
  * 任何人都能伪造任意用户的 token。现在：
  *
  * - NODE_ENV=production：JWT_SECRET / JWT_REFRESH_SECRET 缺失、等于仓库里出现过的示例/默认值、
- *   看起来是占位符、短于 32 字符、或两者相同 —— 一律抛错，应用拒绝启动。
+ *   看起来是占位符、短于 32 字符、不同字符少于 12 个、含 8 个以上连续递增 / 递减字符、是已泄露的密钥，
+ *   或两者相同、有 16 个以上字符的公共片段、一把是另一把的移位 —— 一律抛错，应用拒绝启动。
+ *   scripts/deploy.sh 在 up 之前用其中的基本规则先预检一遍，弱密钥不会等到容器已替换才暴露。
  * - 其他环境：缺失时用开发默认值、弱密钥照常使用，但都打一条 warn，本地开发和测试不受影响。
  *
  * 有效期统一解析成「秒」交给 jsonwebtoken（数字即秒）。env 里的值永远是字符串，而 jsonwebtoken
@@ -41,8 +45,121 @@ export const KNOWN_PLACEHOLDER_SECRETS: readonly string[] = Object.freeze([
   'your-secret-key',
 ]);
 
-/** 示例值的常见写法：拷模板后只改了几个字符的也拦住 */
-const PLACEHOLDER_PATTERN = /change[-_ ]?(this|me|in[-_ ]?production)|请替换|^your[-_]/i;
+/**
+ * 示例值的常见写法：拷模板后只改了几个字符的也拦住。
+ * scripts/deploy.sh 的部署前预检用同一条正则（jwt.spec.ts 比对两边一致）。
+ */
+export const PLACEHOLDER_PATTERN = /change[-_ ]?(this|me|in[-_ ]?production)|请替换|^your[-_]/i;
+
+/**
+ * 已泄露的密钥，只存 sha256（不在仓库里留原文）。
+ * 这两把的前缀与生成规律曾写在公开仓库的文档里，可以完整推出，于 2026-10-08 轮换；
+ * 任何环境再配回它们都按弱密钥处理。scripts/deploy.sh 的预检里有同一份清单（jwt.spec.ts 比对）。
+ */
+export const LEAKED_JWT_SECRET_SHA256: readonly string[] = Object.freeze([
+  '745e055d58ff36ae766b8625e324c7bb6d990d9af2cd61a8b48d558ce3c87f64',
+  'fdeac694c933ee25a56651bf93f0cb1e49086f78a369c44aaeea9ee1af970a75',
+]);
+
+/**
+ * 弱密钥的结构特征（批次 1-F-1 复审：泄露的那对密钥长 64、不是占位符，却是按「连续递增」生成的，
+ * refresh 只是 access 移位一字节，原先的校验全部放行）。阈值对 `openssl rand -hex 32` 的输出
+ * 几乎不可能误判：64 个随机十六进制字符里不同字符少于 12 个、或出现 8 个连续递增 / 递减字符，
+ * 概率都在 1e-7 量级（jwt.spec.ts 用大量样本验证）；真碰上了，重新生成一次即可。
+ */
+export const MIN_DISTINCT_SECRET_CHARS = 12;
+/** 连续递增 / 递减（字符码 ±1，十六进制里 9→a 也算相邻）达到这个长度即拒绝 */
+export const MAX_SEQUENTIAL_RUN = 8;
+/** 两把密钥有这么长的公共片段即拒绝（一把是另一把移位、截取、拼接改出来的） */
+export const MAX_SHARED_SUBSTRING = 16;
+
+const sha256Hex = (value: string) => createHash('sha256').update(value, 'utf8').digest('hex');
+
+/** 密钥的 sha256 是否在拒绝清单里（清单可注入，便于测试） */
+export function isLeakedJwtSecret(
+  secret: string,
+  blocklist: readonly string[] = LEAKED_JWT_SECRET_SHA256,
+): boolean {
+  return blocklist.includes(sha256Hex(secret));
+}
+
+/** a→b 是否「相邻」：+1 递增、-1 递减、0 不相邻。十六进制字母表里 9 与 a/A 相邻 */
+function sequenceStep(a: string, b: string): number {
+  const diff = (b.codePointAt(0) as number) - (a.codePointAt(0) as number);
+  if (diff === 1 || (a === '9' && (b === 'a' || b === 'A'))) return 1;
+  if (diff === -1 || ((a === 'a' || a === 'A') && b === '9')) return -1;
+  return 0;
+}
+
+/** 最长的连续递增 / 递减片段长度（按字符计） */
+export function longestSequentialRun(secret: string): number {
+  const chars = [...secret];
+  let longest = chars.length > 0 ? 1 : 0;
+  let run = 1;
+  let direction = 0;
+  for (let i = 1; i < chars.length; i += 1) {
+    const step = sequenceStep(chars[i - 1], chars[i]);
+    if (step !== 0 && step === direction) {
+      run += 1;
+    } else {
+      run = step !== 0 ? 2 : 1;
+      direction = step;
+    }
+    longest = Math.max(longest, run);
+  }
+  return longest;
+}
+
+/** 两个字符串是否有长度 ≥ minLength 的公共片段 */
+export function hasSharedSubstring(a: string, b: string, minLength: number): boolean {
+  if (a.length < minLength || b.length < minLength) return false;
+  for (let i = 0; i + minLength <= a.length; i += 1) {
+    if (b.includes(a.slice(i, i + minLength))) return true;
+  }
+  return false;
+}
+
+/**
+ * b 是否是 a 逐位加同一个偏移得到的（「移位」的另一种形态）：
+ * 按字符码；两者都是等长十六进制时，再按 4 位与按字节（模 16 / 模 256）各看一次。
+ */
+export function isConstantOffset(a: string, b: string): boolean {
+  if (a.length !== b.length || a.length === 0 || a === b) return false;
+  const constant = (diffs: number[]) => diffs.every((d) => d === diffs[0]);
+  const codes = (s: string) => [...s].map((c) => c.codePointAt(0) as number);
+  const ca = codes(a);
+  const cb = codes(b);
+  if (ca.length === cb.length && constant(ca.map((x, i) => cb[i] - x))) return true;
+
+  const hex = /^[0-9a-f]+$/i;
+  if (!hex.test(a) || !hex.test(b)) return false;
+  const nibbles = (s: string) => [...s].map((c) => parseInt(c, 16));
+  const na = nibbles(a);
+  const nb = nibbles(b);
+  if (constant(na.map((x, i) => (nb[i] - x + 16) % 16))) return true;
+  if (a.length % 2 !== 0) return false;
+  const bytes = (s: string) => Array.from(Buffer.from(s, 'hex'));
+  const ba = bytes(a);
+  const bb = bytes(b);
+  return constant(ba.map((x, i) => (bb[i] - x + 256) % 256));
+}
+
+/** 两把密钥之间的问题（为空表示合格）；只描述问题，不回显密钥 */
+export function jwtSecretPairProblems(secret: string, refreshSecret: string): string[] {
+  if (secret === refreshSecret) {
+    return ['JWT_SECRET 与 JWT_REFRESH_SECRET 相同（两种 token 必须用不同密钥）'];
+  }
+  const problems: string[] = [];
+  if (hasSharedSubstring(secret, refreshSecret, MAX_SHARED_SUBSTRING)) {
+    problems.push(
+      `JWT_SECRET 与 JWT_REFRESH_SECRET 有 ${MAX_SHARED_SUBSTRING} 个以上字符的公共片段（一把由另一把改出来的）`,
+    );
+  }
+  if (isConstantOffset(secret, refreshSecret)) {
+    problems.push('JWT_REFRESH_SECRET 是 JWT_SECRET 逐位加同一偏移得到的（移位）');
+  }
+  return problems;
+}
 
 export interface JwtConfig {
   /** access token 签名密钥 */
@@ -87,6 +204,15 @@ export function jwtSecretProblems(secret: string | undefined): string[] {
   if ([...secret].length < MIN_JWT_SECRET_LENGTH) {
     problems.push(`短于 ${MIN_JWT_SECRET_LENGTH} 个字符`);
   }
+  if (new Set([...secret]).size < MIN_DISTINCT_SECRET_CHARS) {
+    problems.push(`不同字符少于 ${MIN_DISTINCT_SECRET_CHARS} 个`);
+  }
+  if (longestSequentialRun(secret) >= MAX_SEQUENTIAL_RUN) {
+    problems.push(`含 ${MAX_SEQUENTIAL_RUN} 个以上连续递增或递减的字符`);
+  }
+  if (isLeakedJwtSecret(secret)) {
+    problems.push('是已泄露的密钥（已列入拒绝清单）');
+  }
   return problems;
 }
 
@@ -117,11 +243,15 @@ export function resolveJwtConfig(env: Env, warn: (message: string) => void): Jwt
   const secret = pick('JWT_SECRET', DEV_JWT_SECRET);
   const refreshSecret = pick('JWT_REFRESH_SECRET', DEV_JWT_REFRESH_SECRET);
 
-  if (secret === refreshSecret && secret !== '') {
+  // 两把都回落到开发默认值时不比对（默认值本来就是一对占位符，上面已各自告警）
+  const bothDevDefaults = secret === DEV_JWT_SECRET && refreshSecret === DEV_JWT_REFRESH_SECRET;
+  const pairProblems =
+    secret !== '' && !bothDevDefaults ? jwtSecretPairProblems(secret, refreshSecret) : [];
+  if (pairProblems.length > 0) {
     if (isProduction) {
-      errors.push('JWT_SECRET 与 JWT_REFRESH_SECRET 相同（两种 token 必须用不同密钥）');
+      errors.push(...pairProblems);
     } else {
-      warn('JWT_SECRET 与 JWT_REFRESH_SECRET 相同（仅限非生产环境）');
+      warn(`${pairProblems.join('、')}（仅限非生产环境）`);
     }
   }
 

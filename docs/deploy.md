@@ -89,13 +89,14 @@ bash scripts/deploy.sh
 
 脚本会自动完成（手工部署与 CI 部署执行的是同一份脚本）：
 1. `git pull` 拉取最新代码；`scripts/deploy.sh` 自身有更新时，自动改用新版本继续（`--skip-pull` 跳过这一步）
-2. 生成 nginx 生效配置 `nginx/nginx.active.conf`（`scripts/render-nginx-conf.sh`；HTTP / HTTPS 模式见第 7 节）
-3. 部署前校验：在一次性容器里对生成的配置跑 `nginx -t`，不依赖业务容器；不通过则中止，`nginx/nginx.active.conf` 换回部署前的内容，容器一个都不动（运行中的 nginx 重启后仍是原配置）
-4. 检测是否首次部署（自动设置 `DB_SYNC=true` 建表）；`.env.prod` 里写着 `DB_SYNC=true` 时打印警告
-5. 构建三个业务镜像（backend / portal / frontend），启动全部 6 个容器
-6. 等待 backend 就绪后接到真实 Docker 网络再跑一次 `nginx -t`，通过后强制重建 nginx 容器（每次部署 80/443 中断数秒，见第 7 节「nginx 配置变更如何生效」）
-7. 首次部署：运行 `seed-admin.js` 创建管理员账户，并配置每日自动备份
-8. 清理悬空镜像（`docker image prune -f`）
+2. 预检 `.env.prod` 的 JWT 密钥：两把都要设置、不短于 32 个字符、不是仓库里的示例/占位值、互不相同、不在已泄露清单里；不通过则中止，容器和 nginx 配置都不动（backend 启动时还会按完整规则再校验一次，见 5.3）
+3. 生成 nginx 生效配置 `nginx/nginx.active.conf`（`scripts/render-nginx-conf.sh`；HTTP / HTTPS 模式见第 7 节）
+4. 部署前校验：在一次性容器里对生成的配置跑 `nginx -t`，不依赖业务容器；不通过则中止，`nginx/nginx.active.conf` 换回部署前的内容，容器一个都不动（运行中的 nginx 重启后仍是原配置）
+5. 检测是否首次部署（自动设置 `DB_SYNC=true` 建表）；`.env.prod` 里写着 `DB_SYNC=true` 时打印警告
+6. 构建三个业务镜像（backend / portal / frontend），启动全部 6 个容器
+7. 等待 backend 就绪后接到真实 Docker 网络再跑一次 `nginx -t`，通过后强制重建 nginx 容器（每次部署 80/443 中断数秒，见第 7 节「nginx 配置变更如何生效」）
+8. 首次部署：运行 `seed-admin.js` 创建管理员账户，并配置每日自动备份
+9. 清理悬空镜像（`docker image prune -f`）
 
 首次部署仅在本次执行中临时设置 `DB_SYNC=true`（不修改 `.env.prod`）；backend 容器会一直保留 `DB_SYNC=true`，直到下一次 `up` 重建它。建完表后执行 `docker compose -f docker-compose.prod.yml --env-file .env.prod up -d backend` 关闭（`restart` 无效），再执行 `docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --no-deps --force-recreate nginx` 让 nginx 重新解析 backend 的新容器 IP（或直接再执行一次 `bash scripts/deploy.sh`，两步都会做）。
 
@@ -113,7 +114,7 @@ bash scripts/deploy.sh
 
 ## 4. 日常运维
 
-以下命令都在项目根目录执行，并统一带上 `--env-file .env.prod`（Compose 只会自动读取 `.env`，漏掉时 `DOMAIN`、数据库密码、JWT 密钥都会按空串处理）：
+以下命令都在项目根目录执行，并统一带上 `--env-file .env.prod`（Compose 只会自动读取 `.env`。漏掉时 compose 会因 `JWT_SECRET` / `JWT_REFRESH_SECRET` 未设置直接报错退出，不会动任何容器；这两个之外的变量，如 `DOMAIN`、数据库与 Redis 密码，在别的场合漏读时按空串处理）：
 
 ```bash
 COMPOSE="docker compose -f docker-compose.prod.yml --env-file .env.prod"
@@ -181,7 +182,7 @@ $COMPOSE up -d --build backend portal frontend
 $COMPOSE up -d --no-deps --force-recreate nginx
 ```
 
-> ⚠️ build/up 漏掉 `--env-file` 时，portal 会被构建成请求 `http://localhost:3001`，backend/mysql/redis 会以空密码重建，mysql 健康检查失败后 backend 起不来。
+> ⚠️ build/up 漏掉 `--env-file` 时，compose 会因 `JWT_SECRET` 未设置（`docker-compose.prod.yml` 里是 `${JWT_SECRET:?…}`）直接报错退出，不会构建或重建任何容器；补上 `--env-file .env.prod` 重新执行即可。
 
 ### 5.1 已有部署首次升级到本版本（2026-10 批次）须知
 
@@ -250,6 +251,22 @@ $COMPOSE exec -T backend node scripts/scrub-audit-logs.js --apply   # 写回
 ```
 
 全新部署不需要执行。
+
+### 5.3 1-F 升级须知（已有部署升级到本版本前必读）
+
+**① 先轮换两把 JWT 密钥，再部署。** 从本版本起，backend 在 `NODE_ENV=production` 下拒绝启动的情形包括：密钥缺失、是仓库里的示例/占位值、短于 32 个字符、不同字符少于 12 个、含 8 个以上连续递增或递减的字符（如 `01234567`、`6789abcd`）、在已泄露清单里，以及两把相同、有 16 个以上字符的公共片段、一把是另一把的移位。`scripts/deploy.sh` 会在 `up` 之前先按其中的基本规则预检，不合格时中止且不动任何容器。曾有一对密钥的前缀和生成规律出现在公开文档里，这对密钥已列入拒绝清单。所以不管现有密钥看起来是否合格，都请在部署前重新生成两把：
+
+```bash
+cd /opt/prism-cms   # 项目目录
+openssl rand -hex 32   # 输出填到 .env.prod 的 JWT_SECRET
+openssl rand -hex 32   # 再生成一次，填到 JWT_REFRESH_SECRET（两把必须不同）
+```
+
+改完直接 `bash scripts/deploy.sh` 即可，部署会用 `up` 重建 backend 读取新值（只 `restart` 不会重新读取 `.env.prod`）。`openssl rand -hex 32` 的输出被上述规则误判的概率不到百万分之一；万一遇到，按报错重新生成一次。
+
+**② 部署后所有人都要重新登录一次。** 旧版本签发的 token 没有 `type` / `jti`，新版本一律拒绝（401）；轮换密钥本身也会让旧 token 全部失效。管理后台会自动跳回登录页，门户的登录态同样需要重新登录。
+
+**③ 登录行为的变化。** 登录和注册的邮箱只接受 ASCII 字符；登录失败锁定按数据库里的用户认定，账号级锁定不再锁住 30 天内成功登录过的 IP；修改密码时当前密码 15 分钟内错 5 次会返回 429 并让发起请求的会话失效。规则与手工解锁步骤见第 9 节「管理员登录提示登录尝试次数过多」。
 
 ---
 
@@ -438,4 +455,4 @@ docker exec -e REDISCLI_AUTH="$rp" prism-redis sh -c 'redis-cli --scan --pattern
 
 ---
 
-*最后更新：2026-10-08*
+*最后更新：2026-10-09*
