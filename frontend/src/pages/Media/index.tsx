@@ -23,7 +23,7 @@ import {
 } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { UploadFile } from 'antd'
-import { deleteMediaFile, getMediaFiles, uploadFile } from '../../api/media'
+import { deleteMediaFile, getMediaFiles, uploadFile, UPLOAD_MAX_SIZE } from '../../api/media'
 import PageHeader from '../../components/common/PageHeader'
 import { formatBytes, formatDate } from '../../utils'
 import type { MediaFile } from '../../types'
@@ -39,6 +39,35 @@ const MIME_OPTIONS = [
 ]
 
 const PAGE_SIZE = 18
+
+// 批量上传并发上限：无上限并发会让一次选几十个文件时撞上 nginx api 桶（429），
+// 后端 memoryStorage 的在途内存也随之放大；另外 XHR 超时从 send() 起算，排队过久会被误判超时
+const UPLOAD_CONCURRENCY = 3
+
+/**
+ * 以固定并发度依次执行 task，结果按 items 原顺序返回，语义同 Promise.allSettled。
+ */
+async function allSettledWithConcurrency<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  task: (item: T) => Promise<R>,
+): Promise<PromiseSettledResult<R>[]> {
+  const results: PromiseSettledResult<R>[] = new Array(items.length)
+  let next = 0
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++
+      try {
+        results[i] = { status: 'fulfilled', value: await task(items[i]) }
+      } catch (reason) {
+        results[i] = { status: 'rejected', reason }
+      }
+    }
+  }
+  const workers = Math.max(1, Math.min(concurrency, items.length))
+  await Promise.all(Array.from({ length: workers }, worker))
+  return results
+}
 
 function FileTypeIcon({ mimeType }: { mimeType: string }) {
   if (mimeType.startsWith('video/')) return <VideoCameraOutlined style={{ fontSize: 48, color: '#1890ff' }} />
@@ -161,8 +190,8 @@ export default function MediaPage() {
     }
 
     setUploading(true)
-    const results = await Promise.allSettled(
-      fileList.map((f) => uploadFile(f.originFileObj as File))
+    const results = await allSettledWithConcurrency(fileList, UPLOAD_CONCURRENCY, (f) =>
+      uploadFile(f.originFileObj as File)
     )
 
     const failed = results.filter((r) => r.status === 'rejected').length
@@ -175,7 +204,10 @@ export default function MediaPage() {
       queryClient.invalidateQueries({ queryKey: ['media'] })
     }
     if (failed > 0) {
-      message.error(`${failed} 个文件上传失败`)
+      // 带出首个失败原因（后端 JSON message 或拦截器的 413 中文提示），否则用户看不到为什么失败
+      const firstErr = results.find((r): r is PromiseRejectedResult => r.status === 'rejected')
+      const reason = firstErr?.reason instanceof Error ? firstErr.reason.message : ''
+      message.error(`${failed} 个文件上传失败${reason ? '：' + reason : ''}`)
     }
 
     setFileList([])
@@ -247,7 +279,14 @@ export default function MediaPage() {
       >
         <Dragger
           multiple
-          beforeUpload={() => false}
+          beforeUpload={(file) => {
+            // 本地预检：超限文件直接不进列表，也不会发请求
+            if (file.size > UPLOAD_MAX_SIZE) {
+              message.error(`${file.name} 超过 10MB，已忽略`)
+              return Upload.LIST_IGNORE
+            }
+            return false
+          }}
           fileList={fileList}
           onChange={({ fileList: list }) => setFileList(list)}
           style={{ marginTop: 8 }}

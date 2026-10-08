@@ -2,7 +2,7 @@ import React from 'react'
 import { App, Upload, Button, Image } from 'antd'
 import { UploadOutlined, DeleteOutlined, FileOutlined } from '@ant-design/icons'
 import type { RcFile } from 'antd/es/upload'
-import { uploadFile } from '../../api/media'
+import { uploadFile, UPLOAD_MAX_SIZE } from '../../api/media'
 
 interface MediaPickerProps {
   value?: string
@@ -16,6 +16,11 @@ const isImageUrl = (url: string) =>
 export default function MediaPicker({ value, onChange, accept }: MediaPickerProps) {
   const { message } = App.useApp()
   const handleBeforeUpload = async (file: RcFile) => {
+    // 本地预检：超限文件不发请求（nginx 413 在慢上行下常表现为网络错误，拿不到提示）
+    if (file.size > UPLOAD_MAX_SIZE) {
+      message.error('文件大小不能超过 10MB')
+      return false
+    }
     try {
       const media = await uploadFile(file)
       // uploadFile returns ApiResponse<MediaFile> where the interceptor unwraps the outer
@@ -23,8 +28,9 @@ export default function MediaPicker({ value, onChange, accept }: MediaPickerProp
       const url = (media as any).data?.url ?? (media as any).url
       onChange?.(url)
       message.success('上传成功')
-    } catch {
-      message.error('上传失败，请重试')
+    } catch (e) {
+      // 展示后端/拦截器给出的具体原因（如“不支持的文件类型”、413 中文提示）
+      message.error(e instanceof Error && e.message ? e.message : '上传失败，请重试')
     }
     return false
   }

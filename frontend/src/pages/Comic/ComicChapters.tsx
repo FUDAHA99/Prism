@@ -37,7 +37,7 @@ import {
   type ComicChapter,
   type CreateComicChapterData,
 } from '../../api/comic'
-import { uploadFile } from '../../api/media'
+import { uploadFile, UPLOAD_MAX_SIZE } from '../../api/media'
 import PageHeader from '../../components/common/PageHeader'
 import { formatDate } from '../../utils'
 
@@ -281,13 +281,18 @@ function ComicChapterModal({
   }, [open, editing, form])
 
   const handleUpload = async (file: RcFile) => {
+    // 本地预检：超限文件不发请求（nginx 413 在慢上行下常表现为网络错误，拿不到提示）
+    if (file.size > UPLOAD_MAX_SIZE) {
+      message.error(`${file.name} 超过 10MB，已忽略`)
+      return false
+    }
     setUploading(true)
     try {
       const media = await uploadFile(file)
       const url = (media as any).data?.url ?? (media as any).url
       setPages((p) => [...p, url])
-    } catch {
-      message.error(`${file.name} 上传失败`)
+    } catch (e) {
+      message.error(`${file.name} 上传失败${e instanceof Error && e.message ? '：' + e.message : ''}`)
     } finally {
       setUploading(false)
     }
