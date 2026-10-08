@@ -9,6 +9,7 @@ import {
   HttpCode,
   HttpStatus,
   UseInterceptors,
+  UseFilters,
   UploadedFile,
   BadRequestException,
 } from '@nestjs/common';
@@ -21,6 +22,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { MediaService, QueryMediaDto } from './media.service';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthUser } from '../auth/interfaces/auth.interface';
+import { MulterExceptionFilter } from './multer-exception.filter';
 
 const ALLOWED_MIME_TYPES = [
   'image/jpeg',
@@ -30,7 +32,7 @@ const ALLOWED_MIME_TYPES = [
   'application/pdf',
   'video/mp4',
 ];
-const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+// 大小上限由 multer limits.fileSize 在解析阶段强制（media.module.ts / upload-limits.ts），此处不再检查
 
 @ApiTags('媒体管理')
 @Controller('media')
@@ -58,6 +60,7 @@ export class MediaController {
 
   @Post('upload')
   @UseInterceptors(FileInterceptor('file'))
+  @UseFilters(MulterExceptionFilter)
   @ApiOperation({ summary: '上传文件' })
   @ApiConsumes('multipart/form-data')
   @ApiResponse({ status: 201, description: '上传成功' })
@@ -70,9 +73,6 @@ export class MediaController {
     }
     if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
       throw new BadRequestException('不支持的文件类型');
-    }
-    if (file.size > MAX_FILE_SIZE) {
-      throw new BadRequestException('文件大小不能超过10MB');
     }
 
     const ext = path.extname(file.originalname);

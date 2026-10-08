@@ -48,7 +48,7 @@
     "csurf": "^1.11.0",
     "helmet": "^7.0.0",
     "keyv": "^5.6.0",
-    "multer": "^1.4.5-lts.1",
+    "multer": "2.4.0",
     "mysql2": "^3.22.2",
     "passport": "^0.6.0",
     "passport-jwt": "^4.0.1",
@@ -58,6 +58,9 @@
     "rxjs": "^7.8.0",
     "typeorm": "^0.3.28",
     "uuid": "^14.0.0"
+  },
+  "overrides": {
+    "multer": "$multer"
   },
   "devDependencies": {
     "@nestjs/cli": "^10.0.0",
