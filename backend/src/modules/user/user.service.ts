@@ -18,7 +18,7 @@ import { QueryUserDto } from './dto/query-user.dto';
 import { RoleService } from '../role/role.service';
 import { AuditService } from '../audit/audit.service';
 import { changedAuditFields, pickAuditFields } from '../audit/audit-summary';
-import { SafeUser, toSafeUser } from './user-fields';
+import { AuthIdentity, SafeUser, toSafeUser } from './user-fields';
 import { revokeTokensIssuedBefore } from '../auth/token-revocation';
 import { forgetTrustedIps } from '../auth/login-attempts';
 import { ADMIN_ROLES } from '../../common/authz/access.decorator';
@@ -139,6 +139,46 @@ export class UserService {
 
     await this.cacheManager.set(cacheKey, safeUser, this.CACHE_TTL);
     return safeUser;
+  }
+
+  /**
+   * 鉴权用的当前用户（批次 1-F-1 复审）：JwtStrategy 每个请求、refresh 签发前调用，**直接查库，不读也不写**
+   * user:<id> 缓存。一条 SQL（users ⟕ user_roles ⟕ roles ⟕ role_permissions ⟕ permissions）
+   * 取齐资料、启用状态、角色名与权限码，替换掉此前 JwtStrategy 每个请求单独查一次权限的那条 SQL，
+   * 每个请求的查询数不增加。
+   *
+   * 为什么不用 findOne 的 5 分钟缓存：findOne 先读库再写缓存，一个缓存未命中的请求如果在降权 / 禁用 /
+   * 删除提交前读了库、又在 clearUserCache 之后才写缓存，旧的 roles=['admin'] 会被写回并保留 5 分钟，
+   * 「改角色即时生效」就不成立。缓存仍留给资料展示等非鉴权用途。
+   *
+   * 已删除（软删）的用户返回 null；不含 passwordHash（select:false 且显式列出了要取的列）。
+   */
+  async findAuthIdentity(id: string): Promise<AuthIdentity | null> {
+    const user = await this.userRepository
+      .createQueryBuilder('user')
+      .select(['user.id', 'user.username', 'user.email', 'user.nickname', 'user.avatarUrl', 'user.isActive'])
+      .leftJoin('user.userRoles', 'role')
+      .addSelect(['role.id', 'role.name'])
+      .leftJoin('role.permissions', 'permission')
+      .addSelect(['permission.id', 'permission.code'])
+      .where('user.id = :id', { id })
+      .andWhere('user.deletedAt IS NULL')
+      .getOne();
+    if (!user) return null;
+
+    const roles = user.userRoles ?? [];
+    return {
+      id: user.id,
+      username: user.username,
+      email: user.email,
+      nickname: user.nickname,
+      avatarUrl: user.avatarUrl,
+      isActive: user.isActive,
+      roles: roles.map((role) => role.name),
+      permissions: [
+        ...new Set(roles.flatMap((role) => (role.permissions ?? []).map((permission) => permission.code))),
+      ],
+    };
   }
 
   async findByEmail(email: string): Promise<User | null> {

@@ -46,15 +46,13 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         throw new UnauthorizedException('Token已失效，请重新登录');
       }
 
-      // 验证用户状态
+      // 启用状态与角色每个请求直接从库里取（一条 SQL，不经 user:<id> 缓存）：RolesGuard 只认这里的 roles，
+      // 降权 / 禁用 / 删除提交之后的下一个请求就按新状态鉴权，不会被缓存回填的旧值放行
       const user = await this.authService.validateUserFromPayload(payload);
       if (!user) {
         throw new UnauthorizedException('用户不存在或已被禁用');
       }
 
-      // 验证用户角色和权限
-      const permissions = await this.authService.getUserPermissions(user.id);
-      
       return {
         id: user.id,
         username: user.username,
@@ -62,7 +60,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         nickname: user.nickname,
         avatarUrl: user.avatarUrl,
         roles: user.roles,
-        permissions,
+        permissions: user.permissions,
         isActive: user.isActive,
       };
     } catch (error) {

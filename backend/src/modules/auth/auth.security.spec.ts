@@ -27,6 +27,7 @@ import {
   trustedIpsKey,
 } from './login-attempts';
 import { UserService } from '../user/user.service';
+import { userCacheKey } from '../user/user-cache';
 import { RoleService } from '../role/role.service';
 import { AuditService } from '../audit/audit.service';
 import { User } from '../user/entities/user.entity';
@@ -110,6 +111,8 @@ interface Harness {
   userService: UserService;
   authService: AuthService;
   users: Repository<User>;
+  /** 执行过的全部 SQL（按顺序） */
+  queries: string[];
   adminId: string;
   otherId: string;
 }
@@ -120,6 +123,7 @@ interface Harness {
  */
 async function createHarness({ throttle = false } = {}): Promise<Harness> {
   const cache = new MemoryCache();
+  const queries: string[] = [];
   const config = new ConfigService({
     app: {
       jwt: {
@@ -139,7 +143,17 @@ async function createHarness({ throttle = false } = {}): Promise<Harness> {
         // 只装载 User 关联闭包里的实体（小说章节等用了 SQLite 不支持的 longtext）
         entities: [User, Role, Permission, AuditLog, MediaFile, Content, Category, Comment],
         synchronize: true,
-        logging: false,
+        // 只记录执行过的 SQL，用来断言每个请求的查询数（不打印）
+        logger: {
+          logQuery: (query: string) => {
+            queries.push(query);
+          },
+          logQueryError: () => undefined,
+          logQuerySlow: () => undefined,
+          logSchemaBuild: () => undefined,
+          logMigration: () => undefined,
+          log: () => undefined,
+        },
       }),
       TypeOrmModule.forFeature([User, Role, Permission, AuditLog]),
       PassportModule,
@@ -183,6 +197,7 @@ async function createHarness({ throttle = false } = {}): Promise<Harness> {
     userService,
     authService: moduleRef.get(AuthService),
     users,
+    queries,
     adminId: admin.id,
     otherId: other.id,
   };
@@ -669,6 +684,102 @@ describe('认证核心安全行为', () => {
       expect((await me(tokens.accessToken)).status).toBe(401);
       expect((await refresh(tokens.refreshToken)).status).toBe(401);
       await login({ email: u.email, password: 'Reset2026x' });
+    });
+  });
+
+  describe('鉴权的角色与启用状态每个请求直接查库，不以 user:<id> 缓存为准', () => {
+    let seq = 0;
+    async function freshUser() {
+      seq += 1;
+      const email = `rolecache${seq}@cms.test`;
+      const user = await h.userService.create({ username: `rolecache${seq}`, email, password: 'Role12345!' } as any);
+      return { id: user.id, email, password: 'Role12345!' };
+    }
+    const adminRoleId = async () => (await h.ds.getRepository(Role).findOneByOrFail({ name: 'admin' })).id;
+    const probeAdmin = (token: string) => h.http().get('/probe/admin').set('Authorization', `Bearer ${token}`);
+
+    afterEach(() => {
+      h.cache.hooks = {};
+    });
+
+    it('缓存里写着 admin、库里没有角色 → 403；缓存里写着启用、库里已禁用 → 401', async () => {
+      const u = await freshUser();
+      const { tokens } = await login(u);
+      const cached = await h.userService.findOne(u.id);
+      await h.cache.set(userCacheKey(u.id), { ...cached, roles: ['admin'], isActive: true });
+      expect((await probeAdmin(tokens.accessToken)).status).toBe(403);
+
+      await h.users.update(u.id, { isActive: false }); // 绕过 UserService，不清缓存
+      try {
+        expect((await me(tokens.accessToken)).status).toBe(401);
+        expect((await refresh(tokens.refreshToken)).status).toBe(401);
+      } finally {
+        await h.users.update(u.id, { isActive: true });
+      }
+    });
+
+    it('缓存回填竞态：读库后、写缓存前被降权，旧的 admin 写回缓存也放行不了（复审 T3）', async () => {
+      const u = await freshUser();
+      const roleId = await adminRoleId();
+      await h.userService.assignRoles(u.id, [roleId], h.adminId);
+      const { tokens } = await login(u);
+      expect((await probeAdmin(tokens.accessToken)).status).toBe(200);
+
+      // 一个缓存未命中的 findOne 读到 roles=['admin'] 后、写缓存之前，管理员撤掉了 admin（含 clearUserCache）
+      await h.cache.del(userCacheKey(u.id));
+      let demoted = false;
+      h.cache.hooks.beforeSet = async (key) => {
+        if (key === userCacheKey(u.id) && !demoted) {
+          demoted = true;
+          await h.userService.removeRoles(u.id, [roleId], h.adminId);
+        }
+      };
+      const stale = await h.userService.findOne(u.id);
+      expect(demoted).toBe(true);
+      expect(stale.roles).toEqual(['admin']);
+      expect(((await h.cache.get<{ roles: string[] }>(userCacheKey(u.id))) ?? { roles: [] }).roles).toEqual(['admin']);
+
+      expect((await probeAdmin(tokens.accessToken)).status).toBe(403);
+      const profile = await h.http().get('/auth/me').set('Authorization', `Bearer ${tokens.accessToken}`);
+      expect(profile.body.roles).toEqual([]);
+    });
+
+    it('被软删除的用户 → 401', async () => {
+      const u = await freshUser();
+      const { tokens } = await login(u);
+      await h.users.softDelete(u.id);
+      expect((await me(tokens.accessToken)).status).toBe(401);
+    });
+
+    it('每个已认证请求只发 1 条 SQL（取用户、角色、权限的一条联表查询），不读写 user:<id> 缓存', async () => {
+      const { tokens } = await login();
+      await h.cache.del(userCacheKey(h.adminId));
+      for (const path of ['/probe/me', '/probe/admin', '/auth/me']) {
+        h.queries.length = 0;
+        const res = await h.http().get(path).set('Authorization', `Bearer ${tokens.accessToken}`);
+        expect(res.status).toBe(200);
+        expect(h.queries).toHaveLength(1);
+        expect(h.queries[0]).toMatch(/user_roles/);
+        expect(h.queries[0]).not.toMatch(/passwordHash/);
+      }
+      expect(h.cache.store.has(userCacheKey(h.adminId))).toBe(false);
+    });
+
+    it('/auth/me 照旧返回角色名与权限码（去重）', async () => {
+      const u = await freshUser();
+      const permissions = h.ds.getRepository(Permission);
+      const [p1, p2] = await permissions.save([
+        { code: `probe:read:${u.id}`, name: '读', module: 'probe' },
+        { code: `probe:write:${u.id}`, name: '写', module: 'probe' },
+      ] as any);
+      const roles = h.ds.getRepository(Role);
+      const r1 = await roles.save({ name: `r1-${u.id}`, permissions: [p1, p2] } as any);
+      const r2 = await roles.save({ name: `r2-${u.id}`, permissions: [p1] } as any);
+      await h.userService.assignRoles(u.id, [r1.id, r2.id], h.adminId);
+      const { tokens } = await login(u);
+      const profile = await h.http().get('/auth/me').set('Authorization', `Bearer ${tokens.accessToken}`);
+      expect([...profile.body.roles].sort()).toEqual([`r1-${u.id}`, `r2-${u.id}`].sort());
+      expect([...profile.body.permissions].sort()).toEqual([`probe:read:${u.id}`, `probe:write:${u.id}`].sort());
     });
   });
 

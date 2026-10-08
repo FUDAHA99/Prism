@@ -2,7 +2,6 @@ import {
   Injectable,
   UnauthorizedException,
   BadRequestException,
-  NotFoundException,
   HttpException,
   HttpStatus,
   Inject,
@@ -36,7 +35,7 @@ import {
   rememberTrustedIp,
 } from './login-attempts';
 
-import { SafeUser, toSafeUser } from '../user/user-fields';
+import { AuthIdentity, SafeUser, toSafeUser } from '../user/user-fields';
 import { User } from '../user/entities/user.entity';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
@@ -359,16 +358,12 @@ export class AuthService {
     return toSafeUser(user);
   }
 
-  async validateUserFromPayload(payload: JwtPayload): Promise<SafeUser | null> {
-    const user = await this.userService.findOne(payload.sub);
-    if (!user || !user.isActive) {
-      return null;
-    }
-    return user;
-  }
-
-  async getUserPermissions(userId: string): Promise<string[]> {
-    return this.roleService.getUserPermissions(userId);
+  /**
+   * JwtStrategy 每个请求调用：直接查库取当前用户、角色名与权限码（一条 SQL，不经 user:<id> 缓存，
+   * 见 UserService.findAuthIdentity）。不存在、已删除或已禁用返回 null。
+   */
+  async validateUserFromPayload(payload: JwtPayload): Promise<AuthIdentity | null> {
+    return this.findActiveUser(payload.sub);
   }
 
   /**
@@ -492,15 +487,14 @@ export class AuthService {
     return valid ? { sub: payload.sub as string, jti: payload.jti as string, exp: payload.exp as number } : null;
   }
 
-  /** 按 ID 取仍启用的用户；不存在（含已删除）或已禁用返回 null */
-  private async findActiveUser(userId: string): Promise<SafeUser | null> {
-    try {
-      const user = await this.userService.findOne(userId);
-      return user && user.isActive ? user : null;
-    } catch (error) {
-      if (error instanceof NotFoundException) return null;
-      throw error;
-    }
+  /**
+   * 按 ID 取仍启用的用户（直接查库，角色也是库里的当前值）；不存在（含已删除）或已禁用返回 null。
+   * refresh 签发新 token 前同样用它：被禁用、被降权的账号不能靠缓存里的旧状态续签。
+   */
+  private async findActiveUser(userId: string): Promise<AuthIdentity | null> {
+    if (typeof userId !== 'string' || userId === '') return null;
+    const user = await this.userService.findAuthIdentity(userId);
+    return user && user.isActive ? user : null;
   }
 
   /**

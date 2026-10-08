@@ -25,6 +25,15 @@ export type SafeUser = Pick<
 >;
 
 /**
+ * 鉴权用的当前用户形状（UserService.findAuthIdentity，每个请求直接查库）：
+ * 资料 + 启用状态 + 角色名 + 权限码，不含 passwordHash 与时间戳
+ */
+export type AuthIdentity = Pick<User, 'id' | 'username' | 'email' | 'nickname' | 'avatarUrl' | 'isActive'> & {
+  roles: string[];
+  permissions: string[];
+};
+
+/**
  * 按白名单逐字段取值，绝不展开实体。
  * 入参可以是实体、旧缓存里的纯对象（可能还带着 passwordHash），出参都只有白名单字段。
  */

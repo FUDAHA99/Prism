@@ -37,8 +37,8 @@ import { globalValidationPipeOptions } from '../../common/pipes/global-validatio
  * 角色分配端到端（批次 1-F-1），走真实 HTTP：真实 User / Role / Auth 控制器与服务、JwtStrategy、
  * Access 守卫链、全局 ValidationPipe；数据落在内存 SQLite，缓存是按 JSON 存取的 Map（与 Redis 一样）。
  *
- * 「立即生效」的含义：JwtStrategy 每个请求从 user:<id> 缓存（5 分钟）取角色。测试里先让目标用户发一次
- * 请求把缓存填上，再改角色，同一个 access token 的下一个请求就必须按新角色鉴权。
+ * 「立即生效」的含义：改角色之后，同一个 access token 的下一个请求就必须按新角色鉴权。JwtStrategy 每个请求
+ * 直接从库里取角色（UserService.findAuthIdentity），不读也不写 user:<id> 缓存，缓存回填竞态因此不影响鉴权。
  */
 
 const ADMIN = { email: 'admin@cms.test', password: 'Admin123!' };
@@ -178,7 +178,7 @@ describe('角色分配：MySQL 安全 SQL、前后端路由一致、改角色立
 
     it('分配 editor 后，同一个 token 的下一个请求立即按 editor 鉴权；重复分配幂等', async () => {
       await asOther(http().get('/probe/staff')).expect(403);
-      expect(cache.store.has(userCacheKey(otherId))).toBe(true); // 缓存里已是「无角色」
+      expect(cache.store.has(userCacheKey(otherId))).toBe(false); // 鉴权不读也不写 user:<id> 缓存
 
       const res = await assign(otherId, [editorRole.id]).expect(201);
       expect(res.body.roles).toEqual(['editor']);
