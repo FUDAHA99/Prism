@@ -533,12 +533,26 @@
 
 ## 十、导航菜单 `/menus`
 
-🔒 写操作需要认证
+🔒 全部需要 `admin` 角色
 
-`GET /menus` — 列表  
+`GET /menus` — 列表（平铺，含 `parentId`）  
 `POST /menus` — 创建  
-`PATCH /menus/:id` — 更新  
-`DELETE /menus/:id` — 删除
+`PATCH /menus/:id` — 更新（字段同创建、都可省略）  
+`DELETE /menus/:id` — 删除（子菜单一并删除）
+
+```json
+{ "name": "关于我们", "url": "/about", "target": "_self", "icon": null, "sortOrder": 0, "isActive": true, "parentId": null }
+```
+
+| 字段 | 规则 |
+|------|------|
+| `name` | 必填，≤ 100 字符；编辑时不能为 `null` 或空串 |
+| `url` | 可选，≤ 500 字符，只能是 `http(s)://` 地址或以 `/` 开头的站内路径（不接受 `//host`）；可为空串或 `null` |
+| `target` | `_self`（默认）或 `_blank` |
+| `icon` | 可选，≤ 100 字符 |
+| `sortOrder` | 可选整数，`null` 按 0 |
+| `isActive` | 布尔（只认 JSON 的 `true` / `false`） |
+| `parentId` | 已有菜单的 ID 或 `null`（顶级）；不存在、为自己或自己的子孙时 400 |
 
 ---
 
@@ -585,12 +599,22 @@
 
 ## 十四、友情链接 `/friend-links`
 
-🔒 写操作需要认证
+`GET /friend-links` — 列表，可选登录：`admin` 看到全部友链与完整字段（含 `isVisible`、`sortOrder`）；
+其他人（游客、其他角色）只看到「显示」中且地址为 http(s) 的友链，每条只有 `id`、`name`、`url`、`logo`、`description`。
+按 `sortOrder` 升序、新建的在前。
 
-`GET /friend-links` — 列表  
+🔒 写操作需要 `admin` 角色：
+
 `POST /friend-links` — 创建  
-`PATCH /friend-links/:id` — 更新  
+`PATCH /friend-links/:id` — 更新（字段同创建、都可省略）  
 `DELETE /friend-links/:id` — 删除
+
+```json
+{ "name": "示例站", "url": "https://example.com", "logo": "/uploads/logo.png", "description": "可选", "sortOrder": 0, "isVisible": true }
+```
+
+`name` 必填 ≤ 100 字符；`url` 必填，只能是 `http://` 或 `https://` 开头的完整地址；`logo` 为空、http(s) 地址或站内路径；
+`sortOrder` 整数（`null` 按 0）；`isVisible` 布尔。其余字段 400。
 
 ---
 

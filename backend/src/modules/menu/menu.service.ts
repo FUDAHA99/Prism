@@ -1,19 +1,13 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Menu } from './entities/menu.entity';
+import { CreateMenuDto, UpdateMenuDto } from './dto/menu.dto';
 
-export interface CreateMenuDto {
-  name: string;
-  url?: string;
-  target?: '_self' | '_blank';
-  icon?: string;
-  sortOrder?: number;
-  isActive?: boolean;
-  parentId?: string;
-}
+/** 沿父链向上找环时最多走几层：菜单不会这么深，走到上限说明库里已有环 */
+const MAX_MENU_DEPTH = 100;
 
-export type UpdateMenuDto = Partial<CreateMenuDto>;
+type MenuPatch = Partial<Pick<Menu, 'name' | 'url' | 'target' | 'icon' | 'sortOrder' | 'isActive' | 'parentId'>>;
 
 @Injectable()
 export class MenuService {
@@ -35,19 +29,74 @@ export class MenuService {
     return menu;
   }
 
+  /**
+   * 只写 DTO 声明的列（逐字段挑选，不展开请求体）：此前 repository.create(dto) 原样写库，
+   * 带 id 会让 save 变成 UPDATE、覆盖另一个菜单。
+   */
   async create(dto: CreateMenuDto): Promise<Menu> {
-    const menu = this.menuRepository.create(dto);
+    const parentId = dto.parentId ?? null;
+    if (parentId) await this.assertParentUsable(parentId, null);
+
+    const menu = this.menuRepository.create({
+      name: dto.name,
+      url: dto.url ?? null,
+      target: dto.target ?? '_self',
+      icon: dto.icon ?? null,
+      sortOrder: dto.sortOrder ?? 0,
+      isActive: dto.isActive ?? true,
+      parentId,
+    });
     return this.menuRepository.save(menu);
   }
 
   async update(id: string, dto: UpdateMenuDto): Promise<Menu> {
     await this.findOne(id);
-    await this.menuRepository.update(id, dto);
+
+    const patch: MenuPatch = {};
+    if (dto.name !== undefined) patch.name = dto.name;
+    if (dto.url !== undefined) patch.url = dto.url;
+    if (dto.target !== undefined) patch.target = dto.target;
+    if (dto.icon !== undefined) patch.icon = dto.icon;
+    if (dto.sortOrder !== undefined) patch.sortOrder = dto.sortOrder ?? 0;
+    if (dto.isActive !== undefined) patch.isActive = dto.isActive;
+    // null 表示改为顶级菜单
+    if (dto.parentId !== undefined) patch.parentId = dto.parentId;
+
+    if (patch.parentId) await this.assertParentUsable(patch.parentId, id);
+
+    if (Object.keys(patch).length > 0) {
+      await this.menuRepository.update(id, patch);
+    }
     return this.findOne(id);
   }
 
   async remove(id: string): Promise<void> {
     await this.findOne(id);
     await this.menuRepository.delete(id);
+  }
+
+  /** 父菜单须存在（此前不存在的 ID 撞外键 500），且不能是自己或自己的子孙（成环） */
+  private async assertParentUsable(parentId: string, selfId: string | null): Promise<void> {
+    if (selfId && parentId === selfId) {
+      throw new BadRequestException('不能把菜单设为自己的父菜单');
+    }
+    let cursor: string | null = parentId;
+    for (let depth = 0; cursor; depth++) {
+      if (depth >= MAX_MENU_DEPTH) {
+        throw new BadRequestException('父菜单层级过深或已成环');
+      }
+      const node = await this.menuRepository.findOne({
+        select: { id: true, parentId: true },
+        where: { id: cursor },
+      });
+      if (!node) {
+        if (cursor === parentId) throw new BadRequestException('父菜单不存在');
+        return;
+      }
+      if (selfId && node.parentId === selfId) {
+        throw new BadRequestException('不能把菜单移到它自己的子菜单下');
+      }
+      cursor = node.parentId ?? null;
+    }
   }
 }

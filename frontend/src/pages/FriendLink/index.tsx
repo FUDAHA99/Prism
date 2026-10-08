@@ -25,6 +25,7 @@ import {
 import type { CreateFriendLinkData } from '../../api/friendLink'
 import PageHeader from '../../components/common/PageHeader'
 import type { FriendLink } from '../../types'
+import { safeHref } from '../../utils/safe-href'
 
 const { Text, Link } = Typography
 
@@ -134,12 +135,20 @@ export default function FriendLinkPage() {
       dataIndex: 'url',
       key: 'url',
       ellipsis: true,
-      render: (url: string) => (
-        <Link href={url} target="_blank" rel="noopener noreferrer">
-          <LinkOutlined style={{ marginRight: 4 }} />
-          {url}
-        </Link>
-      ),
+      render: (url: string) => {
+        const href = safeHref(url)
+        // 不是 http(s) 的历史数据（如 javascript:）只显示文本，不能点
+        return href ? (
+          <Link href={href} target="_blank" rel="noopener noreferrer">
+            <LinkOutlined style={{ marginRight: 4 }} />
+            {url}
+          </Link>
+        ) : (
+          <Text type="danger" title="链接协议不安全，已禁止点击">
+            {url}
+          </Text>
+        )
+      },
     },
     {
       title: '显示',

@@ -31,6 +31,7 @@ import {
 import type { CreateMenuData } from '../../api/menu'
 import PageHeader from '../../components/common/PageHeader'
 import type { MenuItem } from '../../types'
+import { safeHref } from '../../utils/safe-href'
 
 const { Text, Link } = Typography
 
@@ -127,7 +128,8 @@ export default function MenuPage() {
     form.validateFields().then((values) => {
       const payload: CreateMenuData = {
         ...values,
-        parentId: values.parentId || undefined,
+        // 清空「父级菜单」时 Select 给的是 undefined，JSON 里会被丢掉、后端当作「不修改」：显式传 null 才能改回顶级菜单
+        parentId: values.parentId || null,
       }
       if (modalMode === 'create') {
         createMutation.mutate(payload)
@@ -162,14 +164,20 @@ export default function MenuPage() {
       dataIndex: 'url',
       key: 'url',
       ellipsis: true,
-      render: (url: string, record) =>
-        url ? (
-          <Link href={url} target={record.target} rel="noopener noreferrer">
+      render: (url: string, record) => {
+        if (!url) return <Text type="secondary">—</Text>
+        const href = safeHref(url)
+        // 不是 http(s) / 站内路径的历史数据（如 javascript:）只显示文本，不能点
+        return href ? (
+          <Link href={href} target={record.target} rel="noopener noreferrer">
             {url}
           </Link>
         ) : (
-          <Text type="secondary">—</Text>
-        ),
+          <Text type="danger" title="链接协议不安全，已禁止点击">
+            {url}
+          </Text>
+        )
+      },
     },
     {
       title: '打开方式',

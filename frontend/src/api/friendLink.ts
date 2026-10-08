@@ -3,10 +3,12 @@ import type { FriendLink } from '../types'
 
 export interface CreateFriendLinkData {
   name: string
+  /** http:// 或 https:// 开头的完整地址，其他协议后端 400 */
   url: string
-  logo?: string
-  description?: string
-  sortOrder?: number
+  logo?: string | null
+  description?: string | null
+  /** null 按 0 处理 */
+  sortOrder?: number | null
   isVisible?: boolean
 }
 

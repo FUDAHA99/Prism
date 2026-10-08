@@ -10,7 +10,8 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags, ApiBearerAuth } from '@nestjs/swagger';
-import { MenuService, CreateMenuDto, UpdateMenuDto } from './menu.service';
+import { MenuService } from './menu.service';
+import { CreateMenuDto, UpdateMenuDto } from './dto/menu.dto';
 import { Access } from '../../common/authz/access.decorator';
 
 @ApiTags('导航菜单')

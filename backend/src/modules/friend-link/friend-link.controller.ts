@@ -19,20 +19,21 @@ import { FriendLinkService } from './friend-link.service';
 import { CreateFriendLinkDto } from './dto/create-friend-link.dto';
 import { UpdateFriendLinkDto } from './dto/update-friend-link.dto';
 import { Access } from '../../common/authz/access.decorator';
+import { CurrentViewer, Viewer } from '../../common/authz/viewer';
 
 @ApiTags('友情链接')
 @Controller('friend-links')
 export class FriendLinkController {
   constructor(private readonly friendLinkService: FriendLinkService) {}
 
+  /** 后台友链页与公开读共用：管理员看全部，其他人只看「显示」的友链与公开字段（见 FriendLinkService.findAll） */
   @Get()
   @Access('optional')
-  @ApiOperation({ summary: '获取友情链接列表' })
+  @ApiOperation({ summary: '获取友情链接列表（管理员看全部；其他人只看显示中的友链）' })
   @ApiResponse({ status: 200, description: '获取成功' })
   @HttpCode(HttpStatus.OK)
-  async findAll() {
-    const links = await this.friendLinkService.findAll();
-    return links;
+  async findAll(@CurrentViewer() viewer: Viewer) {
+    return this.friendLinkService.findAll(viewer);
   }
 
   @Post()

@@ -1,43 +1,22 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import {
-  IsString,
-  IsOptional,
-  IsNumber,
-  IsBoolean,
-  MaxLength,
-} from 'class-validator';
+import { IsNotEmpty, IsString, Matches, MaxLength } from 'class-validator';
+import { unlessUndefined } from '../../movie/dto/movie-dto.helpers';
+import { FRIEND_LINK_URL_MESSAGE, FRIEND_LINK_URL_PATTERN, FriendLinkOptionalFieldsDto } from './create-friend-link.dto';
 
-export class UpdateFriendLinkDto {
-  @ApiPropertyOptional({ description: '链接名称' })
-  @IsOptional()
+/** PATCH /friend-links/:id：字段同新建，都可省略；name / url 是 NOT NULL 列，提交 null 或空串 400 */
+export class UpdateFriendLinkDto extends FriendLinkOptionalFieldsDto {
+  @ApiPropertyOptional({ description: '网站名称', maxLength: 100 })
+  @unlessUndefined
   @IsString()
-  @MaxLength(100)
+  @IsNotEmpty({ message: '网站名称不能为空' })
+  @MaxLength(100, { message: '网站名称不能超过 100 个字符' })
   name?: string;
 
-  @ApiPropertyOptional({ description: '链接URL' })
-  @IsOptional()
+  @ApiPropertyOptional({ description: '链接地址（http / https）', maxLength: 500 })
+  @unlessUndefined
   @IsString()
-  @MaxLength(500)
+  @IsNotEmpty({ message: '链接地址不能为空' })
+  @MaxLength(500, { message: '链接地址不能超过 500 个字符' })
+  @Matches(FRIEND_LINK_URL_PATTERN, { message: FRIEND_LINK_URL_MESSAGE })
   url?: string;
-
-  @ApiPropertyOptional({ description: 'Logo图片URL' })
-  @IsOptional()
-  @IsString()
-  @MaxLength(500)
-  logo?: string;
-
-  @ApiPropertyOptional({ description: '描述' })
-  @IsOptional()
-  @IsString()
-  description?: string;
-
-  @ApiPropertyOptional({ description: '排序顺序' })
-  @IsOptional()
-  @IsNumber()
-  sortOrder?: number;
-
-  @ApiPropertyOptional({ description: '是否可见' })
-  @IsOptional()
-  @IsBoolean()
-  isVisible?: boolean;
 }
