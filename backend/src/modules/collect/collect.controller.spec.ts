@@ -232,5 +232,22 @@ describe('CollectController（HTTP）', () => {
       const res = await http().get('/collect/logs').query({ pageSize: 1000 });
       expect(res.status).toBe(400);
     });
+
+    it.each(['page=abc', 'page=0', 'page=-1', 'page=', 'pageSize=0', 'pageSize=1.5', 'pageSize=abc', 'sourceId[]=x'])(
+      '非法分页参数 %s → 400，不会把 NaN / 负数交给查询（此前 500）',
+      async (qs) => {
+        executor.listLogs.mockClear();
+        const res = await http().get(`/collect/logs?${qs}`);
+        expect(res.status).toBe(400);
+        expect(executor.listLogs).not.toHaveBeenCalled();
+      },
+    );
+
+    it('只带其中一个分页参数时，另一个取缺省值', async () => {
+      await http().get('/collect/logs').query({ page: 3 }).expect(200);
+      expect(executor.listLogs).toHaveBeenLastCalledWith(expect.objectContaining({ page: 3, pageSize: 20 }));
+      await http().get('/collect/logs').query({ pageSize: 50 }).expect(200);
+      expect(executor.listLogs).toHaveBeenLastCalledWith(expect.objectContaining({ page: 1, pageSize: 50 }));
+    });
   });
 });
