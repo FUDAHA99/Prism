@@ -134,9 +134,41 @@ function v6InBlock(groups: number[], base: string, prefix: number): boolean {
   return true;
 }
 
-function classifyIPv4Number(ip: number): string | null {
+/** 判定结果：label 是日志用的拦截原因，range 是给运维看的网段说明（CIDR + 中文名） */
+interface Verdict {
+  label: string;
+  range: string;
+}
+
+/** 拦截原因标签 → 中文名称（只用于错误提示里的网段说明） */
+const RANGE_NAMES: Readonly<Record<string, string>> = {
+  'this-network': '本网络',
+  private: '私有网段',
+  cgnat: '运营商级 NAT 共享地址段',
+  loopback: '本机回环',
+  'link-local': '链路本地（含云元数据地址）',
+  'ietf-protocol': 'IETF 协议保留段',
+  documentation: '文档示例段',
+  '6to4-relay': '6to4 中继段',
+  benchmarking: '基准测试保留段',
+  multicast: '组播',
+  reserved: '保留段',
+  'ipv4-compatible': 'IPv4 兼容地址（已废弃）',
+  'ipv4-translated': 'IPv4 转换地址',
+  'nat64-local': '本地 NAT64 段',
+  discard: '丢弃前缀',
+  'ietf-special': 'IETF 特殊用途段',
+  'srv6-sid': 'SRv6 SID 段',
+  'unique-local': '唯一本地地址（ULA）',
+  'site-local': '站点本地（已废弃）',
+  unspecified: '未指定地址',
+};
+
+const rangeOf = (cidr: string, label: string) => `${cidr} ${RANGE_NAMES[label] ?? label}`;
+
+function classifyIPv4Verdict(ip: number): Verdict | null {
   for (const [base, prefix, label] of V4_BLOCKS) {
-    if (v4InBlock(ip, base, prefix)) return label;
+    if (v4InBlock(ip, base, prefix)) return { label, range: rangeOf(`${base}/${prefix}`, label) };
   }
   return null;
 }
@@ -145,34 +177,46 @@ function embeddedV4(hi: number, lo: number): number {
   return ((hi << 16) | lo) >>> 0;
 }
 
-function classifyIPv6Groups(g: number[]): string | null {
+/** 内嵌 IPv4 的几类前缀：按内嵌的 IPv4 判定，标签与说明都带上外层前缀 */
+function embeddedVerdict(prefixLabel: string, prefixRange: string, v4: number): Verdict | null {
+  const inner = classifyIPv4Verdict(v4);
+  return inner ? { label: `${prefixLabel}:${inner.label}`, range: `${prefixRange} 内嵌 ${inner.range}` } : null;
+}
+
+function classifyIPv6Verdict(g: number[]): Verdict | null {
   const zeroUpTo = (n: number) => g.slice(0, n).every((x) => x === 0);
 
-  if (zeroUpTo(8)) return 'unspecified';
-  if (zeroUpTo(7) && g[7] === 1) return 'loopback';
+  if (zeroUpTo(8)) return { label: 'unspecified', range: rangeOf('::/128', 'unspecified') };
+  if (zeroUpTo(7) && g[7] === 1) return { label: 'loopback', range: rangeOf('::1/128', 'loopback') };
 
   // ::ffff:a.b.c.d（IPv4-mapped）：按内嵌的 IPv4 判定，[::ffff:127.0.0.1] 与 127.0.0.1 同等对待
   if (zeroUpTo(5) && g[5] === 0xffff) {
-    const reason = classifyIPv4Number(embeddedV4(g[6], g[7]));
-    return reason ? `ipv4-mapped:${reason}` : null;
+    return embeddedVerdict('ipv4-mapped', 'IPv4 映射地址 ::ffff:0:0/96', embeddedV4(g[6], g[7]));
   }
   // 64:ff9b::/96（NAT64 well-known prefix）：经 NAT64 网关到达内嵌的 IPv4
   if (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((x) => x === 0)) {
-    const reason = classifyIPv4Number(embeddedV4(g[6], g[7]));
-    return reason ? `nat64:${reason}` : null;
+    return embeddedVerdict('nat64', 'NAT64 64:ff9b::/96', embeddedV4(g[6], g[7]));
   }
   // 2002::/16（6to4）：第 2、3 组是内嵌的 IPv4
   if (g[0] === 0x2002) {
-    const reason = classifyIPv4Number(embeddedV4(g[1], g[2]));
-    return reason ? `6to4:${reason}` : null;
+    return embeddedVerdict('6to4', '6to4 2002::/16', embeddedV4(g[1], g[2]));
   }
 
   for (const [base, prefix, label] of V6_BLOCKS) {
-    if (v6InBlock(g, base, prefix)) return label;
+    if (v6InBlock(g, base, prefix)) return { label, range: rangeOf(`${base}/${prefix}`, label) };
   }
   // 全球单播只分配在 2000::/3，其余都是未分配/保留
-  if ((g[0] & 0xe000) !== 0x2000) return 'reserved';
+  if ((g[0] & 0xe000) !== 0x2000) return { label: 'reserved', range: '2000::/3 以外的未分配段' };
   return null;
+}
+
+function classifyIpVerdict(ip: string): Verdict | null {
+  const text = ip.startsWith('[') && ip.endsWith(']') ? ip.slice(1, -1) : ip;
+  const v4 = parseIPv4(text);
+  if (v4 !== null) return classifyIPv4Verdict(v4);
+  const v6 = parseIPv6(text);
+  if (v6 !== null) return classifyIPv6Verdict(v6);
+  return { label: 'invalid-ip', range: '无法识别的地址' };
 }
 
 /**
@@ -180,12 +224,16 @@ function classifyIPv6Groups(g: number[]): string | null {
  * 返回拦截原因；null 表示公网地址、可以访问。不是合法 IP 一律拦截。
  */
 export function classifyIp(ip: string): string | null {
-  const text = ip.startsWith('[') && ip.endsWith(']') ? ip.slice(1, -1) : ip;
-  const v4 = parseIPv4(text);
-  if (v4 !== null) return classifyIPv4Number(v4);
-  const v6 = parseIPv6(text);
-  if (v6 !== null) return classifyIPv6Groups(v6);
-  return 'invalid-ip';
+  return classifyIpVerdict(ip)?.label ?? null;
+}
+
+/**
+ * 被拦截地址所在的网段说明，例如「198.18.0.0/15 基准测试保留段」；公网地址返回 null。
+ * 用于告诉运维「域名解析到了哪类网段」（fake-IP 代理会把所有域名解析到 198.18.0.0/15），
+ * 只给网段、不给具体 IP，不暴露内网的地址分配。
+ */
+export function describeReservedAddress(ip: string): string | null {
+  return classifyIpVerdict(ip)?.range ?? null;
 }
 
 /**

@@ -2,7 +2,7 @@ import * as http from 'http';
 import { AddressInfo } from 'net';
 import * as zlib from 'zlib';
 import { classifyIp } from './address-policy';
-import { createSafeFetch, SafeFetch, safeFetch, SafeFetchError } from './safe-fetch';
+import { createSafeFetch, resolvedToReservedMessage, SafeFetch, safeFetch, SafeFetchError } from './safe-fetch';
 
 /**
  * safe-fetch 的集成测试：在 127.0.0.1 上起真实的 HTTP 服务器。
@@ -193,8 +193,11 @@ const FIXED_MESSAGES = new Set([
   '网络请求失败',
 ]);
 
+/** 唯一带变量的文案：域名解析到保留网段，只带网段说明（不含 IP、域名、响应内容） */
+const RESOLVED_RESERVED = /^目标域名解析到内网\/保留网段：[^，；]+，已拒绝；若服务器 DNS 使用 fake-IP 代理，需让采集域名走真实 DNS 解析$/;
+
 function expectSafeMessage(err: SafeFetchError) {
-  expect(FIXED_MESSAGES.has(err.message)).toBe(true);
+  expect(FIXED_MESSAGES.has(err.message) || RESOLVED_RESERVED.test(err.message)).toBe(true);
   expect(err.message).not.toContain(SECRET);
 }
 
@@ -340,6 +343,41 @@ describe('建连时校验 DNS 解析结果（防 DNS rebinding）', () => {
     expect(dns.calls).toEqual(['rebind.example.net', 'rebind.example.net']);
     expect(a.hits.get('/chain/1')).toBe(1);
     expect(a.hits.get('/chain/0')).toBeUndefined();
+  });
+
+  it('fake-IP 代理环境：域名解析到 198.18.0.0/15 时，错误说明网段与可能原因，但不回显 IP 与域名', async () => {
+    const dns = fakeResolve({ 'res.example.com': ['198.20.0.68', '198.18.0.68', 'fc00::43'] });
+    const err = await fetchError(createSafeFetch({ resolve: dns.resolve }), 'https://res.example.com/api.php?key=K');
+    expect(err.code).toBe('BLOCKED_ADDRESS');
+    expect(err.message).toBe(
+      '目标域名解析到内网/保留网段：198.18.0.0/15 基准测试保留段，已拒绝；若服务器 DNS 使用 fake-IP 代理，需让采集域名走真实 DNS 解析',
+    );
+    expectSafeMessage(err);
+    for (const leak of ['198.18.0.68', '198.20.0.68', 'fc00::43', 'res.example.com', 'key=K']) {
+      expect(err.message).not.toContain(leak);
+    }
+    // 具体地址只进服务端日志
+    expect(err.detail).toContain('198.18.0.68');
+  });
+
+  it.each([
+    [['10.0.0.5'], '10.0.0.0/8 私有网段'],
+    [['::ffff:192.168.1.10'], 'IPv4 映射地址 ::ffff:0:0/96 内嵌 192.168.0.0/16 私有网段'],
+    [['169.254.169.254'], '169.254.0.0/16 链路本地（含云元数据地址）'],
+  ])('解析到 %j：文案里给出所在网段 %s', async (answers, range) => {
+    const dns = fakeResolve({ 'internal.example.net': answers });
+    const err = await fetchError(createSafeFetch({ resolve: dns.resolve }), 'http://internal.example.net/');
+    expect(err.code).toBe('BLOCKED_ADDRESS');
+    expect(err.message).toBe(resolvedToReservedMessage(range));
+    expect(err.message).not.toContain(answers[0]);
+  });
+
+  it('IP 字面量与内网域名后缀在解析之前就被拦截，仍用原来的固定文案', async () => {
+    for (const url of ['http://198.18.0.68/', 'http://10.0.0.5/', 'http://printer.local/']) {
+      const err = await fetchError(safeFetch, url);
+      expect(err.code).toBe('BLOCKED_ADDRESS');
+      expect(err.message).toBe('目标地址指向内网、本机或保留地址，已拦截');
+    }
   });
 
   it('域名解析失败给出固定文案', async () => {

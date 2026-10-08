@@ -3,7 +3,7 @@ import * as http from 'http';
 import * as https from 'https';
 import { isIP, LookupFunction } from 'net';
 import * as zlib from 'zlib';
-import { classifyDomainName, classifyIp } from './address-policy';
+import { classifyDomainName, classifyIp, describeReservedAddress } from './address-policy';
 import { sanitizeOutgoingHeaders } from './http-headers';
 
 /**
@@ -15,7 +15,8 @@ import { sanitizeOutgoingHeaders } from './http-headers';
  * - 不自动跟随重定向：每一跳都重新做协议与地址检查，最多 3 跳；跨源跳转只保留无害请求头；
  * - 总时限覆盖所有跳与读 body；响应体按解压后的字节数限长（防解压炸弹）；
  * - 错误只有固定的中文文案（SafeFetchError.message），绝不包含响应体；
- *   被拦截的地址等细节放在 detail 里，只用于服务端日志。
+ *   被拦截的具体地址等细节放在 detail 里，只用于服务端日志。唯一带变量的文案是「域名解析到保留网段」：
+ *   只说网段（如 198.18.0.0/15），不回显 IP 与域名，让运维能认出 fake-IP 代理之类的 DNS 环境问题。
  *
  * 用 node:http/https 而不是全局 fetch：全局 fetch（undici）没法换连接时的 DNS 解析，
  * 而 undici 包本身不在依赖里；http.request 的 lookup 选项是稳定 API。
@@ -59,13 +60,25 @@ const ERROR_MESSAGES: Record<SafeFetchErrorCode, string> = {
   NETWORK: '网络请求失败',
 };
 
+/**
+ * 域名在建连时解析到了保留网段：说明是哪类网段，并提示最常见的环境原因。
+ * 服务器 DNS 若经过 fake-IP 模式的代理（Clash 等），所有域名都会解析到 198.18.0.0/15，采集会全部被拦。
+ */
+export function resolvedToReservedMessage(range: string | null): string {
+  return (
+    `目标域名解析到内网/保留网段${range ? `：${range}` : ''}，已拒绝；` +
+    '若服务器 DNS 使用 fake-IP 代理，需让采集域名走真实 DNS 解析'
+  );
+}
+
 export class SafeFetchError extends Error {
   readonly code: SafeFetchErrorCode;
   /** 仅供服务端日志（被拦截的 IP、底层错误码等），不要返回给客户端 */
   readonly detail?: string;
 
-  constructor(code: SafeFetchErrorCode, detail?: string) {
-    super(ERROR_MESSAGES[code]);
+  /** @param message 只给需要带网段说明的拦截用；其余一律用 ERROR_MESSAGES 的固定文案 */
+  constructor(code: SafeFetchErrorCode, detail?: string, message?: string) {
+    super(message ?? ERROR_MESSAGES[code]);
     this.name = 'SafeFetchError';
     this.code = code;
     this.detail = detail;
@@ -161,7 +174,11 @@ function guardedLookup(
         const reason = classifyAddress(a.address);
         if (reason) {
           return callback(
-            new SafeFetchError('BLOCKED_ADDRESS', `${hostname} -> ${a.address} (${reason})`),
+            new SafeFetchError(
+              'BLOCKED_ADDRESS',
+              `${hostname} -> ${a.address} (${reason})`,
+              resolvedToReservedMessage(describeReservedAddress(a.address)),
+            ),
             '',
             0,
           );

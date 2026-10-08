@@ -457,6 +457,17 @@ docker exec -e REDISCLI_AUTH="$rp" prism-redis sh -c 'redis-cli --scan --pattern
 
 检查 `DOMAIN` 环境变量是否正确填写了服务器的实际域名/IP。
 
+### 采集源测试连接提示「目标域名解析到内网/保留网段：…，已拒绝」
+
+后端只允许采集公网地址（防止后台被当成打内网的跳板），域名在连接时解析到的每个地址都要是公网地址。提示里冒号后面是解析结果所在的网段。
+采集源本来就填对了公网域名、却每个域名都这样报错（常见 `198.18.0.0/15 基准测试保留段`、`fc00::/7 唯一本地地址（ULA）`），
+多半是服务器（或 Docker）的 DNS 经过了 fake-IP 模式的代理（Clash、Surge 等会把所有域名解析到这类保留段）：
+让 Docker 使用真实的上游 DNS，或把采集域名排除在 fake-IP 之外。在 backend 容器里可以确认解析结果：
+
+```bash
+$COMPOSE exec -T backend node -e "require('dns').lookup('资源站域名', {all: true}, (e, a) => console.log(e || a))"
+```
+
 ---
 
 *最后更新：2026-10-09*
