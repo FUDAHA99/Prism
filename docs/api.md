@@ -361,7 +361,7 @@
 ### 5.3 获取评论列表（后台）
 `GET /comments`  🔒 admin / editor
 
-**查询参数**: `status`（`pending`/`approved`/`spam`）、`contentId`、`page`（默认 1）、`limit`（默认 20，最大 100）
+**查询参数**: `status`（`pending`/`approved`/`spam`，其他值 400）、`contentId`（UUID）、`page`（默认 1）、`limit`（默认 20，超过 100 按 100）
 
 返回完整字段（含 `guestEmail`、`ipAddress`、`userId`），供审核使用。
 
@@ -383,6 +383,9 @@
 
 ### 6.1 获取媒体列表
 `GET /media?mimeType=image&page=1&limit=18`
+
+**查询参数**: `mimeType`（MIME 前缀）、`uploaderId`（UUID）、`isUsed`（`true` / `false`）、`page`（默认 1）、`limit`（默认 20，1–100）；
+非法值或其他参数 400。
 
 **响应**：
 ```json
@@ -468,6 +471,7 @@
 ```json
 { "isActive": false }
 ```
+`isActive` 必填，只接受 JSON 的 `true` / `false`；不能禁用自己（400）。
 
 ### 7.7 分配角色
 `POST /users/:id/assign-roles`

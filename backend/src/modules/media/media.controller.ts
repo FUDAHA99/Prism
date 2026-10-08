@@ -17,7 +17,8 @@ import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiConsumes } from '
 // Node 内置的 v4 UUID；不用 uuid@14（纯 ESM，jest 的 CJS 环境加载不了本 controller）
 import { randomUUID } from 'crypto';
 
-import { MediaService, QueryMediaDto } from './media.service';
+import { MediaService } from './media.service';
+import { QueryMediaDto } from './dto/query-media.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthUser } from '../auth/interfaces/auth.interface';
 import { MulterExceptionFilter } from './multer-exception.filter';

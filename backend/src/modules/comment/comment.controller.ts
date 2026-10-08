@@ -9,8 +9,6 @@ import {
   Query,
   HttpCode,
   HttpStatus,
-  DefaultValuePipe,
-  ParseIntPipe,
   Req,
 } from '@nestjs/common';
 import { Request } from 'express';
@@ -21,9 +19,10 @@ import {
   ApiBearerAuth,
   ApiQuery,
 } from '@nestjs/swagger';
-import { CommentService, COMMENT_PAGE_SIZE_DEFAULT, COMMENT_PAGE_SIZE_MAX } from './comment.service';
+import { CommentService } from './comment.service';
 import { CreateCommentDto } from './dto/create-comment.dto';
 import { CommentBatchDto } from './dto/comment-batch.dto';
+import { QueryCommentDto } from './dto/query-comment.dto';
 import { Access } from '../../common/authz/access.decorator';
 import { CurrentViewer, Viewer } from '../../common/authz/viewer';
 import { clientIp } from '../../common/utils/client-ip';
@@ -42,22 +41,10 @@ export class CommentController {
   @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '获取评论列表' })
-  @ApiQuery({ name: 'contentId', required: false, description: '内容ID' })
-  @ApiQuery({ name: 'status', required: false, description: '状态: pending/approved/spam' })
-  @ApiQuery({ name: 'page', required: false, description: '页码（默认 1）' })
-  @ApiQuery({ name: 'limit', required: false, description: `每页数量（默认 ${COMMENT_PAGE_SIZE_DEFAULT}，最大 ${COMMENT_PAGE_SIZE_MAX}）` })
   @ApiResponse({ status: 200, description: '获取成功' })
   @HttpCode(HttpStatus.OK)
-  async findAll(
-    @Query('contentId') contentId: string | undefined,
-    @Query('status') status: string | undefined,
-    // 缺省时全局 ValidationPipe 会把 undefined 转成 NaN（+undefined），DefaultValuePipe 把 NaN 也当缺省；
-    // 越界值（0、负数、超大 limit）由 CommentService.findAll 夹紧
-    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number,
-    @Query('limit', new DefaultValuePipe(COMMENT_PAGE_SIZE_DEFAULT), ParseIntPipe) limit: number,
-  ) {
-    const result = await this.commentService.findAll({ contentId, status, page, limit });
-    return result;
+  async findAll(@Query() query: QueryCommentDto) {
+    return this.commentService.findAll(query);
   }
 
   @Get('public')

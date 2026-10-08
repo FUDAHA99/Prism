@@ -8,14 +8,7 @@ import { Repository } from 'typeorm';
 import { MediaFile } from './entities/media-file.entity';
 import { AuditService } from '../audit/audit.service';
 import { userSummaryColumns } from '../user/user-fields';
-
-export interface QueryMediaDto {
-  mimeType?: string;
-  uploaderId?: string;
-  isUsed?: boolean;
-  page?: number;
-  limit?: number;
-}
+import { QueryMediaDto } from './dto/query-media.dto';
 
 @Injectable()
 export class MediaService {

@@ -18,6 +18,7 @@ import { UserService } from './user.service';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { QueryUserDto } from './dto/query-user.dto';
+import { UpdateUserStatusDto } from './dto/update-user-status.dto';
 import { UserRoleIdsDto } from './dto/user-role-ids.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthUser } from '../auth/interfaces/auth.interface';
@@ -90,13 +91,13 @@ export class UserController {
   @ApiOperation({ summary: '激活/禁用用户' })
   @ApiResponse({ status: 200, description: '操作成功' })
   @ApiResponse({ status: 404, description: '用户不存在' })
-  @ApiResponse({ status: 400, description: '不能禁用自己的账户' })
+  @ApiResponse({ status: 400, description: '不能禁用自己的账户 / isActive 不是布尔' })
   async toggleStatus(
     @Param('id') id: string,
-    @Body('isActive') isActive: boolean,
+    @Body() dto: UpdateUserStatusDto,
     @CurrentUser() currentUser: AuthUser,
   ) {
-    return this.userService.toggleStatus(id, isActive, currentUser.id);
+    return this.userService.toggleStatus(id, dto.isActive, currentUser.id);
   }
 
   @Post(':id/assign-roles')

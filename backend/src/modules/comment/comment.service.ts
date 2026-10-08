@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Comment } from './entities/comment.entity';
 import { CreateCommentDto, COMMENT_GUEST_NAME_MAX } from './dto/create-comment.dto';
+import { QueryCommentDto } from './dto/query-comment.dto';
 import { Content, ContentStatus } from '../content/entities/content.entity';
 import { SiteSettingService } from '../site-setting/site-setting.service';
 import { Viewer } from '../../common/authz/viewer';
@@ -21,20 +22,13 @@ export interface PublicComment {
   children: PublicComment[];
 }
 
-export interface QueryCommentDto {
-  contentId?: string;
-  status?: string;
-  page?: number;
-  limit?: number;
-}
-
 /** 管理端评论列表的分页：缺省每页 20 条，上限 100 条（避免 ?limit=100000 一次拖出全表） */
 export const COMMENT_PAGE_SIZE_DEFAULT = 20;
 export const COMMENT_PAGE_SIZE_MAX = 100;
 
 /**
  * 把分页参数收敛成 [min, max] 内的整数；缺省或不是有限数字（NaN、Infinity）时用 fallback。
- * HTTP 入口已由 DefaultValuePipe + ParseIntPipe 转成整数，这里兜住越界值和其他调用方：
+ * HTTP 入口已由 QueryCommentDto 校验为整数（或缺省），这里兜住越界值和其他调用方：
  * TypeORM 的 skip(NaN) 会直接抛错（GET /comments 不带参数曾因此 500）。
  */
 function clampInt(v: unknown, fallback: number, min: number, max: number): number {

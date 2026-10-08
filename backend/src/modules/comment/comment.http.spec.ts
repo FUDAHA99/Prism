@@ -326,5 +326,29 @@ describe('评论接口 HTTP', () => {
       const res = await h.get('/comments', 'admin').expect(200);
       expect(res.body.data.data[0]).toMatchObject({ ipAddress: '127.0.0.1', guestEmail: 'guest@example.com', userId: null });
     });
+
+    it('后台评论页的查询串（status / page / limit=20）与按内容筛选', async () => {
+      await comments.save([
+        { contentId: contentIds.published, body: 'p', status: 'pending' },
+        { contentId: contentIds.other, body: 'a', status: 'approved' },
+      ]);
+      let res = await h.get('/comments?status=pending&page=1&limit=20', 'editor').expect(200);
+      expect(res.body.data.data.map((c: Comment) => c.body)).toEqual(['p']);
+      expect(res.body.data.meta).toEqual({ total: 1, page: 1, limit: 20, totalPages: 1 });
+      res = await h.get(`/comments?contentId=${contentIds.other}`, 'editor').expect(200);
+      expect(res.body.data.data.map((c: Comment) => c.body)).toEqual(['a']);
+    });
+
+    it('越界的页码 / 每页数量照旧夹到合法范围', async () => {
+      const res = await h.get('/comments?page=0&limit=1000', 'admin').expect(200);
+      expect(res.body.data.meta).toMatchObject({ page: 1, limit: 100 });
+    });
+
+    it.each(['status=bogus', 'status=pending&status=spam', 'contentId=abc', 'page=abc', 'limit=1.5', 'foo=1'])(
+      '%s → 400（此前 status 传数组拼出非法 SQL）',
+      async (qs) => {
+        await h.get(`/comments?${qs}`, 'admin').expect(400);
+      },
+    );
   });
 });
