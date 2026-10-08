@@ -42,7 +42,7 @@ export class NovelController {
   }
 
   @Get()
-  @Access('public')
+  @Access('optional')
   @ApiOperation({ summary: '获取小说列表' })
   async findAll(@Query() query: QueryNovelDto) {
     return this.novelService.findAll(query);
@@ -106,7 +106,7 @@ export class NovelController {
   // ============ Chapters ============
 
   @Get(':id/chapters')
-  @Access('public')
+  @Access('optional')
   @ApiOperation({ summary: '获取小说章节列表' })
   async listChapters(
     @Param('id') novelId: string,
@@ -125,7 +125,7 @@ export class NovelController {
   }
 
   @Get('chapters/:chapterId')
-  @Access('public')
+  @Access('optional')
   @ApiOperation({ summary: '获取章节正文' })
   async getChapter(@Param('chapterId') chapterId: string) {
     const ch = await this.novelService.getChapter(chapterId);

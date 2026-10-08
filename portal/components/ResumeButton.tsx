@@ -50,9 +50,15 @@ export default function ResumeButton({ movieId, movieSlug, defaultHref }: Props)
           guestId,
         })
 
-        const res = await fetch(`/api/v1/watch-history?${params}`, {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        })
+        const query = (withToken: boolean) =>
+          fetch(`/api/v1/watch-history?${params}`, {
+            headers: withToken && token ? { Authorization: `Bearer ${token}` } : {},
+          })
+
+        let res = await query(true)
+        // access_token 是同源 admin 后台留下的；它过期 / 被注销时后端（严格可选登录）返回 401，
+        // 门户没有登录界面，去掉 token 按游客（guestId）再查一次
+        if (res.status === 401 && token) res = await query(false)
 
         if (res.ok) {
           const data = await res.json()

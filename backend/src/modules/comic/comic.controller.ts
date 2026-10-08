@@ -42,7 +42,7 @@ export class ComicController {
   }
 
   @Get()
-  @Access('public')
+  @Access('optional')
   @ApiOperation({ summary: '获取漫画列表' })
   async findAll(@Query() query: QueryComicDto) {
     return this.comicService.findAll(query);
@@ -106,7 +106,7 @@ export class ComicController {
   // ============ Chapters ============
 
   @Get(':id/chapters')
-  @Access('public')
+  @Access('optional')
   @ApiOperation({ summary: '获取漫画章节列表' })
   async listChapters(
     @Param('id') comicId: string,

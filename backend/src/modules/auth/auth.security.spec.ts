@@ -469,6 +469,8 @@ describe('认证核心安全行为', () => {
           const variant = `${s} ${tokens.accessToken}`;
           expect((await h.http().get('/probe/me').set('Authorization', variant)).status).toBe(401);
           expect((await h.http().get('/probe/admin').set('Authorization', variant)).status).toBe(401);
+          // 可选登录是严格的：已注销的 token 不会被当成游客放行
+          expect((await h.http().get('/probe/optional').set('Authorization', variant)).status).toBe(401);
         }
       },
     );
@@ -482,19 +484,22 @@ describe('认证核心安全行为', () => {
       ['缺 scheme', (t: string) => t],
       ['两个 token', (t: string) => `Bearer ${t},Bearer ${t}`],
       ['段内混入非 base64url 字符', (t: string) => `Bearer ${t.replace('.', '.+')}`],
-    ])('%s → 401（未注销的有效 token 也不行）', async (_name, variant) => {
+    ])('%s → 401（未注销的有效 token 也不行；可选登录接口同样 401）', async (_name, variant) => {
       const { tokens } = await login();
       expect((await me(tokens.accessToken)).status).toBe(200);
       expect((await h.http().get('/probe/me').set('Authorization', variant(tokens.accessToken))).status).toBe(401);
+      expect((await h.http().get('/probe/optional').set('Authorization', variant(tokens.accessToken))).status).toBe(401);
     });
 
-    it('可选登录接口：写法不对按匿名处理，不报错', async () => {
+    it('可选登录接口是严格的：只有完全不带 Authorization 才是匿名，带了写法不对的头就 401', async () => {
       const { tokens } = await login();
       const ok = await h.http().get('/probe/optional').set('Authorization', `Bearer ${tokens.accessToken}`);
       expect(ok.body).toEqual({ id: h.adminId });
+      const anon = await h.http().get('/probe/optional');
+      expect(anon.status).toBe(200);
+      expect(anon.body).toEqual({ id: null });
       const bad = await h.http().get('/probe/optional').set('Authorization', `Bearer ${tokens.accessToken} x`);
-      expect(bad.status).toBe(200);
-      expect(bad.body).toEqual({ id: null });
+      expect(bad.status).toBe(401);
     });
   });
 

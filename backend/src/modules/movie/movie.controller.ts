@@ -43,7 +43,7 @@ export class MovieController {
   }
 
   @Get()
-  @Access('public')
+  @Access('optional')
   @ApiOperation({ summary: '获取影视列表' })
   async findAll(@Query() query: QueryMovieDto) {
     return this.movieService.findAll(query);

@@ -8,7 +8,9 @@ import { Roles } from '../../modules/role/decorators/roles.decorator';
  * 路由访问级别（与 docs/access-matrix.md 的 target 列对应）：
  *
  * - `public`        匿名可用，不解析 token
- * - `optional`      匿名可用；带了有效 token 时填充 req.user（handler 只能用 req.user?.id）
+ * - `optional`      严格可选登录：没带 Authorization 头 → 匿名（req.user 为 undefined）；带了就必须是
+ *                   有效 access token（同 authenticated 的校验），否则 401。handler 用 CurrentViewer /
+ *                   isStaff（./viewer.ts）在全量视图与公开视图之间选择，不能用会在匿名时报错的 CurrentUser
  * - `authenticated` 任意已登录用户
  * - `staff`         后台内容角色：admin / editor
  * - `admin`         仅管理员

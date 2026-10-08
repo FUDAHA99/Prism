@@ -26,7 +26,9 @@ const CONTENT_TYPES: WatchContentType[] = ['movie', 'novel', 'comic'];
  * 不验签、不校验 exp、不查黑名单 —— 构造 `Bearer x.<自制payload>.y`
  * 即可读写任意用户的观看记录。现改用 Access('optional')（JwtOptionalGuard）走 Passport，
  * 由 JwtStrategy 统一完成验签、过期、禁用状态与黑名单检查；
- * 未登录时 req.user 为 undefined，按游客处理，不会 401。
+ * 没带 Authorization 头时 req.user 为 undefined，按游客（guestId）处理；
+ * 带了但无效（过期 / 注销 / 伪造）一律 401 —— 门户读的是同源 admin 后台留在 localStorage 的
+ * token，收到 401 会去掉 token 以游客身份重试（ResumeButton / PlayClient）。
  */
 @ApiTags('观看记录')
 @ApiBearerAuth()

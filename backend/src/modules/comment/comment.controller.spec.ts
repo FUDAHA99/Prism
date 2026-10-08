@@ -7,6 +7,7 @@ import { CommentController } from './comment.controller';
 import { RolesGuard } from '../role/guards/roles.guard';
 import { ROLES_KEY } from '../role/decorators/roles.decorator';
 import { ACCESS_LEVEL_KEY } from '../../common/authz/access.decorator';
+import { JwtOptionalGuard } from '../../common/guards/jwt-optional.guard';
 
 /**
  * 评论管理端接口的角色守卫回归测试（C7 的另一半；PII 白名单那一半在 comment.service.spec.ts）。
@@ -31,8 +32,11 @@ const MODERATOR_HANDLERS = [
   'batchDelete',
 ] as const;
 
-/** 前台匿名可用：GET /comments/public 与 POST /comments */
-const PUBLIC_HANDLERS = ['findPublicByContent', 'create'] as const;
+/** 前台匿名可用：GET /comments/public 不解析 token */
+const PUBLIC_HANDLERS = ['findPublicByContent'] as const;
+
+/** 前台匿名可用、但带了 token 就必须有效（严格可选登录）：POST /comments，身份由服务端按 req.user 填写 */
+const OPTIONAL_HANDLERS = ['create'] as const;
 
 const MODERATOR_ROLES = ['admin', 'editor'];
 
@@ -47,13 +51,13 @@ describe('CommentController 访问级别元数据', () => {
     expect(rolesOf(CommentController)).toBeUndefined();
   });
 
-  it('每个路由 handler 都已归类为管理端或公开（新增路由必须在这里显式登记）', () => {
+  it('每个路由 handler 都已归类为管理端、公开或可选登录（新增路由必须在这里显式登记）', () => {
     const routeHandlers = Object.getOwnPropertyNames(proto)
       .filter((name) => name !== 'constructor')
       .filter((name) => typeof proto[name] === 'function')
       .filter((name) => Reflect.hasMetadata(PATH_METADATA, proto[name]))
       .sort();
-    expect(routeHandlers).toEqual([...MODERATOR_HANDLERS, ...PUBLIC_HANDLERS].sort());
+    expect(routeHandlers).toEqual([...MODERATOR_HANDLERS, ...PUBLIC_HANDLERS, ...OPTIONAL_HANDLERS].sort());
   });
 
   describe.each(MODERATOR_HANDLERS)('管理端 %s', (handler) => {
@@ -77,6 +81,15 @@ describe('CommentController 访问级别元数据', () => {
       expect(typeof proto[handler]).toBe('function');
       expect(levelOf(proto[handler])).toBe('public');
       expect(guardsOf(proto[handler])).toBeUndefined();
+      expect(rolesOf(proto[handler])).toBeUndefined();
+    });
+  });
+
+  describe.each(OPTIONAL_HANDLERS)('可选登录 %s', (handler) => {
+    it('访问级别为 optional，只挂 JwtOptionalGuard、不要求角色', () => {
+      expect(typeof proto[handler]).toBe('function');
+      expect(levelOf(proto[handler])).toBe('optional');
+      expect(guardsOf(proto[handler])).toEqual([JwtOptionalGuard]);
       expect(rolesOf(proto[handler])).toBeUndefined();
     });
   });

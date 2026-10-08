@@ -25,7 +25,8 @@ import { Access } from '../../common/authz/access.decorator';
 
 /**
  * 评论管理端（读全字段含 guestEmail / 审核 / 删除）只对后台角色开放：Access('staff')。
- * 前台只用 GET /public 与 POST /（访问矩阵目标是 optional-auth，评论身份改由服务端填写在 1-F-2）。
+ * 前台只用 GET /public（public）与 POST /（optional：严格可选登录，带了无效 token 得 401；
+ * 门户发评论从不带 token。评论身份改由服务端按 req.user 填写在 1-F-2 的后续提交）。
  */
 @ApiTags('评论管理')
 @Controller('comments')
@@ -77,7 +78,7 @@ export class CommentController {
   }
 
   @Post()
-  @Access('public')
+  @Access('optional')
   @ApiOperation({ summary: '创建评论' })
   @ApiResponse({ status: 201, description: '创建成功' })
   async create(@Body() dto: CreateCommentDto) {

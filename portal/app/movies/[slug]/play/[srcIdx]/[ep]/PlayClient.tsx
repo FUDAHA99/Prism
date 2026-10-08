@@ -54,24 +54,31 @@ export default function PlayClient({ movie, srcIdx, epIdx, source, episode }: Pr
       const token = localStorage.getItem('access_token')
       const guestId = getGuestId()
 
-      try {
-        await fetch('/api/v1/watch-history/report', {
+      const body = JSON.stringify({
+        contentType: 'movie',
+        contentId: movie.id,
+        episodeId: episode.id,
+        srcIdx,
+        epIdx,
+        progressSec: Math.round(progressSec),
+        durationSec: Math.round(durationSec),
+        guestId,
+      })
+      const report = (withToken: boolean) =>
+        fetch('/api/v1/watch-history/report', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            ...(withToken && token ? { Authorization: `Bearer ${token}` } : {}),
           },
-          body: JSON.stringify({
-            contentType: 'movie',
-            contentId: movie.id,
-            episodeId: episode.id,
-            srcIdx,
-            epIdx,
-            progressSec: Math.round(progressSec),
-            durationSec: Math.round(durationSec),
-            guestId,
-          }),
+          body,
         })
+
+      try {
+        const res = await report(true)
+        // access_token 是同源 admin 后台留下的；它过期 / 被注销时后端（严格可选登录）返回 401，
+        // 门户没有登录界面，去掉 token 按游客（guestId）再报一次
+        if (res.status === 401 && token) await report(false)
 
         // 同时写入 localStorage 供 ResumeButton 读取（离线也能用）
         localStorage.setItem(resumeKey, String(Math.round(progressSec)))

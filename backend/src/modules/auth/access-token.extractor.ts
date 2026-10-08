@@ -10,14 +10,31 @@
  * 现在黑名单改按已验签载荷里的 jti 记（见 token-blacklist.util.ts），与头部怎么写无关，所以 scheme 的
  * 大小写可以放开；空白与多余内容仍然拒绝，取出的 token 只有一种可能。
  *
- * 取不到时返回 null：passport 据此判定「没带 token」（401；可选登录的接口按匿名处理）。
+ * 取不到时返回 null：passport 据此判定「没带 token」，一律 401。可选登录的接口只有在根本没带
+ * Authorization 头时才按匿名处理（presentsCredentials），带了却取不到同样 401。
  */
 export const BEARER_HEADER_PATTERN =
   /^[Bb][Ee][Aa][Rr][Ee][Rr] ([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/;
 
+const authorizationHeaderOf = (request: unknown): unknown =>
+  (request as { headers?: Record<string, unknown> } | null)?.headers?.authorization;
+
 export function extractAccessToken(request: unknown): string | null {
-  const header = (request as { headers?: Record<string, unknown> } | null)?.headers?.authorization;
+  const header = authorizationHeaderOf(request);
   if (typeof header !== 'string') return null;
   const match = BEARER_HEADER_PATTERN.exec(header);
   return match ? match[1] : null;
+}
+
+/**
+ * 请求是否出示了凭据：带了非空白的 Authorization 头，不管写法对不对、scheme 是什么。
+ *
+ * 严格可选登录（Access('optional')，见 JwtOptionalGuard）按它分流：没出示 → 匿名；出示了 → 必须是
+ * extractAccessToken 认得、JwtStrategy 验得过的 access token，否则 401。所以 "Bearer"、"Bearer  <tok>"、
+ * "Basic xxx"、"Bearer null" 都算出示了凭据（客户端带错了头应当暴露出来，而不是悄悄降级成游客）。
+ * 只有空白值不算：它不携带任何凭据，有的客户端没 token 时就发 `Authorization: `。
+ */
+export function presentsCredentials(request: unknown): boolean {
+  const header = authorizationHeaderOf(request);
+  return typeof header === 'string' && header.trim() !== '';
 }

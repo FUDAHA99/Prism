@@ -41,7 +41,7 @@ export class ContentController {
   }
 
   @Get()
-  @Access('public')
+  @Access('optional')
   @ApiOperation({ summary: '获取内容列表' })
   @ApiResponse({ status: 200, description: '获取成功' })
   async findAll(@Query() query: QueryContentDto) {

@@ -27,13 +27,14 @@ import { AppModule } from '../../app.module';
  *   (a) 路由集合与 MATRIX 完全相等：新增接口必须先在这里登记级别，删掉的接口必须同步删除；
  *   (b) 每个 handler 都用 Access(...) 声明了访问级别，未声明即失败；
  *   (c) 守卫链与角色元数据和级别精确对应（AuthGuard 在 RolesGuard 之前）；
- *   (d) 用真实 RolesGuard + Reflector 对匿名 / 无角色 / user / editor / admin 逐一裁决；
- *   (e) portal 实际调用的接口都必须是 public / optional（portal 从不带 Authorization）；
+ *   (d) 用真实 RolesGuard + Reflector 对匿名 / 无效 token / 无角色 / user / editor / admin 逐一裁决；
+ *   (e) portal 实际调用的接口都必须是 public / optional（portal 没有登录界面）；少数带同源 admin token 的
+ *       调用（PORTAL_TOKEN_CALLS）必须在 401 时以游客身份重试；
  *   (f) admin SPA 调用的每个接口都能解析到已注册路由（防止删接口误伤后台）。
  *
- * MATRIX 的来源是 docs/access-matrix.md 的 target 列，1-F-1 的翻译规则：
- * public / public-filtered → 'public'（过滤是 1-F-2 的事）；optional-auth → 已在读 req.user 的
- * watch-history 为 'optional'，其余暂为 'public'；staff:admin,editor → 'staff'；remove → 已删除。
+ * MATRIX 的来源是 docs/access-matrix.md 的 target 列，翻译规则：
+ * public / public-filtered → 'public'（过滤在 service 里按已发布 / 字段白名单做，不解析 token）；
+ * optional-auth → 'optional'（严格可选登录，见 JwtOptionalGuard）；staff:admin,editor → 'staff'；remove → 已删除。
  *
  * 1-F-3 把 Access() 改为只写元数据、由全局 AccessGuard 执行时，(c)(d) 的守卫链部分随实现调整，
  * MATRIX 本身不变 —— 它就是翻转前后语义等价的依据。
@@ -80,12 +81,12 @@ const MATRIX: Record<string, AccessLevel> = {
   'POST /api/v1/collect/sources/:id/run': 'admin',
   'POST /api/v1/collect/sources/:id/test': 'admin',
   // ComicController
-  'GET /api/v1/comics': 'public', // 矩阵目标 optional-auth，1-F-2 加发布状态过滤时改 optional
+  'GET /api/v1/comics': 'optional',
   'POST /api/v1/comics': 'staff',
   'DELETE /api/v1/comics/:id': 'staff',
   'GET /api/v1/comics/:id': 'staff',
   'PATCH /api/v1/comics/:id': 'staff',
-  'GET /api/v1/comics/:id/chapters': 'public', // 矩阵目标 optional-auth，1-F-2 改 optional
+  'GET /api/v1/comics/:id/chapters': 'optional',
   'POST /api/v1/comics/:id/chapters': 'staff',
   'POST /api/v1/comics/:id/publish': 'staff',
   'POST /api/v1/comics/:id/unpublish': 'staff',
@@ -95,7 +96,7 @@ const MATRIX: Record<string, AccessLevel> = {
   'GET /api/v1/comics/slug/:slug': 'public',
   // CommentController
   'GET /api/v1/comments': 'staff',
-  'POST /api/v1/comments': 'public', // 矩阵目标 optional-auth，1-F-2 改由服务端填身份时改 optional
+  'POST /api/v1/comments': 'optional',
   'DELETE /api/v1/comments/:id': 'staff',
   'GET /api/v1/comments/:id': 'staff',
   'PATCH /api/v1/comments/:id/approve': 'staff',
@@ -105,7 +106,7 @@ const MATRIX: Record<string, AccessLevel> = {
   'POST /api/v1/comments/batch/spam': 'staff',
   'GET /api/v1/comments/public': 'public',
   // ContentController
-  'GET /api/v1/contents': 'public', // 矩阵目标 optional-auth，1-F-2 改 optional
+  'GET /api/v1/contents': 'optional',
   'POST /api/v1/contents': 'staff',
   'DELETE /api/v1/contents/:id': 'staff',
   'GET /api/v1/contents/:id': 'staff',
@@ -114,7 +115,7 @@ const MATRIX: Record<string, AccessLevel> = {
   'POST /api/v1/contents/:id/unpublish': 'staff',
   'GET /api/v1/contents/slug/:slug': 'public',
   // FriendLinkController
-  'GET /api/v1/friend-links': 'public', // 矩阵目标 optional-auth，1-F-2 改 optional
+  'GET /api/v1/friend-links': 'optional',
   'POST /api/v1/friend-links': 'admin',
   'DELETE /api/v1/friend-links/:id': 'admin',
   'PATCH /api/v1/friend-links/:id': 'admin',
@@ -129,7 +130,7 @@ const MATRIX: Record<string, AccessLevel> = {
   'DELETE /api/v1/menus/:id': 'admin',
   'PATCH /api/v1/menus/:id': 'admin',
   // MovieController
-  'GET /api/v1/movies': 'public', // 矩阵目标 optional-auth，1-F-2 改 optional
+  'GET /api/v1/movies': 'optional',
   'POST /api/v1/movies': 'staff',
   'DELETE /api/v1/movies/:id': 'staff',
   'GET /api/v1/movies/:id': 'staff',
@@ -150,17 +151,17 @@ const MATRIX: Record<string, AccessLevel> = {
   'PATCH /api/v1/notices/:id': 'staff',
   'POST /api/v1/notices/:id/toggle-publish': 'staff',
   // NovelController
-  'GET /api/v1/novels': 'public', // 矩阵目标 optional-auth，1-F-2 改 optional
+  'GET /api/v1/novels': 'optional',
   'POST /api/v1/novels': 'staff',
   'DELETE /api/v1/novels/:id': 'staff',
   'GET /api/v1/novels/:id': 'staff',
   'PATCH /api/v1/novels/:id': 'staff',
-  'GET /api/v1/novels/:id/chapters': 'public', // 矩阵目标 optional-auth，1-F-2 改 optional
+  'GET /api/v1/novels/:id/chapters': 'optional',
   'POST /api/v1/novels/:id/chapters': 'staff',
   'POST /api/v1/novels/:id/publish': 'staff',
   'POST /api/v1/novels/:id/unpublish': 'staff',
   'DELETE /api/v1/novels/chapters/:chapterId': 'staff',
-  'GET /api/v1/novels/chapters/:chapterId': 'public', // 矩阵目标 optional-auth，1-F-2 改 optional
+  'GET /api/v1/novels/chapters/:chapterId': 'optional',
   'PATCH /api/v1/novels/chapters/:chapterId': 'staff',
   'GET /api/v1/novels/slug/:slug': 'public',
   // RoleController
@@ -200,8 +201,8 @@ const MATRIX: Record<string, AccessLevel> = {
 };
 
 /**
- * portal 实际调用的后端接口。portal 的 SSR（BACKEND_INTERNAL_URL）与浏览器请求都不带
- * Authorization，所以这些路由必须是 public 或 optional。下面的测试会扫描 portal 源码，
+ * portal 实际调用的后端接口。portal 没有登录界面，SSR（BACKEND_INTERNAL_URL）与浏览器请求都按游客访问，
+ * 所以这些路由必须是 public 或 optional。下面的测试会扫描 portal 源码，
  * 要求这份清单与源码里的调用点完全一致（新增调用必须登记，删掉的调用必须移除）。
  */
 const PORTAL_PATHS: readonly string[] = [
@@ -229,6 +230,14 @@ const PORTAL_PATHS: readonly string[] = [
   // portal/app/movies/[slug]/play/[srcIdx]/[ep]/PlayClient.tsx
   'POST /api/v1/watch-history/report',
 ];
+
+/**
+ * portal 里带 Authorization 的调用：读同源 localStorage 里 admin 后台留下的 access_token。
+ * optional 是严格可选登录，token 过期 / 被注销时得 401 而不是降级成游客，所以这些调用点必须
+ * 在 401 时去掉 token 以游客身份重试（否则管理员 token 过期后在门户看片，进度既存不上也读不到）。
+ * 新增带 token 的调用必须登记在这里并照此处理；public 路由不解析 token，带了也没有意义。
+ */
+const PORTAL_TOKEN_CALLS: readonly string[] = ['GET /api/v1/watch-history', 'POST /api/v1/watch-history/report'];
 
 /**
  * admin SPA 里已知解析不到后端路由的调用（登记在此避免掩盖其他回归）。应保持为空：
@@ -417,8 +426,12 @@ const EXPECTED_GUARDS: Record<AccessLevel, unknown[]> = {
   admin: [AuthGuard('jwt'), RolesGuard],
 };
 
+/** 带了 Authorization 头、但 token 无效（伪造 / 过期 / 已注销 / 签发于改密之前 / 用户已禁用） */
+const INVALID_TOKEN = Symbol('带了无效 token');
+
 const PRINCIPALS: ReadonlyArray<[string, unknown]> = [
   ['匿名', undefined],
+  ['无效 token', INVALID_TOKEN],
   ['roles 未定义', { id: 'u-1' }],
   ['roles []', { id: 'u-2', roles: [] }],
   ["roles ['user']", { id: 'u-3', roles: ['user'] }],
@@ -428,13 +441,15 @@ const PRINCIPALS: ReadonlyArray<[string, unknown]> = [
 
 type Decision = 'allow' | 401 | 403;
 
+// optional 是严格可选登录：没带头 = 匿名放行；带了无效 token 与 authenticated 一样 401（不静默降级为匿名）。
+// public 不解析 token，带什么头都一样放行。
 const EXPECTED_DECISIONS: Record<AccessLevel, Decision[]> = {
-  //               匿名   未定义  []    user   editor   admin
-  public:        ['allow', 'allow', 'allow', 'allow', 'allow', 'allow'],
-  optional:      ['allow', 'allow', 'allow', 'allow', 'allow', 'allow'],
-  authenticated: [401, 'allow', 'allow', 'allow', 'allow', 'allow'],
-  staff:         [401, 403, 403, 403, 'allow', 'allow'],
-  admin:         [401, 403, 403, 403, 403, 'allow'],
+  //               匿名     无效token 未定义   []       user     editor   admin
+  public:        ['allow', 'allow', 'allow', 'allow', 'allow', 'allow', 'allow'],
+  optional:      ['allow', 401, 'allow', 'allow', 'allow', 'allow', 'allow'],
+  authenticated: [401, 401, 'allow', 'allow', 'allow', 'allow', 'allow'],
+  staff:         [401, 401, 403, 403, 403, 'allow', 'allow'],
+  admin:         [401, 401, 403, 403, 403, 403, 'allow'],
 };
 
 const contextFor = (route: RouteInfo, user: unknown) =>
@@ -447,15 +462,16 @@ const contextFor = (route: RouteInfo, user: unknown) =>
 
 /**
  * 按守卫链顺序裁决。AuthGuard('jwt') 由 passport 校验 token，单测里以「有无 req.user」
- * 近似（有效 token ⇔ 有 user）；JwtOptionalGuard 永不拒绝；RolesGuard 用真实实现 + 真实 Reflector
- * 读路由上的真实元数据。token 解析本身的行为由运行时探测覆盖，不在这里模拟。
+ * 近似（有效 token ⇔ 有 user）；JwtOptionalGuard 没带头放行、带了无效 token 401（严格可选登录）；
+ * RolesGuard 用真实实现 + 真实 Reflector 读路由上的真实元数据。两个 JWT 守卫对真实请求的行为
+ * （验签、过期、黑名单、吊销、禁用、角色取自库）由 common/guards/jwt-optional.guard.spec.ts 走 HTTP 覆盖。
  */
 function decide(route: RouteInfo, user: unknown): Decision {
   for (const guard of route.guards) {
     if (guard === AuthGuard('jwt')) {
-      if (!user) return 401;
+      if (!user || user === INVALID_TOKEN) return 401;
     } else if (guard === JwtOptionalGuard) {
-      continue;
+      if (user === INVALID_TOKEN) return 401;
     } else if (guard === RolesGuard) {
       try {
         new RolesGuard(new Reflector()).canActivate(contextFor(route, user));
@@ -498,13 +514,15 @@ function optionsObjectAfter(text: string, from: number): string {
 const normalizeCallPath = (raw: string) =>
   '/' + splitPath(raw.replace(/\$\{[^}]*\}/g, ':param').split('?')[0]).join('/');
 
-/** portal：lib/api.ts 的 request('/xxx') 与组件里直接 fetch('.../api/v1/xxx') */
-function scanPortalCalls(portalRoot: string): ApiCall[] {
-  const files = walkFiles(
+const portalSourceFiles = (portalRoot: string) =>
+  walkFiles(
     portalRoot,
     (f) => /\.(ts|tsx|js|jsx|mjs)$/.test(f) && !f.endsWith('.d.ts'),
     ['node_modules', '.next', 'public', 'out'],
   );
+
+/** portal：lib/api.ts 的 request('/xxx') 与组件里直接 fetch('.../api/v1/xxx') */
+function scanPortalCalls(portalRoot: string, files: string[] = portalSourceFiles(portalRoot)): ApiCall[] {
   const calls: ApiCall[] = [];
   const re = /\b(request|fetch)\s*(?:<[^(]*>)?\s*\(\s*(['"`])((?:\\.|(?!\2)[^\\])*)\2/g;
   for (const file of files) {
@@ -707,6 +725,23 @@ describe('路由访问矩阵', () => {
         未登记进PORTAL_PATHS: [...resolvedKeys].filter((k) => !PORTAL_PATHS.includes(k)).sort(),
         portal已不再调用: PORTAL_PATHS.filter((k) => !resolvedKeys.has(k)),
       }).toEqual({ 解析不到后端路由的调用: [], 未登记进PORTAL_PATHS: [], portal已不再调用: [] });
+    });
+
+    it('带 Authorization 的调用只有 PORTAL_TOKEN_CALLS：都是 optional，且所在文件在 401 时以游客身份重试', () => {
+      const filesWithToken = portalSourceFiles(portalRoot).filter((f) =>
+        /\bAuthorization\b/.test(fs.readFileSync(f, 'utf8')),
+      );
+      expect(filesWithToken.length).toBeGreaterThan(0); // 防止扫描规则失效后测试变空
+
+      const tokenCallKeys = scanPortalCalls(portalRoot, filesWithToken).map((c) => resolveCall(c)?.key ?? callKey(c));
+      expect([...new Set(tokenCallKeys)].sort()).toEqual([...PORTAL_TOKEN_CALLS].sort());
+      expect(PORTAL_TOKEN_CALLS.filter((k) => MATRIX[k] !== 'optional')).toEqual([]);
+      // 重试写法：`if (res.status === 401 && token) ...`（去掉 token 再发一次）
+      expect(
+        filesWithToken
+          .filter((f) => !/\.status === 401 && token\b/.test(fs.readFileSync(f, 'utf8')))
+          .map((f) => path.relative(REPO_ROOT, f)),
+      ).toEqual([]);
     });
   });
 

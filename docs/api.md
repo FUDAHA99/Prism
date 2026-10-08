@@ -1,7 +1,8 @@
 # API 接口文档
 
 **Base URL**: `http://localhost:3001/api/v1`  
-**认证方式**: Bearer Token（JWT），请求头写作 `Authorization: Bearer <accessToken>`：scheme 不区分大小写，scheme 与 token 之间恰好一个空格，前后不能有其他内容（多空格、Tab、尾随内容一律按未登录处理）  
+**认证方式**: Bearer Token（JWT），请求头写作 `Authorization: Bearer <accessToken>`：scheme 不区分大小写，scheme 与 token 之间恰好一个空格，前后不能有其他内容（多空格、Tab、尾随内容一律视为无效凭据，得 `401`）  
+**可选登录接口**（内容 / 影视 / 小说 / 漫画列表，小说与漫画章节列表、小说章节正文，友情链接列表，发表评论，观看记录）：不带 `Authorization` 头（或值为空）按游客处理；带了就必须是有效的 access token —— 写法不对、伪造、过期、已注销、改密前签发、账号已禁用都得 `401`，不会降级为游客（后台 token 失效时因此会被带回登录页，而不是静默看到游客视图）  
 **Content-Type**: `application/json`
 
 ---

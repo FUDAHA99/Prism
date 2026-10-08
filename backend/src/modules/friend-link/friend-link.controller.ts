@@ -26,7 +26,7 @@ export class FriendLinkController {
   constructor(private readonly friendLinkService: FriendLinkService) {}
 
   @Get()
-  @Access('public')
+  @Access('optional')
   @ApiOperation({ summary: '获取友情链接列表' })
   @ApiResponse({ status: 200, description: '获取成功' })
   @HttpCode(HttpStatus.OK)
