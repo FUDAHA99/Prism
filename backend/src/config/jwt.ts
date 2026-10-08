@@ -164,6 +164,39 @@ export function adjacentDeltaShape(secret: string): { unit: 'byte' | 'char'; dis
   };
 }
 
+/** 嵌入式十六进制内容至少要有这么多个十六进制字符（16 字节）才参与检查 */
+export const MIN_EMBEDDED_HEX_CHARS = 32;
+
+/**
+ * 「夹带」的十六进制内容：剔除所有非十六进制字符后，按两种对齐（从第 0 / 第 1 个字符起）解码成字节，
+ * 再做相邻字节差检查，取两种对齐里较差的一个。
+ *
+ * 只按整串判定会被轻易绕过（1-F-1 三次复审）：给按规律生成的十六进制串加个前缀（`prism_`）、后缀、
+ * `:`/`-` 分隔符，或去掉一个字符变成奇数长度，整串就不再是「偶数长度纯十六进制」，落到字符级检查，
+ * 而那条规律在字符层面有 15~24 种差值，远高于字符级阈值。剔除装饰后它的字节差仍只有 4 种。
+ *
+ * 纯十六进制、偶数长度的串已由 adjacentDeltaShape 按字节检查，这里返回 null 避免重复报告；
+ * 十六进制字符不足 MIN_EMBEDDED_HEX_CHARS 个（如 base64 里零散的 0-9a-f）同样返回 null。
+ * 实测（确定性随机源，每种形态 5 万个样本）：base64(32/48 字节)、base64url(64 字节)、62 字母数字 × 64、
+ * 可打印 ASCII × 64、两个 UUID 拼接、`prism_` + 32 字节十六进制，均无一被误判。
+ */
+export function embeddedHexDeltaShape(secret: string): { distinct: number; min: number } | null {
+  if (isHexSecret(secret)) return null;
+  const hex = secret.replace(/[^0-9a-f]/gi, '');
+  if (hex.length < MIN_EMBEDDED_HEX_CHARS) return null;
+  let worst: { distinct: number; min: number } | null = null;
+  for (const offset of [0, 1]) {
+    const aligned = hex.slice(offset, offset + Math.floor((hex.length - offset) / 2) * 2);
+    const bytes = Array.from(Buffer.from(aligned, 'hex'));
+    const shape = {
+      distinct: distinctAdjacentDeltas(bytes, 256),
+      min: Math.min(MIN_DISTINCT_BYTE_DELTAS, Math.floor((bytes.length - 1) / 2)),
+    };
+    if (worst === null || shape.distinct - shape.min < worst.distinct - worst.min) worst = shape;
+  }
+  return worst;
+}
+
 /** 是否由一个不超过一半长度的片段整段重复构成（如 16 个十六进制字符重复 4 次，熵只有 64 bit） */
 export function hasShortPeriod(secret: string): boolean {
   const chars = [...secret];
@@ -311,6 +344,13 @@ export function jwtSecretProblems(secret: string | undefined): string[] {
     problems.push(
       `相邻${shape.unit === 'byte' ? '字节' : '字符'}的差值只有 ${shape.distinct} 种（少于 ${shape.min} 种：` +
         '像是按规律生成的，不是随机值）',
+    );
+  }
+  const embedded = embeddedHexDeltaShape(secret);
+  if (embedded && embedded.distinct < embedded.min) {
+    problems.push(
+      `其中的十六进制内容相邻字节差值只有 ${embedded.distinct} 种（少于 ${embedded.min} 种：` +
+        '像是按规律生成的串加了前后缀或分隔符）',
     );
   }
   if (hasShortPeriod(secret)) {

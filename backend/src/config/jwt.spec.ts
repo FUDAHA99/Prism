@@ -12,6 +12,7 @@ import {
   MIN_JWT_SECRET_LENGTH,
   PLACEHOLDER_PATTERN,
   adjacentDeltaShape,
+  embeddedHexDeltaShape,
   hasSharedSubstring,
   hasShortPeriod,
   isConstantOffset,
@@ -389,6 +390,63 @@ describe('JWT 配置：弱密钥的结构特征（1-F-1 复审：泄露的那对
       expect(jwtSecretProblems(r32.repeat(2))).toContain('由一小段重复拼成');
       expect(hasShortPeriod(`${r32}${r32.slice(0, 31)}x`)).toBe(false);
       expect(hasShortPeriod(STRONG)).toBe(false);
+    });
+
+    describe("加了装饰的同族密钥（1-F-1 三次复审：前后缀、分隔符、奇数长度都不能绕过）", () => {
+      const fam = (h: number, l: number) => family(h, l, 32, 1, false);
+      const EMBEDDED_PROBLEM = /其中的十六进制内容相邻字节差值只有 \d+ 种/;
+      const decorations: Array<[string, (hex: string) => string]> = [
+        ["奇数长度（去掉末字符）", (x) => x.slice(0, -1)],
+        ["奇数长度（去掉首字符）", (x) => x.slice(1)],
+        ["prism_ 前缀", (x) => `prism_${x}`],
+        ["prism-jwt- 前缀", (x) => `prism-jwt-${x}`],
+        ["_prod 后缀", (x) => `${x}_prod`],
+        ["感叹号结尾", (x) => `${x}!`],
+        ["冒号分隔字节", (x) => x.match(/../g)!.join(":")],
+        ["大写 + PRISM_ 前缀", (x) => `PRISM_${x.toUpperCase()}`],
+        ["UUID 式分段", (x) => `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20)}`],
+      ];
+
+      it.each(decorations)("%s：60 个起点全部拒绝", (_name, decorate) => {
+        const missed: string[] = [];
+        for (let h = 0; h < 6; h += 1) {
+          for (let l = 0; l < 10; l += 1) {
+            const secret = decorate(fam(h, l));
+            if (!jwtSecretProblems(secret).some((p) => EMBEDDED_PROBLEM.test(p) || DELTA_PROBLEM.test(p))) {
+              missed.push(`${h}/${l}`);
+            }
+          }
+        }
+        expect(missed).toEqual([]);
+      });
+
+      it("24 字节的同族串加 jwt_ 前缀同样拒绝", () => {
+        expect(jwtSecretProblems(`jwt_${family(2, 7, 24, 1, false)}`).join("、")).toMatch(EMBEDDED_PROBLEM);
+      });
+
+      it.each([
+        ["base64 32 字节", (i: number) => detBytes(`e64-${i}`, 32).toString("base64")],
+        ["base64 48 字节", (i: number) => detBytes(`e48-${i}`, 48).toString("base64")],
+        ["base64url 64 字节", (i: number) => detBytes(`eurl-${i}`, 64).toString("base64url")],
+        ["62 字母数字 × 64", (i: number) => detString(`ea62-${i}`, ALNUM, 64)],
+        ["可打印 ASCII × 64", (i: number) => detString(`ep94-${i}`, PRINTABLE, 64)],
+        ["两个 UUID 拼接", (i: number) => `${uuidLike(`eu1-${i}`)}${uuidLike(`eu2-${i}`)}`],
+        ["prism_ + 32 字节随机十六进制", (i: number) => `prism_${detBytes(`epx-${i}`, 32).toString("hex")}`],
+        ["奇数长度随机十六进制（63 字符）", (i: number) => detBytes(`eodd-${i}`, 32).toString("hex").slice(1)],
+      ])("随机形态（%s，固定种子 20000 个）从不被嵌入式检查误判", (_name, gen) => {
+        let falseRejects = 0;
+        for (let i = 0; i < 20_000; i += 1) {
+          const shape = embeddedHexDeltaShape(gen(i));
+          if (shape && shape.distinct < shape.min) falseRejects += 1;
+        }
+        expect(falseRejects).toBe(0);
+      });
+
+      it("纯十六进制偶数长度不走嵌入式检查（已按整串字节检查，不重复报告）；十六进制内容太少也不检查", () => {
+        expect(embeddedHexDeltaShape(STRONG)).toBeNull();
+        expect(embeddedHexDeltaShape("zz" + "0123456789abcdef".slice(0, 10) + "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz")).toBeNull();
+        expect(jwtSecretProblems(STRONG)).toEqual([]);
+      });
     });
   });
 
