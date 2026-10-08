@@ -7,7 +7,6 @@ import {
   Body,
   Param,
   Query,
-  UseGuards,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
@@ -16,7 +15,6 @@ import {
   ApiOperation,
   ApiBearerAuth,
 } from '@nestjs/swagger';
-import { AuthGuard } from '@nestjs/passport';
 
 import {
   CollectSourceService,
@@ -31,10 +29,11 @@ import {
 } from './collect-executor.service';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthUser } from '../auth/interfaces/auth.interface';
+import { Access } from '../../common/authz/access.decorator';
 
 @ApiTags('采集管理')
+@Access('admin')
 @Controller('collect')
-@UseGuards(AuthGuard('jwt'))
 @ApiBearerAuth()
 export class CollectController {
   constructor(

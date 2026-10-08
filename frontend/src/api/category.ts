@@ -14,11 +14,6 @@ export async function getCategories(): Promise<Category[]> {
   return res.data
 }
 
-export async function getCategoryTree(): Promise<Category[]> {
-  const res = await apiClient.get<Category[]>('/categories/tree')
-  return res.data
-}
-
 export async function getCategory(id: string): Promise<Category> {
   const res = await apiClient.get<Category>(`/categories/${id}`)
   return res.data

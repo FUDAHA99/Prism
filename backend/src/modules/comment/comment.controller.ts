@@ -7,7 +7,6 @@ import {
   Body,
   Param,
   Query,
-  UseGuards,
   HttpCode,
   HttpStatus,
   DefaultValuePipe,
@@ -20,23 +19,21 @@ import {
   ApiBearerAuth,
   ApiQuery,
 } from '@nestjs/swagger';
-import { AuthGuard } from '@nestjs/passport';
 import { CommentService, COMMENT_PAGE_SIZE_DEFAULT, COMMENT_PAGE_SIZE_MAX } from './comment.service';
 import { CreateCommentDto } from './dto/create-comment.dto';
-import { RolesGuard } from '../role/guards/roles.guard';
-import { Roles } from '../role/decorators/roles.decorator';
+import { Access } from '../../common/authz/access.decorator';
 
-/** 评论管理端（读全字段含 guestEmail / 审核 / 删除）只对后台角色开放 */
-const COMMENT_MODERATOR_ROLES = ['admin', 'editor'];
-
+/**
+ * 评论管理端（读全字段含 guestEmail / 审核 / 删除）只对后台角色开放：Access('staff')。
+ * 前台只用 GET /public 与 POST /（访问矩阵目标是 optional-auth，评论身份改由服务端填写在 1-F-2）。
+ */
 @ApiTags('评论管理')
 @Controller('comments')
 export class CommentController {
   constructor(private readonly commentService: CommentService) {}
 
   @Get()
-  @UseGuards(AuthGuard('jwt'), RolesGuard)
-  @Roles(...COMMENT_MODERATOR_ROLES)
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '获取评论列表' })
   @ApiQuery({ name: 'contentId', required: false, description: '内容ID' })
@@ -58,6 +55,7 @@ export class CommentController {
   }
 
   @Get('public')
+  @Access('public')
   @ApiOperation({ summary: '【公共】获取某文章已审核评论（前台用）' })
   @ApiQuery({ name: 'contentId', required: true })
   @HttpCode(HttpStatus.OK)
@@ -67,8 +65,7 @@ export class CommentController {
   }
 
   @Get(':id')
-  @UseGuards(AuthGuard('jwt'), RolesGuard)
-  @Roles(...COMMENT_MODERATOR_ROLES)
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '获取评论详情' })
   @ApiResponse({ status: 200, description: '获取成功' })
@@ -80,6 +77,7 @@ export class CommentController {
   }
 
   @Post()
+  @Access('public')
   @ApiOperation({ summary: '创建评论' })
   @ApiResponse({ status: 201, description: '创建成功' })
   async create(@Body() dto: CreateCommentDto) {
@@ -88,8 +86,7 @@ export class CommentController {
   }
 
   @Patch(':id/approve')
-  @UseGuards(AuthGuard('jwt'), RolesGuard)
-  @Roles(...COMMENT_MODERATOR_ROLES)
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '审核通过评论' })
   @ApiResponse({ status: 200, description: '操作成功' })
@@ -101,8 +98,7 @@ export class CommentController {
   }
 
   @Patch(':id/spam')
-  @UseGuards(AuthGuard('jwt'), RolesGuard)
-  @Roles(...COMMENT_MODERATOR_ROLES)
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '标记为垃圾评论' })
   @ApiResponse({ status: 200, description: '操作成功' })
@@ -114,8 +110,7 @@ export class CommentController {
   }
 
   @Delete(':id')
-  @UseGuards(AuthGuard('jwt'), RolesGuard)
-  @Roles(...COMMENT_MODERATOR_ROLES)
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '删除评论' })
   @HttpCode(HttpStatus.NO_CONTENT)
@@ -124,8 +119,7 @@ export class CommentController {
   }
 
   @Post('batch/approve')
-  @UseGuards(AuthGuard('jwt'), RolesGuard)
-  @Roles(...COMMENT_MODERATOR_ROLES)
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '批量审核通过' })
   async batchApprove(@Body('ids') ids: string[]) {
@@ -134,8 +128,7 @@ export class CommentController {
   }
 
   @Post('batch/spam')
-  @UseGuards(AuthGuard('jwt'), RolesGuard)
-  @Roles(...COMMENT_MODERATOR_ROLES)
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '批量标记 Spam' })
   async batchSpam(@Body('ids') ids: string[]) {
@@ -144,8 +137,7 @@ export class CommentController {
   }
 
   @Post('batch/delete')
-  @UseGuards(AuthGuard('jwt'), RolesGuard)
-  @Roles(...COMMENT_MODERATOR_ROLES)
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '批量删除' })
   async batchDelete(@Body('ids') ids: string[]) {

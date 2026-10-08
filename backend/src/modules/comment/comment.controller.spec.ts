@@ -6,18 +6,20 @@ import { AuthGuard } from '@nestjs/passport';
 import { CommentController } from './comment.controller';
 import { RolesGuard } from '../role/guards/roles.guard';
 import { ROLES_KEY } from '../role/decorators/roles.decorator';
+import { ACCESS_LEVEL_KEY } from '../../common/authz/access.decorator';
 
 /**
  * 评论管理端接口的角色守卫回归测试（C7 的另一半；PII 白名单那一半在 comment.service.spec.ts）。
  *
  * 管理端接口会返回 guestEmail / ipAddress 并能审核、删除评论；只挂 AuthGuard('jwt') 时，
- * 任何自助注册用户拿到 JWT 就能访问。这里直接读 Nest 装饰器写入的元数据，任何 handler
- * 漏掉 / 删掉 @UseGuards 或 @Roles，或新增路由没归类，CI 的单元测试都会失败。
+ * 任何自助注册用户拿到 JWT 就能访问。这里直接读 Access() 写入的访问级别与守卫元数据，
+ * 任何 handler 漏掉 / 改错访问级别，或新增路由没归类，CI 的单元测试都会失败。
+ * 全站所有路由的同类断言见 common/authz/route-access.spec.ts。
  */
 
 const proto = CommentController.prototype as unknown as Record<string, object>;
 
-/** 后台审核用：必须 JWT + RolesGuard + ['admin','editor'] */
+/** 后台审核用：Access('staff') = JWT + RolesGuard + ['admin','editor'] */
 const MODERATOR_HANDLERS = [
   'findAll',
   'findOne',
@@ -36,9 +38,11 @@ const MODERATOR_ROLES = ['admin', 'editor'];
 
 const guardsOf = (target: object) => Reflect.getMetadata(GUARDS_METADATA, target);
 const rolesOf = (target: object) => Reflect.getMetadata(ROLES_KEY, target);
+const levelOf = (target: object) => Reflect.getMetadata(ACCESS_LEVEL_KEY, target);
 
-describe('CommentController 角色守卫元数据', () => {
-  it('控制器类上没有类级守卫 / 角色（否则公开接口会被一并锁住）', () => {
+describe('CommentController 访问级别元数据', () => {
+  it('控制器类上没有类级访问级别 / 守卫 / 角色（否则公开接口会被一并锁住）', () => {
+    expect(levelOf(CommentController)).toBeUndefined();
     expect(guardsOf(CommentController)).toBeUndefined();
     expect(rolesOf(CommentController)).toBeUndefined();
   });
@@ -53,8 +57,12 @@ describe('CommentController 角色守卫元数据', () => {
   });
 
   describe.each(MODERATOR_HANDLERS)('管理端 %s', (handler) => {
-    it('依次挂 AuthGuard(jwt) 与 RolesGuard（RolesGuard 依赖前者写入的 req.user）', () => {
+    it("访问级别为 staff", () => {
       expect(typeof proto[handler]).toBe('function');
+      expect(levelOf(proto[handler])).toBe('staff');
+    });
+
+    it('依次挂 AuthGuard(jwt) 与 RolesGuard（RolesGuard 依赖前者写入的 req.user）', () => {
       // AuthGuard 按策略名 memoize，同名返回同一个类，可直接比较引用
       expect(guardsOf(proto[handler])).toEqual([AuthGuard('jwt'), RolesGuard]);
     });
@@ -65,8 +73,9 @@ describe('CommentController 角色守卫元数据', () => {
   });
 
   describe.each(PUBLIC_HANDLERS)('公开 %s', (handler) => {
-    it('不挂任何守卫、不要求角色', () => {
+    it('访问级别为 public，不挂任何守卫、不要求角色', () => {
       expect(typeof proto[handler]).toBe('function');
+      expect(levelOf(proto[handler])).toBe('public');
       expect(guardsOf(proto[handler])).toBeUndefined();
       expect(rolesOf(proto[handler])).toBeUndefined();
     });

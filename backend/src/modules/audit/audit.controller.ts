@@ -1,11 +1,11 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Query } from '@nestjs/common';
 import { ApiOperation, ApiQuery, ApiTags, ApiBearerAuth } from '@nestjs/swagger';
-import { AuthGuard } from '@nestjs/passport';
 import { AuditService } from './audit.service';
+import { Access } from '../../common/authz/access.decorator';
 
 @ApiTags('审计日志')
-@UseGuards(AuthGuard('jwt'))
 @ApiBearerAuth()
+@Access('admin')
 @Controller('audit-logs')
 export class AuditController {
   constructor(private readonly auditService: AuditService) {}

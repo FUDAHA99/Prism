@@ -6,14 +6,13 @@ import {
   Delete,
   Body,
   Param,
-  UseGuards,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
-import { AuthGuard } from '@nestjs/passport';
 
 import { CategoryService, CreateCategoryDto, UpdateCategoryDto } from './category.service';
+import { Access } from '../../common/authz/access.decorator';
 
 @ApiTags('分类管理')
 @Controller('categories')
@@ -21,20 +20,15 @@ export class CategoryController {
   constructor(private readonly categoryService: CategoryService) {}
 
   @Get()
+  @Access('public')
   @ApiOperation({ summary: '获取所有分类' })
   @ApiResponse({ status: 200, description: '获取成功' })
   async findAll() {
     return this.categoryService.findAll();
   }
 
-  @Get('tree')
-  @ApiOperation({ summary: '获取分类树形结构' })
-  @ApiResponse({ status: 200, description: '获取成功' })
-  async findTree() {
-    return this.categoryService.findTree();
-  }
-
   @Get(':id')
+  @Access('public')
   @ApiOperation({ summary: '获取分类详情' })
   @ApiResponse({ status: 200, description: '获取成功' })
   @ApiResponse({ status: 404, description: '分类不存在' })
@@ -43,7 +37,7 @@ export class CategoryController {
   }
 
   @Post()
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '创建分类' })
   @ApiResponse({ status: 201, description: '创建成功' })
@@ -52,7 +46,7 @@ export class CategoryController {
   }
 
   @Patch(':id')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '更新分类' })
   @ApiResponse({ status: 200, description: '更新成功' })
@@ -62,7 +56,7 @@ export class CategoryController {
   }
 
   @Delete(':id')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: '删除分类' })

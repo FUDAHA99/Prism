@@ -7,7 +7,6 @@ import {
   Body,
   Param,
   Query,
-  UseGuards,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
@@ -16,7 +15,6 @@ import {
   ApiOperation,
   ApiBearerAuth,
 } from '@nestjs/swagger';
-import { AuthGuard } from '@nestjs/passport';
 
 import {
   ComicService,
@@ -28,6 +26,7 @@ import {
 } from './comic.service';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthUser } from '../auth/interfaces/auth.interface';
+import { Access } from '../../common/authz/access.decorator';
 
 @ApiTags('漫画管理')
 @Controller('comics')
@@ -35,7 +34,7 @@ export class ComicController {
   constructor(private readonly comicService: ComicService) {}
 
   @Post()
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '创建漫画' })
   async create(@Body() dto: CreateComicDto, @CurrentUser() user: AuthUser) {
@@ -43,12 +42,14 @@ export class ComicController {
   }
 
   @Get()
+  @Access('public')
   @ApiOperation({ summary: '获取漫画列表' })
   async findAll(@Query() query: QueryComicDto) {
     return this.comicService.findAll(query);
   }
 
   @Get('slug/:slug')
+  @Access('public')
   @ApiOperation({ summary: '【公共】通过 slug 获取漫画详情' })
   async findBySlug(@Param('slug') slug: string) {
     const comic = await this.comicService.findBySlug(slug);
@@ -57,6 +58,7 @@ export class ComicController {
   }
 
   @Get(':id')
+  @Access('staff')
   @ApiOperation({ summary: '获取漫画详情' })
   async findOne(@Param('id') id: string) {
     const comic = await this.comicService.findOne(id);
@@ -65,7 +67,7 @@ export class ComicController {
   }
 
   @Patch(':id')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '更新漫画' })
   async update(
@@ -77,7 +79,7 @@ export class ComicController {
   }
 
   @Post(':id/publish')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '发布漫画' })
   async publish(@Param('id') id: string, @CurrentUser() user: AuthUser) {
@@ -85,7 +87,7 @@ export class ComicController {
   }
 
   @Post(':id/unpublish')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '取消发布漫画' })
   async unpublish(@Param('id') id: string, @CurrentUser() user: AuthUser) {
@@ -93,7 +95,7 @@ export class ComicController {
   }
 
   @Delete(':id')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: '删除漫画（软删除）' })
@@ -104,6 +106,7 @@ export class ComicController {
   // ============ Chapters ============
 
   @Get(':id/chapters')
+  @Access('public')
   @ApiOperation({ summary: '获取漫画章节列表' })
   async listChapters(
     @Param('id') comicId: string,
@@ -122,6 +125,7 @@ export class ComicController {
   }
 
   @Get('chapters/:chapterId')
+  @Access('public')
   @ApiOperation({ summary: '获取漫画章节内容（含页面URL）' })
   async getChapter(@Param('chapterId') chapterId: string) {
     const ch = await this.comicService.getChapter(chapterId);
@@ -130,7 +134,7 @@ export class ComicController {
   }
 
   @Post(':id/chapters')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '为漫画添加章节' })
   async addChapter(
@@ -142,7 +146,7 @@ export class ComicController {
   }
 
   @Patch('chapters/:chapterId')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '更新章节' })
   async updateChapter(
@@ -154,7 +158,7 @@ export class ComicController {
   }
 
   @Delete('chapters/:chapterId')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: '删除章节' })

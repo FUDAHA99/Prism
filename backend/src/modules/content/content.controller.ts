@@ -7,12 +7,10 @@ import {
   Body,
   Param,
   Query,
-  UseGuards,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
-import { AuthGuard } from '@nestjs/passport';
 
 import {
   ContentService,
@@ -23,6 +21,7 @@ import {
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthUser } from '../auth/interfaces/auth.interface';
 import { ContentStatus, ContentType } from './entities/content.entity';
+import { Access } from '../../common/authz/access.decorator';
 
 @ApiTags('内容管理')
 @Controller('contents')
@@ -30,7 +29,7 @@ export class ContentController {
   constructor(private readonly contentService: ContentService) {}
 
   @Post()
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '创建内容' })
   @ApiResponse({ status: 201, description: '创建成功' })
@@ -42,6 +41,7 @@ export class ContentController {
   }
 
   @Get()
+  @Access('public')
   @ApiOperation({ summary: '获取内容列表' })
   @ApiResponse({ status: 200, description: '获取成功' })
   async findAll(@Query() query: QueryContentDto) {
@@ -49,6 +49,7 @@ export class ContentController {
   }
 
   @Get('slug/:slug')
+  @Access('public')
   @ApiOperation({ summary: '【公共】通过 slug 获取已发布内容（前台用）' })
   @ApiResponse({ status: 200, description: '获取成功' })
   @ApiResponse({ status: 404, description: '内容不存在' })
@@ -61,6 +62,7 @@ export class ContentController {
   }
 
   @Get(':id')
+  @Access('staff')
   @ApiOperation({ summary: '获取内容详情' })
   @ApiResponse({ status: 200, description: '获取成功' })
   @ApiResponse({ status: 404, description: '内容不存在' })
@@ -71,7 +73,7 @@ export class ContentController {
   }
 
   @Patch(':id')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '更新内容' })
   @ApiResponse({ status: 200, description: '更新成功' })
@@ -86,7 +88,7 @@ export class ContentController {
   }
 
   @Post(':id/publish')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '发布内容' })
   @ApiResponse({ status: 200, description: '发布成功' })
@@ -99,7 +101,7 @@ export class ContentController {
   }
 
   @Post(':id/unpublish')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '取消发布内容' })
   @ApiResponse({ status: 200, description: '操作成功' })
@@ -112,7 +114,7 @@ export class ContentController {
   }
 
   @Delete(':id')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: '删除内容' })

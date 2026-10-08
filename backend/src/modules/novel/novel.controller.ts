@@ -7,7 +7,6 @@ import {
   Body,
   Param,
   Query,
-  UseGuards,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
@@ -16,7 +15,6 @@ import {
   ApiOperation,
   ApiBearerAuth,
 } from '@nestjs/swagger';
-import { AuthGuard } from '@nestjs/passport';
 
 import {
   NovelService,
@@ -28,6 +26,7 @@ import {
 } from './novel.service';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthUser } from '../auth/interfaces/auth.interface';
+import { Access } from '../../common/authz/access.decorator';
 
 @ApiTags('小说管理')
 @Controller('novels')
@@ -35,7 +34,7 @@ export class NovelController {
   constructor(private readonly novelService: NovelService) {}
 
   @Post()
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '创建小说' })
   async create(@Body() dto: CreateNovelDto, @CurrentUser() user: AuthUser) {
@@ -43,12 +42,14 @@ export class NovelController {
   }
 
   @Get()
+  @Access('public')
   @ApiOperation({ summary: '获取小说列表' })
   async findAll(@Query() query: QueryNovelDto) {
     return this.novelService.findAll(query);
   }
 
   @Get('slug/:slug')
+  @Access('public')
   @ApiOperation({ summary: '【公共】通过 slug 获取小说详情' })
   async findBySlug(@Param('slug') slug: string) {
     const novel = await this.novelService.findBySlug(slug);
@@ -57,6 +58,7 @@ export class NovelController {
   }
 
   @Get(':id')
+  @Access('staff')
   @ApiOperation({ summary: '获取小说详情' })
   async findOne(@Param('id') id: string) {
     const novel = await this.novelService.findOne(id);
@@ -65,7 +67,7 @@ export class NovelController {
   }
 
   @Patch(':id')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '更新小说' })
   async update(
@@ -77,7 +79,7 @@ export class NovelController {
   }
 
   @Post(':id/publish')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '发布小说' })
   async publish(@Param('id') id: string, @CurrentUser() user: AuthUser) {
@@ -85,7 +87,7 @@ export class NovelController {
   }
 
   @Post(':id/unpublish')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '取消发布小说' })
   async unpublish(@Param('id') id: string, @CurrentUser() user: AuthUser) {
@@ -93,7 +95,7 @@ export class NovelController {
   }
 
   @Delete(':id')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: '删除小说（软删除）' })
@@ -104,6 +106,7 @@ export class NovelController {
   // ============ Chapters ============
 
   @Get(':id/chapters')
+  @Access('public')
   @ApiOperation({ summary: '获取小说章节列表' })
   async listChapters(
     @Param('id') novelId: string,
@@ -122,6 +125,7 @@ export class NovelController {
   }
 
   @Get('chapters/:chapterId')
+  @Access('public')
   @ApiOperation({ summary: '获取章节正文' })
   async getChapter(@Param('chapterId') chapterId: string) {
     const ch = await this.novelService.getChapter(chapterId);
@@ -130,7 +134,7 @@ export class NovelController {
   }
 
   @Post(':id/chapters')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '为小说添加章节' })
   async addChapter(
@@ -142,7 +146,7 @@ export class NovelController {
   }
 
   @Patch('chapters/:chapterId')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '更新章节' })
   async updateChapter(
@@ -154,7 +158,7 @@ export class NovelController {
   }
 
   @Delete('chapters/:chapterId')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: '删除章节' })

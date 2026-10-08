@@ -318,21 +318,6 @@ export class MovieService {
 
   // ==================== 封面管理 ====================
 
-  async findBrokenPosters(query: { page?: number; limit?: number }) {
-    const page = Number(query.page) || 1;
-    const limit = Number(query.limit) || 50;
-
-    const [data, total] = await this.movieRepo.findAndCount({
-      where: { posterBroken: true },
-      select: ['id', 'title', 'posterUrl', 'posterBroken', 'updatedAt'],
-      order: { updatedAt: 'DESC' },
-      skip: (page - 1) * limit,
-      take: limit,
-    });
-
-    return { data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
-  }
-
   async updatePoster(id: string, posterUrl: string, userId: string): Promise<Movie> {
     const movie = await this.movieRepo.findOne({ where: { id } });
     if (!movie) throw new NotFoundException(`影视不存在: ${id}`);

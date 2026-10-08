@@ -7,7 +7,6 @@ import {
   Body,
   Param,
   Query,
-  UseGuards,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
@@ -17,7 +16,6 @@ import {
   ApiResponse,
   ApiBearerAuth,
 } from '@nestjs/swagger';
-import { AuthGuard } from '@nestjs/passport';
 
 import {
   MovieService,
@@ -29,6 +27,7 @@ import {
 } from './movie.service';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthUser } from '../auth/interfaces/auth.interface';
+import { Access } from '../../common/authz/access.decorator';
 
 @ApiTags('影视管理')
 @Controller('movies')
@@ -36,7 +35,7 @@ export class MovieController {
   constructor(private readonly movieService: MovieService) {}
 
   @Post()
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '创建影视' })
   async create(@Body() dto: CreateMovieDto, @CurrentUser() user: AuthUser) {
@@ -44,12 +43,14 @@ export class MovieController {
   }
 
   @Get()
+  @Access('public')
   @ApiOperation({ summary: '获取影视列表' })
   async findAll(@Query() query: QueryMovieDto) {
     return this.movieService.findAll(query);
   }
 
   @Get('slug/:slug')
+  @Access('public')
   @ApiOperation({ summary: '【公共】通过 slug 获取影视详情（前台用）' })
   async findBySlug(@Param('slug') slug: string) {
     const movie = await this.movieService.findBySlug(slug);
@@ -57,16 +58,8 @@ export class MovieController {
     return movie;
   }
 
-  @Get('broken-posters/list')
-  @UseGuards(AuthGuard('jwt'))
-  @ApiBearerAuth()
-  @ApiOperation({ summary: '获取封面异常的影视列表' })
-  async findBrokenPosters(@Query() query: { page?: number; limit?: number }) {
-    return this.movieService.findBrokenPosters(query);
-  }
-
   @Patch(':id/poster')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '更新影视封面图并重置检测状态' })
   async updatePoster(
@@ -78,6 +71,7 @@ export class MovieController {
   }
 
   @Get(':id')
+  @Access('staff')
   @ApiOperation({ summary: '获取影视详情' })
   async findOne(@Param('id') id: string) {
     const movie = await this.movieService.findOne(id);
@@ -86,7 +80,7 @@ export class MovieController {
   }
 
   @Patch(':id')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '更新影视' })
   async update(
@@ -98,7 +92,7 @@ export class MovieController {
   }
 
   @Post(':id/publish')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '发布影视' })
   async publish(@Param('id') id: string, @CurrentUser() user: AuthUser) {
@@ -106,7 +100,7 @@ export class MovieController {
   }
 
   @Post(':id/unpublish')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '取消发布影视' })
   async unpublish(@Param('id') id: string, @CurrentUser() user: AuthUser) {
@@ -114,7 +108,7 @@ export class MovieController {
   }
 
   @Delete(':id')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: '删除影视（软删除）' })
@@ -125,7 +119,7 @@ export class MovieController {
   // ============ Sources ============
 
   @Post(':id/sources')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '为影视添加播放线路' })
   async addSource(
@@ -137,7 +131,7 @@ export class MovieController {
   }
 
   @Delete('sources/:sourceId')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: '删除线路' })
@@ -151,7 +145,7 @@ export class MovieController {
   // ============ Episodes ============
 
   @Post('sources/:sourceId/episodes')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '为线路添加剧集' })
   async addEpisode(
@@ -163,7 +157,7 @@ export class MovieController {
   }
 
   @Patch('episodes/:episodeId')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '更新剧集' })
   async updateEpisode(
@@ -175,7 +169,7 @@ export class MovieController {
   }
 
   @Delete('episodes/:episodeId')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: '删除剧集' })

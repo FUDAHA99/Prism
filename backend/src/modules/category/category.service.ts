@@ -37,14 +37,6 @@ export class CategoryService {
     });
   }
 
-  async findTree(): Promise<Category[]> {
-    const all = await this.categoryRepository.find({
-      relations: ['children'],
-      order: { sortOrder: 'ASC' },
-    });
-    return all.filter(c => !c.parentId);
-  }
-
   async findOne(id: string): Promise<Category> {
     const category = await this.categoryRepository.findOne({
       where: { id },

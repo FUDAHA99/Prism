@@ -7,17 +7,16 @@ import {
   Body,
   Param,
   Query,
-  UseGuards,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
 import { ApiOperation, ApiQuery, ApiTags, ApiBearerAuth } from '@nestjs/swagger';
-import { AuthGuard } from '@nestjs/passport';
 import { NoticeService, CreateNoticeDto, UpdateNoticeDto } from './notice.service';
+import { Access } from '../../common/authz/access.decorator';
 
 @ApiTags('公告管理')
-@UseGuards(AuthGuard('jwt'))
 @ApiBearerAuth()
+@Access('staff')
 @Controller('notices')
 export class NoticeController {
   constructor(private readonly noticeService: NoticeService) {}
@@ -40,12 +39,6 @@ export class NoticeController {
       level: level as any,
       isPublished: isPublished !== undefined ? isPublished === 'true' : undefined,
     });
-  }
-
-  @Get(':id')
-  @ApiOperation({ summary: '获取公告详情' })
-  async findOne(@Param('id') id: string) {
-    return this.noticeService.findOne(id);
   }
 
   @Post()

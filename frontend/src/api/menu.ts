@@ -31,14 +31,6 @@ export async function updateMenu(id: string, data: UpdateMenuData): Promise<Menu
   return res.data
 }
 
-/** 批量更新排序 */
-export async function reorderMenus(
-  items: Array<{ id: string; sortOrder: number; parentId?: string }>
-): Promise<MenuItem[]> {
-  const res = await apiClient.patch<MenuItem[]>('/menus/reorder', { items })
-  return res.data
-}
-
 /** 删除菜单项 */
 export async function deleteMenu(id: string): Promise<void> {
   await apiClient.delete(`/menus/${id}`)

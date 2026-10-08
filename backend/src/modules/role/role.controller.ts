@@ -6,21 +6,17 @@ import {
   Delete,
   Body,
   Param,
-  UseGuards,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
-import { AuthGuard } from '@nestjs/passport';
 
 import { RoleService } from './role.service';
-import { RolesGuard } from './guards/roles.guard';
-import { Roles } from './decorators/roles.decorator';
+import { Access } from '../../common/authz/access.decorator';
 
 @ApiTags('角色管理')
+@Access('admin')
 @Controller('roles')
-@UseGuards(AuthGuard('jwt'), RolesGuard)
-@Roles('admin')
 @ApiBearerAuth()
 export class RoleController {
   constructor(private readonly roleService: RoleService) {}

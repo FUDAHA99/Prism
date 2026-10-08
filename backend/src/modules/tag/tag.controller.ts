@@ -7,7 +7,6 @@ import {
   Body,
   Param,
   Query,
-  UseGuards,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
@@ -18,10 +17,10 @@ import {
   ApiBearerAuth,
   ApiQuery,
 } from '@nestjs/swagger';
-import { AuthGuard } from '@nestjs/passport';
 import { TagService } from './tag.service';
 import { CreateTagDto } from './dto/create-tag.dto';
 import { UpdateTagDto } from './dto/update-tag.dto';
+import { Access } from '../../common/authz/access.decorator';
 
 @ApiTags('标签管理')
 @Controller('tags')
@@ -29,6 +28,7 @@ export class TagController {
   constructor(private readonly tagService: TagService) {}
 
   @Get()
+  @Access('public')
   @ApiOperation({ summary: '获取标签列表' })
   @ApiQuery({ name: 'search', required: false, description: '搜索关键词' })
   @ApiResponse({ status: 200, description: '获取成功' })
@@ -39,6 +39,7 @@ export class TagController {
   }
 
   @Get(':id')
+  @Access('public')
   @ApiOperation({ summary: '获取标签详情' })
   @ApiResponse({ status: 200, description: '获取成功' })
   @ApiResponse({ status: 404, description: '标签不存在' })
@@ -49,7 +50,7 @@ export class TagController {
   }
 
   @Post()
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '创建标签' })
   @ApiResponse({ status: 201, description: '创建成功' })
@@ -60,7 +61,7 @@ export class TagController {
   }
 
   @Patch(':id')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '更新标签' })
   @ApiResponse({ status: 200, description: '更新成功' })
@@ -72,7 +73,7 @@ export class TagController {
   }
 
   @Delete(':id')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('staff')
   @ApiBearerAuth()
   @ApiOperation({ summary: '删除标签' })
   @ApiResponse({ status: 200, description: '删除成功' })

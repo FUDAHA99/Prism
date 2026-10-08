@@ -88,21 +88,9 @@ export async function getContentBySlug(slug: string): Promise<Content | null> {
   }
 }
 
-export async function getContentById(id: string): Promise<Content | null> {
-  try {
-    return await request<Content>(`/contents/${id}`)
-  } catch {
-    return null
-  }
-}
-
 // ─── 分类 ──────────────────────────────
 export async function getCategories(): Promise<Category[]> {
   return request<Category[]>('/categories')
-}
-
-export async function getCategoryTree(): Promise<Category[]> {
-  return request<Category[]>('/categories/tree')
 }
 
 export async function getCategoryBySlug(slug: string): Promise<Category | null> {

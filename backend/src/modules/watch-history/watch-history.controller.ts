@@ -5,7 +5,6 @@ import {
   Body,
   Query,
   Request,
-  UseGuards,
   HttpCode,
   HttpStatus,
   BadRequestException,
@@ -13,10 +12,10 @@ import {
   ParseIntPipe,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
-import { JwtOptionalGuard } from '../../common/guards/jwt-optional.guard';
 import { WatchHistoryService } from './watch-history.service';
 import { ReportProgressDto } from './dto/report-progress.dto';
 import { WatchContentType } from './entities/watch-history.entity';
+import { Access } from '../../common/authz/access.decorator';
 
 const CONTENT_TYPES: WatchContentType[] = ['movie', 'novel', 'comic'];
 
@@ -25,13 +24,13 @@ const CONTENT_TYPES: WatchContentType[] = ['movie', 'novel', 'comic'];
  *
  * 此前它们各自手工 base64 解 Authorization 头取 payload.sub 当 userId，
  * 不验签、不校验 exp、不查黑名单 —— 构造 `Bearer x.<自制payload>.y`
- * 即可读写任意用户的观看记录。现改用 JwtOptionalGuard 走 Passport，
+ * 即可读写任意用户的观看记录。现改用 Access('optional')（JwtOptionalGuard）走 Passport，
  * 由 JwtStrategy 统一完成验签、过期、禁用状态与黑名单检查；
  * 未登录时 req.user 为 undefined，按游客处理，不会 401。
  */
 @ApiTags('观看记录')
 @ApiBearerAuth()
-@UseGuards(JwtOptionalGuard)
+@Access('optional')
 @Controller('watch-history')
 export class WatchHistoryController {
   constructor(private readonly service: WatchHistoryService) {}

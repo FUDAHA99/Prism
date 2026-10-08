@@ -5,7 +5,6 @@ import {
   Delete,
   Param,
   Query,
-  UseGuards,
   HttpCode,
   HttpStatus,
   UseInterceptors,
@@ -15,13 +14,13 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiConsumes } from '@nestjs/swagger';
-import { AuthGuard } from '@nestjs/passport';
 import { v4 as uuidv4 } from 'uuid';
 
 import { MediaService, QueryMediaDto } from './media.service';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthUser } from '../auth/interfaces/auth.interface';
 import { MulterExceptionFilter } from './multer-exception.filter';
+import { Access } from '../../common/authz/access.decorator';
 
 // 扩展名只由（已过白名单的）mimetype 决定，不信任客户端文件名：express.static 按扩展名回推
 // Content-Type，originalname 写成 .html/.svg 时，一旦补上落盘逻辑就是同源存储型 XSS。不要加 image/svg+xml。
@@ -33,8 +32,8 @@ const ALLOWED_MIME_TYPES = Object.keys(MIME_EXTENSIONS);
 // 大小上限由 multer limits.fileSize 在解析阶段强制（media.module.ts / upload-limits.ts），此处不再检查
 
 @ApiTags('媒体管理')
+@Access('staff')
 @Controller('media')
-@UseGuards(AuthGuard('jwt'))
 @ApiBearerAuth()
 export class MediaController {
   constructor(private readonly mediaService: MediaService) {}

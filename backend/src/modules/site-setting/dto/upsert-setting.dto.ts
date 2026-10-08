@@ -18,10 +18,3 @@ export class BatchUpsertSettingDto {
   @ApiProperty({ description: '配置项列表', type: [UpsertSettingDto] })
   settings: UpsertSettingDto[];
 }
-
-export class UpdateSettingValueDto {
-  @ApiProperty({ description: '配置值' })
-  @IsOptional()
-  @IsString()
-  value?: string;
-}

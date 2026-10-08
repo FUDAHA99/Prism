@@ -7,17 +7,16 @@ import {
   Body,
   Param,
   Query,
-  UseGuards,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
 import { ApiOperation, ApiQuery, ApiTags, ApiBearerAuth } from '@nestjs/swagger';
-import { AuthGuard } from '@nestjs/passport';
 import { AdvertisementService, CreateAdDto, UpdateAdDto } from './advertisement.service';
+import { Access } from '../../common/authz/access.decorator';
 
 @ApiTags('广告管理')
-@UseGuards(AuthGuard('jwt'))
 @ApiBearerAuth()
+@Access('admin')
 @Controller('advertisements')
 export class AdvertisementController {
   constructor(private readonly adService: AdvertisementService) {}

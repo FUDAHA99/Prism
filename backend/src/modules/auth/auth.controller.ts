@@ -12,13 +12,13 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import { ThrottlerGuard, Throttle } from '@nestjs/throttler';
-import { AuthGuard } from '@nestjs/passport';
 
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { LoginResponse, AuthUser } from './interfaces/auth.interface';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { Access } from '../../common/authz/access.decorator';
 
 @ApiTags('认证管理')
 @Controller('auth')
@@ -27,6 +27,7 @@ export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Post('login')
+  @Access('public')
   @HttpCode(HttpStatus.OK)
   @UseGuards(ThrottlerGuard)
   @Throttle({ default: { limit: 5, ttl: 60 } })
@@ -70,6 +71,7 @@ export class AuthController {
   }
 
   @Post('register')
+  @Access('public')
   @HttpCode(HttpStatus.CREATED)
   @UseGuards(ThrottlerGuard)
   @Throttle({ default: { limit: 3, ttl: 300 } })
@@ -108,6 +110,7 @@ export class AuthController {
   }
 
   @Post('refresh')
+  @Access('public')
   @HttpCode(HttpStatus.OK)
   @UseGuards(ThrottlerGuard)
   @Throttle({ default: { limit: 10, ttl: 60 } })
@@ -136,8 +139,8 @@ export class AuthController {
   }
 
   @Post('logout')
+  @Access('authenticated')
   @HttpCode(HttpStatus.OK)
-  @UseGuards(AuthGuard('jwt'))
   @ApiBearerAuth()
   @ApiOperation({ summary: '用户登出' })
   @ApiResponse({ status: 200, description: '登出成功' })
@@ -156,7 +159,7 @@ export class AuthController {
   }
 
   @Get('me')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('authenticated')
   @ApiBearerAuth()
   @ApiOperation({ summary: '获取当前用户信息' })
   @ApiResponse({
@@ -183,7 +186,7 @@ export class AuthController {
   }
 
   @Post('change-password')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('authenticated')
   @ApiBearerAuth()
   @ApiOperation({ summary: '修改密码' })
   @ApiResponse({ status: 200, description: '密码修改成功' })

@@ -6,7 +6,6 @@ import {
   Delete,
   Body,
   Param,
-  UseGuards,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
@@ -16,10 +15,10 @@ import {
   ApiResponse,
   ApiBearerAuth,
 } from '@nestjs/swagger';
-import { AuthGuard } from '@nestjs/passport';
 import { FriendLinkService } from './friend-link.service';
 import { CreateFriendLinkDto } from './dto/create-friend-link.dto';
 import { UpdateFriendLinkDto } from './dto/update-friend-link.dto';
+import { Access } from '../../common/authz/access.decorator';
 
 @ApiTags('友情链接')
 @Controller('friend-links')
@@ -27,6 +26,7 @@ export class FriendLinkController {
   constructor(private readonly friendLinkService: FriendLinkService) {}
 
   @Get()
+  @Access('public')
   @ApiOperation({ summary: '获取友情链接列表' })
   @ApiResponse({ status: 200, description: '获取成功' })
   @HttpCode(HttpStatus.OK)
@@ -35,18 +35,8 @@ export class FriendLinkController {
     return links;
   }
 
-  @Get(':id')
-  @ApiOperation({ summary: '获取友情链接详情' })
-  @ApiResponse({ status: 200, description: '获取成功' })
-  @ApiResponse({ status: 404, description: '友情链接不存在' })
-  @HttpCode(HttpStatus.OK)
-  async findOne(@Param('id') id: string) {
-    const link = await this.friendLinkService.findOne(id);
-    return link;
-  }
-
   @Post()
-  @UseGuards(AuthGuard('jwt'))
+  @Access('admin')
   @ApiBearerAuth()
   @ApiOperation({ summary: '创建友情链接' })
   @ApiResponse({ status: 201, description: '创建成功' })
@@ -56,7 +46,7 @@ export class FriendLinkController {
   }
 
   @Patch(':id')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('admin')
   @ApiBearerAuth()
   @ApiOperation({ summary: '更新友情链接' })
   @ApiResponse({ status: 200, description: '更新成功' })
@@ -68,7 +58,7 @@ export class FriendLinkController {
   }
 
   @Delete(':id')
-  @UseGuards(AuthGuard('jwt'))
+  @Access('admin')
   @ApiBearerAuth()
   @ApiOperation({ summary: '删除友情链接' })
   @ApiResponse({ status: 200, description: '删除成功' })

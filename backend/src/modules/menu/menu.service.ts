@@ -29,21 +29,6 @@ export class MenuService {
     });
   }
 
-  /** 获取菜单树（嵌套结构） */
-  async findTree(): Promise<Menu[]> {
-    const all = await this.findAll();
-    return this.buildTree(all);
-  }
-
-  private buildTree(items: Menu[], parentId: string | null = null): Menu[] {
-    return items
-      .filter((m) => (m.parentId ?? null) === parentId)
-      .map((m) => ({
-        ...m,
-        children: this.buildTree(items, m.id),
-      }));
-  }
-
   async findOne(id: string): Promise<Menu> {
     const menu = await this.menuRepository.findOne({ where: { id } });
     if (!menu) throw new NotFoundException(`菜单不存在: ${id}`);
@@ -64,11 +49,5 @@ export class MenuService {
   async remove(id: string): Promise<void> {
     await this.findOne(id);
     await this.menuRepository.delete(id);
-  }
-
-  async reorder(items: Array<{ id: string; sortOrder: number; parentId?: string }>): Promise<void> {
-    for (const { id, sortOrder, parentId } of items) {
-      await this.menuRepository.update(id, { sortOrder, parentId: parentId ?? undefined });
-    }
   }
 }
