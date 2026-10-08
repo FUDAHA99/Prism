@@ -151,6 +151,10 @@ post_check_nginx() {
 
 main() {
   trap on_exit EXIT
+  # 被信号终止时带上约定退出码再走 on_exit：否则 EXIT trap 里的 $? 是上一条命令的 0，日志会误报「退出码 0」
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 
   local skip_pull=false arg
   for arg in "$@"; do
@@ -159,6 +163,10 @@ main() {
       *) die "未知参数：$arg（用法见脚本头部注释）" ;;
     esac
   done
+
+  # 自己拉代码时丢弃环境里残留的值：pull_code 只在真正迁移时重新导出，
+  # 否则拉到新版本后 re-exec（--skip-pull）的子进程会把残留值当成迁移备份拷回 nginx.conf
+  if ! $skip_pull; then unset PRISM_NGINX_CONF_BACKUP; fi
 
   # 迁移备份只认 --skip-pull 的调用方传进来的（re-exec 前的自己、CI 内联脚本、5.1 手工命令）；
   # 自己拉代码时由 pull_code 登记，不理会环境里残留的值
@@ -272,6 +280,9 @@ main() {
     local backup_script="$SCRIPT_DIR/backup.sh"
     chmod +x "$backup_script"
     local cron_backup="0 2 * * * $backup_script >> $PROJECT_DIR/backup/backup.log 2>&1"
+    # cron 先打开重定向目标再执行命令：backup/ 不存在时 sh 报 Directory nonexistent，
+    # backup.sh 根本不会运行（它内部的 mkdir -p 来不及生效），每日备份就永远不会发生
+    mkdir -p "$PROJECT_DIR/backup"
     # || true：用户还没有 crontab 时 crontab -l 与 grep -v 都返回 1，set -e + pipefail 下
     # 子 shell 会在 echo 之前退出（写入空 crontab 并让部署失败）
     (crontab -l 2>/dev/null | grep -v 'backup.sh' || true; echo "$cron_backup") | crontab -
