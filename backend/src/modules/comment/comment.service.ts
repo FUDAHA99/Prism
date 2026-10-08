@@ -4,6 +4,20 @@ import { Repository } from 'typeorm';
 import { Comment } from './entities/comment.entity';
 import { CreateCommentDto } from './dto/create-comment.dto';
 
+/** GET /comments/public 的出参：只含可公开字段 */
+export interface PublicComment {
+  id: string;
+  contentId: string | null;
+  parentId: string | null;
+  guestName: string | null;
+  body: string;
+  status: string;
+  createdAt: Date;
+  /** 是否注册用户发表（由 userId 推导，userId 本身不公开） */
+  isRegistered: boolean;
+  children: PublicComment[];
+}
+
 export interface QueryCommentDto {
   contentId?: string;
   status?: string;
@@ -48,19 +62,38 @@ export class CommentService {
   }
 
   /**
-   * 公共接口：仅返回某文章下已审核通过的评论（树形）
+   * 公共接口：仅返回某文章下已审核通过的评论（树形）。
+   * 出参是显式白名单：select 保证 guestEmail / ipAddress 不出库；逐字段构造保证
+   * 实体将来新增列也不会顺带泄露；userId 只用于算 isRegistered，不出参。
+   * 不能走 @Exclude：ClassSerializerInterceptor 未注册在本 controller，且会连带
+   * 隐藏管理端需要的 guestEmail。
    */
-  async findApprovedByContent(contentId: string): Promise<Comment[]> {
+  async findApprovedByContent(contentId: string): Promise<PublicComment[]> {
     const list = await this.commentRepository.find({
+      select: {
+        id: true, contentId: true, userId: true, guestName: true,
+        body: true, status: true, parentId: true, createdAt: true,
+      },
       where: { contentId, status: 'approved' },
       order: { createdAt: 'ASC' },
     });
 
-    // 构建树形结构
-    const map = new Map<string, Comment & { children: Comment[] }>();
-    list.forEach((c) => map.set(c.id, { ...c, children: [] }));
+    const map = new Map<string, PublicComment>();
+    for (const c of list) {
+      map.set(c.id, {
+        id: c.id,
+        contentId: c.contentId ?? null,
+        parentId: c.parentId ?? null,
+        guestName: c.guestName ?? null,
+        body: c.body,
+        status: c.status,
+        createdAt: c.createdAt,
+        isRegistered: Boolean(c.userId),
+        children: [],
+      });
+    }
 
-    const roots: (Comment & { children: Comment[] })[] = [];
+    const roots: PublicComment[] = [];
     map.forEach((node) => {
       if (node.parentId && map.has(node.parentId)) {
         map.get(node.parentId)!.children.push(node);

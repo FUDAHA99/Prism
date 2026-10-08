@@ -16,6 +16,7 @@ import type {
   Novel,
   NovelChapter,
   Pagination,
+  PublicComment,
   SiteConfig,
   SiteSetting,
   Tag,
@@ -122,9 +123,9 @@ export async function getTagBySlug(slug: string): Promise<Tag | null> {
 // ─── 评论 ──────────────────────────────
 export async function getCommentsByContent(
   contentId: string,
-): Promise<Comment[]> {
+): Promise<PublicComment[]> {
   // 走 portal 专用公共接口
-  return request<Comment[]>(`/comments/public?contentId=${contentId}`, {
+  return request<PublicComment[]>(`/comments/public?contentId=${contentId}`, {
     revalidate: 0,
   })
 }

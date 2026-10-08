@@ -21,6 +21,11 @@ import {
 import { AuthGuard } from '@nestjs/passport';
 import { CommentService } from './comment.service';
 import { CreateCommentDto } from './dto/create-comment.dto';
+import { RolesGuard } from '../role/guards/roles.guard';
+import { Roles } from '../role/decorators/roles.decorator';
+
+/** 评论管理端（读全字段含 guestEmail / 审核 / 删除）只对后台角色开放 */
+const COMMENT_MODERATOR_ROLES = ['admin', 'editor'];
 
 @ApiTags('评论管理')
 @Controller('comments')
@@ -28,7 +33,8 @@ export class CommentController {
   constructor(private readonly commentService: CommentService) {}
 
   @Get()
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles(...COMMENT_MODERATOR_ROLES)
   @ApiBearerAuth()
   @ApiOperation({ summary: '获取评论列表' })
   @ApiQuery({ name: 'contentId', required: false, description: '内容ID' })
@@ -57,7 +63,8 @@ export class CommentController {
   }
 
   @Get(':id')
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles(...COMMENT_MODERATOR_ROLES)
   @ApiBearerAuth()
   @ApiOperation({ summary: '获取评论详情' })
   @ApiResponse({ status: 200, description: '获取成功' })
@@ -77,7 +84,8 @@ export class CommentController {
   }
 
   @Patch(':id/approve')
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles(...COMMENT_MODERATOR_ROLES)
   @ApiBearerAuth()
   @ApiOperation({ summary: '审核通过评论' })
   @ApiResponse({ status: 200, description: '操作成功' })
@@ -89,7 +97,8 @@ export class CommentController {
   }
 
   @Patch(':id/spam')
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles(...COMMENT_MODERATOR_ROLES)
   @ApiBearerAuth()
   @ApiOperation({ summary: '标记为垃圾评论' })
   @ApiResponse({ status: 200, description: '操作成功' })
@@ -101,7 +110,8 @@ export class CommentController {
   }
 
   @Delete(':id')
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles(...COMMENT_MODERATOR_ROLES)
   @ApiBearerAuth()
   @ApiOperation({ summary: '删除评论' })
   @HttpCode(HttpStatus.NO_CONTENT)
@@ -110,7 +120,8 @@ export class CommentController {
   }
 
   @Post('batch/approve')
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles(...COMMENT_MODERATOR_ROLES)
   @ApiBearerAuth()
   @ApiOperation({ summary: '批量审核通过' })
   async batchApprove(@Body('ids') ids: string[]) {
@@ -119,7 +130,8 @@ export class CommentController {
   }
 
   @Post('batch/spam')
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles(...COMMENT_MODERATOR_ROLES)
   @ApiBearerAuth()
   @ApiOperation({ summary: '批量标记 Spam' })
   async batchSpam(@Body('ids') ids: string[]) {
@@ -128,7 +140,8 @@ export class CommentController {
   }
 
   @Post('batch/delete')
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles(...COMMENT_MODERATOR_ROLES)
   @ApiBearerAuth()
   @ApiOperation({ summary: '批量删除' })
   async batchDelete(@Body('ids') ids: string[]) {

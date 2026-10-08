@@ -2,7 +2,7 @@
 
 import { useEffect, useState, FormEvent } from 'react'
 import dayjs from 'dayjs'
-import type { Comment } from '@/lib/types'
+import type { PublicComment } from '@/lib/types'
 
 interface Props {
   contentId: string
@@ -14,14 +14,14 @@ const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:3001'
 
 /** 显示用昵称：游客名 → 注册用户（暂未带 user 关系，先回退到"用户"） → 匿名 */
-function displayName(c: Pick<Comment, 'guestName' | 'userId'>): string {
+function displayName(c: Pick<PublicComment, 'guestName' | 'isRegistered'>): string {
   if (c.guestName) return c.guestName
-  if (c.userId) return '注册用户'
+  if (c.isRegistered) return '注册用户'
   return '匿名'
 }
 
 export default function CommentSection({ contentId, enabled, needAudit }: Props) {
-  const [comments, setComments] = useState<Comment[]>([])
+  const [comments, setComments] = useState<PublicComment[]>([])
   const [loading, setLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
   const [hint, setHint] = useState<string>('')

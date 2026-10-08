@@ -64,6 +64,20 @@ export interface Comment {
   children?: Comment[]
 }
 
+/** GET /comments/public 的出参（后端白名单，见 backend comment.service.ts PublicComment）。不含 guestEmail / ipAddress / userId。 */
+export interface PublicComment {
+  id: string
+  contentId: string | null
+  parentId: string | null
+  guestName: string | null
+  body: string
+  status: string
+  createdAt: string
+  /** 是否注册用户发表（后端由 userId 推导） */
+  isRegistered: boolean
+  children: PublicComment[]
+}
+
 export interface Pagination<T> {
   data: T[]
   meta: {
