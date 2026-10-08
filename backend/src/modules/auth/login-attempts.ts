@@ -87,3 +87,12 @@ export async function rememberTrustedIp(
 export async function forgetTrustedIps(cache: Cache, userId: string): Promise<void> {
   await cache.del(trustedIpsKey(userId));
 }
+
+/**
+ * 修改密码时「当前密码」校验失败的计数（按 userId，15 分钟窗口，每次失败重新计时）。
+ * 拿到别人 access token 的人可以在 /auth/change-password 上猜当前密码，猜中即可改密接管账号；
+ * 此前这里只有每 IP 每分钟 5 次的限流，换 IP 就能并行猜，完全不受登录锁定约束。
+ */
+export const MAX_CHANGE_PASSWORD_FAILURES = 5;
+
+export const changePasswordFailuresKey = (userId: string) => `change_password_failures:${userId}`;

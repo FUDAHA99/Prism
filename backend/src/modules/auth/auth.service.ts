@@ -27,7 +27,9 @@ import { KeyedMutex } from '../../common/utils/keyed-mutex';
 import { normalizeEmail } from '../../common/utils/normalize-email';
 import {
   LOGIN_BLOCK_TIME_MS,
+  MAX_CHANGE_PASSWORD_FAILURES,
   accountAttemptsKey,
+  changePasswordFailuresKey,
   ipAttemptsKey,
   isTrustedIp,
   loginSubject,
@@ -81,6 +83,9 @@ export class AuthService {
 
   /** 同一个 refresh token 的「查黑名单 → 轮换」串行执行，并发刷新只有一个能成功 */
   private readonly refreshLocks = new KeyedMutex();
+
+  /** 同一用户的改密「查失败计数 → 校验当前密码 → 记失败」串行执行，并发猜测不会少记 */
+  private readonly changePasswordLocks = new KeyedMutex();
 
   constructor(
     private readonly userService: UserService,
@@ -271,6 +276,10 @@ export class AuthService {
   /**
    * 修改本人密码。当前密码错误返回 400（不是 401：admin 前端遇 401 会直接登出），
    * 成功后 updatePassword 吊销该用户此前签发的全部 token（含发起本次请求的这个），需重新登录。
+   *
+   * 当前密码错误按 userId 计数（15 分钟窗口）：第 MAX_CHANGE_PASSWORD_FAILURES 次错误起返回 429，
+   * 并吊销发起请求的这个 access token —— 拿着盗来的 token 猜当前密码的人就此失去这个会话；
+   * 窗口内该用户的任何会话都不能再试。改密成功清零。accessToken 由控制器用 extractAccessToken 取出。
    */
   async changePassword(
     userId: string,
@@ -278,22 +287,44 @@ export class AuthService {
     newPassword: string,
     ip: string,
     userAgent?: string,
+    accessToken?: string,
   ): Promise<void> {
-    const user = await this.userService.findByIdWithPassword(userId);
-    if (!user) {
-      throw new UnauthorizedException('用户不存在');
-    }
+    const failuresKey = changePasswordFailuresKey(userId);
+    const tooMany = () =>
+      new HttpException('当前密码错误次数过多，请15分钟后再试', HttpStatus.TOO_MANY_REQUESTS);
 
-    const isCurrentPasswordValid = await bcrypt.compare(currentPassword, user.passwordHash);
-    if (!isCurrentPasswordValid) {
-      throw new BadRequestException('当前密码错误');
-    }
+    await this.changePasswordLocks.run(userId, async () => {
+      const failures = (await this.cacheManager.get<number>(failuresKey)) || 0;
+      if (failures >= MAX_CHANGE_PASSWORD_FAILURES) {
+        throw tooMany();
+      }
 
-    if (currentPassword === newPassword) {
-      throw new BadRequestException('新密码不能与当前密码相同');
-    }
+      const user = await this.userService.findByIdWithPassword(userId);
+      if (!user) {
+        throw new UnauthorizedException('用户不存在');
+      }
 
-    await this.userService.updatePassword(userId, newPassword);
+      const isCurrentPasswordValid = await bcrypt.compare(currentPassword, user.passwordHash);
+      if (!isCurrentPasswordValid) {
+        const next = failures + 1;
+        await this.cacheManager.set(failuresKey, next, LOGIN_BLOCK_TIME_MS);
+        if (next >= MAX_CHANGE_PASSWORD_FAILURES) {
+          const access = this.tryVerifyAccessToken(accessToken);
+          if (access && access.sub === userId) {
+            await blacklistUntilExpiry(this.cacheManager, accessBlacklistKey(access.jti), access.exp);
+          }
+          throw tooMany();
+        }
+        throw new BadRequestException('当前密码错误');
+      }
+
+      if (currentPassword === newPassword) {
+        throw new BadRequestException('新密码不能与当前密码相同');
+      }
+
+      await this.userService.updatePassword(userId, newPassword);
+      await this.cacheManager.del(failuresKey);
+    });
 
     await this.auditService.log({
       userId,

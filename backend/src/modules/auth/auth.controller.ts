@@ -217,6 +217,7 @@ export class AuthController {
   @ApiResponse({ status: 200, description: '密码修改成功' })
   @ApiResponse({ status: 400, description: '当前密码错误，或新密码不符合要求' })
   @ApiResponse({ status: 401, description: '未授权' })
+  @ApiResponse({ status: 429, description: '15 分钟内当前密码错误达 5 次（发起请求的会话同时作废）' })
   async changePassword(
     @CurrentUser() user: AuthUser,
     @Body() changePasswordDto: ChangePasswordDto,
@@ -231,6 +232,8 @@ export class AuthController {
       changePasswordDto.newPassword,
       ip,
       userAgent,
+      // 当前密码连续错到上限时吊销的就是这个 token（与 JwtStrategy 同一个取法）
+      extractAccessToken(req) ?? undefined,
     );
 
     return { message: '密码修改成功' };

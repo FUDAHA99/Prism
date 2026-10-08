@@ -12,6 +12,7 @@ import { GUARDS_METADATA } from '@nestjs/common/constants';
 import { TypeOrmModule, getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import * as request from 'supertest';
+import * as bcrypt from 'bcrypt';
 
 import { AUTH_THROTTLE, AuthController } from './auth.controller';
 import { AuthModule } from './auth.module';
@@ -19,7 +20,12 @@ import { ThrottlerBehindProxyGuard } from '../../common/guards/throttler-behind-
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { accessBlacklistKey, refreshBlacklistKey } from './token-blacklist.util';
-import { accountAttemptsKey, ipAttemptsKey, trustedIpsKey } from './login-attempts';
+import {
+  accountAttemptsKey,
+  changePasswordFailuresKey,
+  ipAttemptsKey,
+  trustedIpsKey,
+} from './login-attempts';
 import { UserService } from '../user/user.service';
 import { RoleService } from '../role/role.service';
 import { AuditService } from '../audit/audit.service';
@@ -528,6 +534,68 @@ describe('认证核心安全行为', () => {
 
     it('未登录 → 401', async () => {
       expect((await change(undefined, { currentPassword: 'Start123!', newPassword: 'Changed2026' })).status).toBe(401);
+    });
+
+    describe('当前密码错误按用户计数：15 分钟内错 5 次 → 429 并吊销发起请求的会话', () => {
+      const wrong = (token: string) => change(token, { currentPassword: 'Wrong1234', newPassword: 'Changed2026' });
+
+      it('前 4 次 400，第 5 次 429 且该 access token 作废；换会话也只能等窗口过去', async () => {
+        const u = await freshUser();
+        const attacker = await login(u);
+        for (let i = 0; i < 4; i += 1) {
+          const res = await wrong(attacker.tokens.accessToken);
+          expect(res.status).toBe(400);
+          expect(res.body.message).toBe('当前密码错误');
+        }
+        const fifth = await wrong(attacker.tokens.accessToken);
+        expect(fifth.status).toBe(429);
+        expect(fifth.body.message).toBe('当前密码错误次数过多，请15分钟后再试');
+        expect((await me(attacker.tokens.accessToken)).status).toBe(401);
+
+        const key = changePasswordFailuresKey(u.id);
+        expect(key).toBe(`change_password_failures:${u.id}`);
+        expect(await h.cache.get(key)).toBe(5);
+        expect(h.cache.ttls.get(key)).toBe(15 * 60 * 1000);
+
+        // 另一个会话（哪怕当前密码正确）在窗口内也是 429，不再比对口令
+        const other = await login(u);
+        const blocked = await change(other.tokens.accessToken, { currentPassword: u.password, newPassword: 'Changed2026' });
+        expect(blocked.status).toBe(429);
+        expect((await me(other.tokens.accessToken)).status).toBe(200);
+        await login(u); // 密码没被改
+
+        // 窗口过去（计数过期）后照常可改
+        await h.cache.del(key);
+        await change(other.tokens.accessToken, { currentPassword: u.password, newPassword: 'Changed2026' }).expect(200);
+      });
+
+      it('改密成功清零计数；只影响本人', async () => {
+        const u = await freshUser();
+        const bystander = await freshUser();
+        const mine = await login(u);
+        const theirs = await login(bystander);
+        for (let i = 0; i < 3; i += 1) expect((await wrong(mine.tokens.accessToken)).status).toBe(400);
+        expect((await wrong(theirs.tokens.accessToken)).status).toBe(400);
+        expect(await h.cache.get(changePasswordFailuresKey(bystander.id))).toBe(1);
+
+        await change(mine.tokens.accessToken, { currentPassword: u.password, newPassword: 'Changed2026' }).expect(200);
+        expect(await h.cache.get(changePasswordFailuresKey(u.id))).toBeUndefined();
+      });
+
+      it('并发猜测按顺序计数：10 个并发请求只有 5 次真正比对口令', async () => {
+        const u = await freshUser();
+        const sessions = await Promise.all(Array.from({ length: 10 }, () => login(u)));
+        const compare = jest.spyOn(bcrypt, 'compare');
+        try {
+          const results = await Promise.all(sessions.map((s) => wrong(s.tokens.accessToken)));
+          expect(results.filter((r) => r.status === 400)).toHaveLength(4);
+          expect(results.filter((r) => r.status === 429)).toHaveLength(6);
+          expect(compare).toHaveBeenCalledTimes(5);
+        } finally {
+          compare.mockRestore();
+        }
+        expect(await h.cache.get(changePasswordFailuresKey(u.id))).toBe(5);
+      });
     });
 
     describe('校验凭据之后、签名之前落地的改密（TOCTOU）', () => {
