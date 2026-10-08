@@ -6,7 +6,7 @@
 
 ## 执行进度
 
-最后更新：2026-08-26
+最后更新：2026-10-08
 
 ### 批次 0 —— 已完成 ✅
 
@@ -48,7 +48,69 @@
 - 1-B：登录态与游客态各跑一次真实上报，确认 `forbidNonWhitelisted` 无回归
 - 限流：带 nginx 的环境下确认外部请求按 IP 限流、SSR 不受限
 
-**批次 1 剩余**：1-C portal 攻击面收敛、1-D 上传加固、1-E nginx 硬化。
+**批次 1 剩余**：1-C portal 攻击面收敛、1-D 上传加固、1-E nginx 硬化 —— 方案已于 2026-10-08 重新核查，见下节。
+
+### 批次 1-C / 1-D / 1-E —— 交叉核查后的修订方案（2026-10-08）
+
+第四节的 1-C/1-D/1-E 原文写于 6 周前，动手前用 5 个领域代理 + 1 个交叉核查代理逐条对照**当前代码**
+重新核实（只读，在 scratch 副本里实测构建、audit、运行时）。原文有多处照做会失败或无效，以本节为准。
+
+**原文需要更正的地方**
+
+| 原文 | 实际情况 | 更正 |
+|---|---|---|
+| 1-D：`overrides: {"multer": "2.2.0"}` | 保留顶层 `^1.4.5` 时 npm 报 `EOVERRIDE`，直接失败；2.2.0 本身仍有 2 条 high | 顶层改 `"multer": "2.4.0"` + `"overrides": {"multer": "$multer"}`，全树去重为一份 |
+| 1-D：升级后只需改前端文案 | multer 2.4.0 改了 `LIMIT_UNEXPECTED_FILE` 文案，Nest 10.4.22 按文案匹配 → 字段名错误变 500 | 新增按 `code` 映射的 `MulterExceptionFilter` |
+| 1-D：「上传需有效 JWT，不是匿名可打」 | `POST /auth/register` 公开，注册即得 JWT；上传只挂 `AuthGuard('jwt')` | 缓解说法作废，limits 是在为近似匿名的攻击面兜底 |
+| 1-C：nginx 改动「不依赖重新构建」 | `nginx.conf` 是单文件 bind mount，`git pull` 换 inode，容器仍读旧文件；`up -d --build` 不重建 nginx | 部署流程新增「一次性容器 `nginx -t` → `force-recreate nginx`」 |
+| 1-C：`location /_next/image` 要放在 `location /` 之前 | 前缀 location 取最长匹配，与书写顺序无关 | 改用 `location ^~ /_next/image`，防将来的正则 location 抢先 |
+| 1-C：rewrite 可保留 dev-only 版本 | 开发/生产都零消费方 | 整段删除 |
+| 3A #9：next 升级「33→21，critical 1→0」 | advisory 库已更新：35→23，critical 3→2；剩余的 `GHSA-2xp9`（图片优化器 AVIF RCE）14.x 不修 | 关掉图片优化器是 14.x 上唯一缓解；next 升级提前到 1-C 一起做 |
+| 3A：缓存投毒 `gp8f` 当下可打 | 只影响 Pages Router，本站纯 App Router | 删除该说法 |
+| 1-E #29：只改公开接口 | 管理端 `GET /comments` 等 8 个接口只要 JWT 不看角色，自助注册即可拉全表 `guestEmail` | 同时给管理端加 `RolesGuard('admin','editor')` |
+| 1-E #50：在 `/uploads/` 里逐条重申安全头 | 删掉那条 `add_header Cache-Control` 即可恢复继承；`expires 7d` 自己会输出 `Cache-Control` | 直接删除 |
+| 1-E #51：`burst=20`、`location = /api/v1/auth/login` | admin 媒体库无并发上限上传，30 个文件约 9 个会 429；Express 路由大小写不敏感且容忍尾斜杠，精确匹配可绕过 | api 桶 `burst=100`（对齐后端 100/60s）；登录用 `~* ^/api/v1/auth/(login\|register)/?$`；nginx 自身 429 返回 JSON |
+| 1-E #54：先上 CSP Report-Only 跑一周 | 没有 report-uri，Report-Only 只打到访客控制台，无从观察 | 完整 CSP 推迟；本批只上零风险的 `object-src 'none'; base-uri 'self'; frame-ancestors 'self'` |
+
+**核查中新发现、必须同批处理的**
+
+- `portal/public` 不在 git 里，从 clone 构建镜像会在 `COPY --from=builder /app/public` 失败 —— 1-C 的改动根本部署不上去。
+- `seed-admin.js` 不分配任何角色，`role.service.ts` 的角色分配又是 Postgres 语法（在 MySQL 上报错）。
+  全新部署后唯一的管理员没有 admin 角色：发布内容、用户/角色管理全部 403，加了评论 RolesGuard 后评论管理也会 403。
+- 已跑过 `setup-ssl.sh` 的服务器上，`nginx/nginx.conf` 是本地生成物（受 git 跟踪），任何改它的提交都会让部署卡在 `git pull`。
+  新增 `scripts/render-nginx-conf.sh`，pull 前还原、pull 后按 HTTP/HTTPS 模式重新生成。
+- admin 的 401 跳转写死 `/login`，没带 `/admin/` basename，生产环境输错密码会被带到门户 404。
+
+**提交顺序**
+
+| # | 提交 | 要点 |
+|---|---|---|
+| C1 | `fix(portal)` 关闭图片优化器、删 rewrite、修 clone 后镜像构建缺 public | `images.unoptimized`、`poweredByHeader: false`、Dockerfile `mkdir -p public` |
+| C2 | `chore(portal)` next 14.2.5 → 14.2.35 | 官方源，lock 一并提交 |
+| C3 | `fix(media)` multer 2.4.0 去重、limits 走配置、按 code 映射错误 | 启动期校验上限 ≤ 11MiB，与 nginx 12M 耦合 |
+| C4 | `fix(media)` 扩展名改由 mimetype 白名单决定 | 防将来补上落盘后的同源存储型 XSS |
+| C5 | `fix(admin)` 上传前端预检、展示后端错误、401 跳转带 basename | |
+| C6 | `fix(seed)` seed-admin 幂等创建并分配 admin 角色 | C7 的前置 |
+| C7 | `fix(api)` 评论公开接口字段白名单 + 管理端角色校验 | 附回归测试 |
+| C8 | `fix(api)` CORS_ORIGIN 归一化 + 启动日志 | |
+| C9 | `chore` 删除遗留 Postgres 部署编排 `deploy/`、`database/init.sql` | README 写明唯一生产入口 |
+| C10 | `fix(deploy)` nginx 配置按模式生成、部署时校验并重建 nginx | 修正部署文档中的过期描述 |
+| C11 | `chore(nginx)` server_tokens、限流、/uploads 头继承、最小 CSP、12M、屏蔽 `/_next/image` | 两份配置归一化 diff 作门禁；推送前须 `nginx -t` |
+
+**推迟到 1-F（紧接本批，不拖到批次 2）**
+
+- **匿名可读草稿**：`GET /contents?status=draft` 及 `/contents/:id`、`/slug/:slug` 不按发布状态过滤，movie/novel/comic 同理。
+  修复需 JwtOptionalGuard 按角色过滤，并先改 portal 三处 `(nickname||username).charAt(0)`，有部署顺序要求。
+- content 等公开接口的字段白名单（`authorId` 等），与上一条合并成「公开读 / 后台读分离」。
+- 登录限流实际失效：`auth.controller.ts` 三处 `@Throttle` 的 ttl 仍按秒写（60/300/60，在 throttler v5 下是毫秒），
+  且方法级 `ThrottlerGuard` 与全局 APP_GUARD 重复计数；`auth.module` 的 short/medium 两个 throttler 是死配置。
+  本批 nginx 登录桶先兜住生产环境。
+- `role.service.ts` 的 Postgres 语法改 MySQL；`enable_register` 开关后端从未执行；
+  `getClientIp` 取 XFF 最左值导致审计 IP 可伪造。
+- 上传接口的角色收敛（谁能上传）需要产品决定。
+
+**推迟到更后**：完整 CSP；next 15/16 大版本（3B）；setup-ssl 改为生成未跟踪的配置文件；
+上传字节实际不落盘（`/uploads/*` 恒 404，媒体功能不可用）属功能缺陷，另立任务。
 
 ---
 
@@ -95,6 +157,10 @@ GET /repos/FUDAHA99/Prism/commits/fad110c  ->  fuxiaoha@gmail.com
 GitHub 提交元数据被第三方大规模抓取，实际上应假定该邮箱已被采集。
 上述两步是收敛残留可见面，真正有效的是已完成的"阻断未来暴露"。
 若判断不值得投入，可只做第 1 步（免费、约 5 分钟）而跳过第 2 步。
+
+**2026-10-08 复查**：`ad4fc26`、`fad110c` 经 API 仍返回 gmail；`kk778956/Prism` 的分支历史仍完整保留该邮箱
+（最后推送 2026-05-09），属于对方仓库主动持有，GC 请求清不掉，只能由对方删除或同步 fork。
+另有新 fork `aoooeg/Prism`（2026-10-03 创建，晚于历史重写），其历史只含 noreply，无需处理。
 
 ---
 
