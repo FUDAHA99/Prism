@@ -202,6 +202,9 @@ export class AuthService {
   /**
    * 注销：拉黑当前 access token；客户端一并交来 refresh token 时也拉黑它。
    * refresh token 无效、已过期或不属于当前用户时忽略（注销本身总是成功）。
+   *
+   * accessToken 由控制器用与 JwtStrategy 相同的 extractAccessToken 取出。这里重新验签取 jti / exp，
+   * 黑名单按 jti 记、保留到它自然过期；JwtStrategy 同样按验签后的 jti 查，与头部写法无关。
    */
   async logout(
     userId: string,
@@ -210,13 +213,9 @@ export class AuthService {
     ip: string,
     userAgent?: string,
   ): Promise<void> {
-    if (accessToken) {
-      const decoded = this.jwtService.decode(accessToken) as { exp?: number } | null;
-      await blacklistUntilExpiry(
-        this.cacheManager,
-        accessBlacklistKey(accessToken),
-        decoded?.exp,
-      );
+    const access = this.tryVerifyAccessToken(accessToken);
+    if (access && access.sub === userId) {
+      await blacklistUntilExpiry(this.cacheManager, accessBlacklistKey(access.jti), access.exp);
     }
 
     if (refreshToken) {
@@ -312,7 +311,8 @@ export class AuthService {
    * 签发一对 token：
    * - access：JwtModule 的密钥与有效期，type 'access'
    * - refresh：独立的 refresh 密钥，type 'refresh'，载荷只有用户 ID
-   * 两者都带随机 jti，保证每个 token 唯一（黑名单按 token 哈希记，不能误伤同秒签发的另一个）。
+   * 两者都带随机 jti，保证每个 token 唯一：access 的注销黑名单按 jti 记，refresh 按 token 哈希记，
+   * 都不能误伤同秒签发的另一个。
    */
   private async generateTokens(
     user: Pick<SafeUser, 'id' | 'email' | 'username' | 'roles'>,
@@ -388,6 +388,26 @@ export class AuthService {
       typeof payload.iat === 'number' &&
       typeof payload.exp === 'number';
     return valid ? (payload as RefreshTokenPayload) : null;
+  }
+
+  /** 验签 access token（JwtModule 的 access 密钥）并取出拉黑需要的声明；不合格返回 null */
+  private tryVerifyAccessToken(
+    token: unknown,
+  ): { sub: string; jti: string; exp: number } | null {
+    if (typeof token !== 'string' || token === '') return null;
+    let payload: Partial<JwtPayload>;
+    try {
+      payload = this.jwtService.verify(token);
+    } catch {
+      return null;
+    }
+    const valid =
+      payload?.type === 'access' &&
+      typeof payload.sub === 'string' &&
+      typeof payload.jti === 'string' &&
+      payload.jti !== '' &&
+      typeof payload.exp === 'number';
+    return valid ? { sub: payload.sub as string, jti: payload.jti as string, exp: payload.exp as number } : null;
   }
 
   /** 按 ID 取仍启用的用户；不存在（含已删除）或已禁用返回 null */

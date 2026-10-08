@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { Controller, Get, ValidationPipe } from '@nestjs/common';
+import { Controller, Get, Req, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { JwtModule, JwtService } from '@nestjs/jwt';
@@ -71,6 +71,18 @@ class ProbeController {
   @Access('authenticated')
   me(@CurrentUser() user: { id: string }) {
     return { id: user.id };
+  }
+
+  @Get('admin')
+  @Access('admin')
+  admin(@CurrentUser() user: { id: string }) {
+    return { id: user.id };
+  }
+
+  @Get('optional')
+  @Access('optional')
+  optional(@Req() req: { user?: { id: string } }) {
+    return { id: req.user?.id ?? null };
   }
 }
 
@@ -211,10 +223,17 @@ describe('认证核心安全行为', () => {
     });
 
     it('即使两把密钥被配成相同，type 不是 access 的 token 也进不来（含不带 type 的旧 token）', async () => {
-      const base = { sub: h.adminId, email: ADMIN.email, username: 'admin', roles: ['admin'] };
+      const base = { sub: h.adminId, email: ADMIN.email, username: 'admin', roles: ['admin'], jti: 'probe-jti' };
       expect((await me(accessJwt.sign({ ...base, type: 'refresh' }))).status).toBe(401);
       expect((await me(accessJwt.sign(base))).status).toBe(401);
       expect((await me(accessJwt.sign({ ...base, type: 'access' }))).status).toBe(200);
+    });
+
+    it('不带 jti 的 access token 一律 401（黑名单按 jti 查，没有 jti 就无从注销）', async () => {
+      const base = { sub: h.adminId, email: ADMIN.email, username: 'admin', roles: ['admin'], type: 'access' };
+      expect((await me(accessJwt.sign(base))).status).toBe(401);
+      expect((await me(accessJwt.sign({ ...base, jti: '' }))).status).toBe(401);
+      expect((await me(accessJwt.sign({ ...base, jti: 42 }))).status).toBe(401);
     });
 
     it('同一秒内两次登录拿到不同的 token（jti），注销其中一个不误伤另一个', async () => {
@@ -316,7 +335,7 @@ describe('认证核心安全行为', () => {
       expect((await refresh(tokens.refreshToken)).status).toBe(401);
 
       for (const [key, token] of [
-        [accessBlacklistKey(tokens.accessToken), tokens.accessToken],
+        [accessBlacklistKey(decode(tokens.accessToken).jti), tokens.accessToken],
         [refreshBlacklistKey(tokens.refreshToken), tokens.refreshToken],
       ]) {
         const ttl = h.cache.ttls.get(key)!;
@@ -352,6 +371,57 @@ describe('认证核心安全行为', () => {
 
     it('未登录 401', async () => {
       expect((await h.http().post('/auth/logout').send({})).status).toBe(401);
+    });
+
+    it('注销后换一种 Authorization 写法（双空格 / 带后缀 / 小写 / Tab）也是 401，含 admin 专属接口', async () => {
+      const { tokens } = await login();
+      const tok = tokens.accessToken;
+      await h.http().post('/auth/logout').set('Authorization', `Bearer ${tok}`).expect(200);
+      for (const header of [`Bearer ${tok}`, `Bearer  ${tok}`, `Bearer ${tok} x`, `bearer ${tok}`, `Bearer	${tok}`]) {
+        expect((await h.http().get('/probe/me').set('Authorization', header)).status).toBe(401);
+        expect((await h.http().get('/auth/me').set('Authorization', header)).status).toBe(401);
+        expect((await h.http().get('/probe/admin').set('Authorization', header)).status).toBe(401);
+      }
+    });
+
+    it('黑名单按验签后的 jti 记：带后缀的头部注销不了任何 token（401），规范写法注销后 TTL 到 token 过期', async () => {
+      const { tokens } = await login();
+      const tok = tokens.accessToken;
+      await h.http().post('/auth/logout').set('Authorization', `Bearer ${tok} x`).expect(401);
+      expect((await me(tok)).status).toBe(200);
+      await h.http().post('/auth/logout').set('Authorization', `Bearer ${tok}`).expect(200);
+      const { jti, exp } = decode(tok);
+      expect(await h.cache.get(accessBlacklistKey(jti))).toBe(1);
+      const ttl = h.cache.ttls.get(accessBlacklistKey(jti))!;
+      expect(Math.abs(Date.now() + ttl - exp * 1000)).toBeLessThan(5000);
+      // 缓存里不落 token 原文
+      expect([...h.cache.store.keys()].some((k) => k.includes(tok))).toBe(false);
+    });
+  });
+
+  // 头部值首尾的空白由 Node 的 HTTP 解析器按 RFC 7230 去掉，到不了这里，不在此列
+  describe('Authorization 头只接受 `Bearer <三段 base64url>` 一种写法', () => {
+    it.each([
+      ['双空格', (t: string) => `Bearer  ${t}`],
+      ['尾部追加内容', (t: string) => `Bearer ${t} x`],
+      ['小写 scheme', (t: string) => `bearer ${t}`],
+      ['Tab 分隔', (t: string) => `Bearer	${t}`],
+      ['缺 scheme', (t: string) => t],
+      ['两个 token', (t: string) => `Bearer ${t},Bearer ${t}`],
+      ['段内混入非 base64url 字符', (t: string) => `Bearer ${t.replace('.', '.+')}`],
+    ])('%s → 401（未注销的有效 token 也不行）', async (_name, variant) => {
+      const { tokens } = await login();
+      expect((await me(tokens.accessToken)).status).toBe(200);
+      expect((await h.http().get('/probe/me').set('Authorization', variant(tokens.accessToken))).status).toBe(401);
+    });
+
+    it('可选登录接口：写法不对按匿名处理，不报错', async () => {
+      const { tokens } = await login();
+      const ok = await h.http().get('/probe/optional').set('Authorization', `Bearer ${tokens.accessToken}`);
+      expect(ok.body).toEqual({ id: h.adminId });
+      const bad = await h.http().get('/probe/optional').set('Authorization', `Bearer ${tokens.accessToken} x`);
+      expect(bad.status).toBe(200);
+      expect(bad.body).toEqual({ id: null });
     });
   });
 

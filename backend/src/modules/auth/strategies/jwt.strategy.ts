@@ -1,6 +1,6 @@
 import { Injectable, UnauthorizedException, Inject } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
-import { ExtractJwt, Strategy } from 'passport-jwt';
+import { Strategy } from 'passport-jwt';
 import { ConfigService } from '@nestjs/config';
 import { JwtPayload, AuthUser } from '../interfaces/auth.interface';
 import { AuthService } from '../auth.service';
@@ -8,6 +8,7 @@ import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 import { accessBlacklistKey } from '../token-blacklist.util';
 import { isIssuedBeforeRevocation } from '../token-revocation';
+import { extractAccessToken } from '../access-token.extractor';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
@@ -17,14 +18,14 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
   ) {
     super({
-      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+      // 只认 `Bearer <三段 base64url>` 这一种写法；/auth/logout 用同一个函数取 token
+      jwtFromRequest: extractAccessToken,
       ignoreExpiration: false,
       secretOrKey: configService.get('app.jwt.secret'),
-      passReqToCallback: true,
     });
   }
 
-  async validate(request: any, payload: JwtPayload): Promise<AuthUser> {
+  async validate(payload: JwtPayload): Promise<AuthUser> {
     try {
       // 只接受 access token。refresh token 用另一把密钥签名，到这里验签就会失败；
       // 这一条兜住两把密钥被配成相同（非生产环境只告警）以及不带 type 的旧 token
@@ -32,12 +33,11 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         throw new UnauthorizedException('无效的token类型');
       }
 
-      // 检查token是否在黑名单中
-      const token = this.extractTokenFromHeader(request);
-      const isBlacklisted = await this.cacheManager.get(
-        accessBlacklistKey(token),
-      );
-      if (isBlacklisted) {
+      // 注销黑名单按已验签载荷里的 jti 查（与头部怎么写无关）；本系统签发的 access token 都带 jti
+      if (typeof payload.jti !== 'string' || payload.jti === '') {
+        throw new UnauthorizedException('无效的token');
+      }
+      if (await this.cacheManager.get(accessBlacklistKey(payload.jti))) {
         throw new UnauthorizedException('Token已被注销');
       }
 
@@ -71,13 +71,5 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       }
       throw new UnauthorizedException('Token验证失败');
     }
-  }
-
-  private extractTokenFromHeader(request: any): string {
-    const authHeader = request.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      throw new UnauthorizedException('无效的Authorization头');
-    }
-    return authHeader.substring(7); // 移除'Bearer '前缀
   }
 }

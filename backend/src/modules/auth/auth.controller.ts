@@ -21,6 +21,7 @@ import { LoginResponse, AuthUser } from './interfaces/auth.interface';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Access } from '../../common/authz/access.decorator';
 import { clientIp } from '../../common/utils/client-ip';
+import { extractAccessToken } from './access-token.extractor';
 
 /**
  * 认证接口的限流额度，由 AppModule 的全局 ThrottlerBehindProxyGuard 执行（按 req.ip 计、每个接口各自一个桶）。
@@ -164,7 +165,8 @@ export class AuthController {
     @Body() dto: LogoutDto,
     @Request() req: any,
   ): Promise<{ message: string }> {
-    const accessToken = req.headers.authorization?.replace('Bearer ', '');
+    // 与 JwtStrategy 同一个取法：守卫放行的就是这一个 token，拉黑的也必须是它
+    const accessToken = extractAccessToken(req) ?? undefined;
     const ip = clientIp(req);
     const userAgent = req.headers['user-agent'];
 
