@@ -176,6 +176,31 @@ log "启动 nginx..."
 $COMPOSE up -d --no-deps --force-recreate nginx
 NGINX_DOWN=false   # nginx 已带 HTTPS 配置跑起来，之后的失败不再回滚
 
+# ── 配置自动续签（crontab）──────────────────────────────────────
+# 必须紧跟在 HTTPS 生效之后、DOMAIN 切换与重建之前：后面的重建一旦失败会 die，
+# 若续签任务排在后面就会被跳过 —— 证书 90 天后过期，叠加一年期 HSTS，老访客整站打不开
+log "配置证书自动续签（每天凌晨 3 点检查）..."
+RENEW_SCRIPT="$PROJECT_DIR/scripts/renew-ssl.sh"
+
+cat > "$RENEW_SCRIPT" <<RENEW
+#!/bin/bash
+# 由 setup-ssl.sh 自动生成，用于 crontab 续签
+set -euo pipefail
+certbot renew --quiet --standalone \
+  --pre-hook  "docker compose -f $PROJECT_DIR/docker-compose.prod.yml --env-file $PROJECT_DIR/.env.prod stop nginx" \
+  --post-hook "cp /etc/letsencrypt/live/$DOMAIN/fullchain.pem $PROJECT_DIR/nginx/ssl/fullchain.pem && \
+               cp /etc/letsencrypt/live/$DOMAIN/privkey.pem   $PROJECT_DIR/nginx/ssl/privkey.pem && \
+               docker compose -f $PROJECT_DIR/docker-compose.prod.yml --env-file $PROJECT_DIR/.env.prod start nginx"
+RENEW
+chmod +x "$RENEW_SCRIPT"
+
+CRON_JOB="0 3 * * * $RENEW_SCRIPT >> $PROJECT_DIR/backup/ssl-renew.log 2>&1"
+# backup/ 不存在时 cron 打不开重定向目标，续签脚本根本不会执行
+mkdir -p "$PROJECT_DIR/backup"
+# || true：没有 crontab（或只剩本任务）时 crontab -l / grep -v 返回 1，
+# set -e + pipefail 下子 shell 会在 echo 之前退出
+(crontab -l 2>/dev/null | grep -v 'renew-ssl.sh' || true; echo "$CRON_JOB") | crontab -
+
 # ── 更新 .env.prod 的 DOMAIN 协议为 https；变了则连带重建 backend / portal ──
 # NEXT_PUBLIC_API_BASE 是 portal 的构建期参数，CORS_ORIGIN 在 backend 容器创建时注入；
 # 不重建的话门户客户端仍请求 http:// API，会被浏览器按混合内容拦截（评论区失效）
@@ -194,27 +219,6 @@ fi
 # 等待 nginx 启动
 sleep 3
 $COMPOSE ps nginx
-
-# ── 配置自动续签（crontab）──────────────────────────────────────
-log "配置证书自动续签（每天凌晨 3 点检查）..."
-RENEW_SCRIPT="$PROJECT_DIR/scripts/renew-ssl.sh"
-
-cat > "$RENEW_SCRIPT" <<RENEW
-#!/bin/bash
-# 由 setup-ssl.sh 自动生成，用于 crontab 续签
-set -euo pipefail
-certbot renew --quiet --standalone \
-  --pre-hook  "docker compose -f $PROJECT_DIR/docker-compose.prod.yml --env-file $PROJECT_DIR/.env.prod stop nginx" \
-  --post-hook "cp /etc/letsencrypt/live/$DOMAIN/fullchain.pem $PROJECT_DIR/nginx/ssl/fullchain.pem && \
-               cp /etc/letsencrypt/live/$DOMAIN/privkey.pem   $PROJECT_DIR/nginx/ssl/privkey.pem && \
-               docker compose -f $PROJECT_DIR/docker-compose.prod.yml --env-file $PROJECT_DIR/.env.prod start nginx"
-RENEW
-chmod +x "$RENEW_SCRIPT"
-
-CRON_JOB="0 3 * * * $RENEW_SCRIPT >> $PROJECT_DIR/backup/ssl-renew.log 2>&1"
-# || true：没有 crontab（或只剩本任务）时 crontab -l / grep -v 返回 1，
-# set -e + pipefail 下子 shell 会在 echo 之前退出
-(crontab -l 2>/dev/null | grep -v 'renew-ssl.sh' || true; echo "$CRON_JOB") | crontab -
 
 echo ""
 log "=== HTTPS 配置完成 ==="
