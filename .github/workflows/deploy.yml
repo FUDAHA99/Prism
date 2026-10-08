@@ -52,6 +52,16 @@ jobs:
           NEXT_PUBLIC_API_BASE: http://localhost
           NEXT_PUBLIC_SITE_NAME: Prism
 
+      # 单元测试（含评论公开接口 PII 回归：backend comment.service.spec.ts）
+      # 目前只对 backend 启用：frontend 的 test 脚本是 vitest，但仓库里还没有任何
+      # 测试文件，vitest 会报 "No test files found" 并以退出码 1 失败；portal 没有
+      # test 脚本（--if-present 下为空操作）。frontend 补上测试后可去掉 if。
+      # 不要加 --coverage：backend package.json 的全局 80% 覆盖率阈值会让它失败。
+      - name: Test
+        if: matrix.project == 'backend'
+        working-directory: ${{ matrix.project }}
+        run: npm test --if-present
+
   # ─────────────────────────────────────────────────────────────
   # 部署：仅在 verify 全绿、且是推送到 main 时执行
   # 未配置 SSH secrets 时优雅跳过（而非红叉），避免 CI 长期挂红
