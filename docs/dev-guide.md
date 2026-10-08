@@ -118,20 +118,33 @@ db.close();
 ### 初始化管理员角色
 
 后台的评论管理、用户/角色管理和内容发布都要求账号带 `admin` 或 `editor` 角色。
-`node scripts/seed-admin.js` 会幂等地创建 `admin`、`editor` 两个系统角色并把 `admin` 分配给 admin@cms.com，新环境跑它即可。
+`node scripts/seed-admin.js` 会幂等地创建 `admin`、`editor` 两个系统角色（`isSystem = 1`）并把 `admin` 分配给 admin@cms.com，
+新环境跑它即可（账号已存在时它会把密码**重置**为 `Admin123!`）。
 之后给其他账号分配角色在后台「用户管理 → 编辑」里操作，保存后对方的下一个请求起就按新角色鉴权，无需重新登录。
 系统角色（`admin` / `editor`）不能改名或删除，接口返回 400；管理员也不能移除自己的 `admin` 角色。
 
-已有环境只想补角色时，**不要**为此重跑 seed-admin.js（账号已存在时它会把密码重置为 `Admin123!`），
-直接在 MySQL 里执行下面两条（可重复执行；开发环境容器为 `cms-mysql`，生产为 `prism-mysql`，库名换成实际值）：
+已有环境只想补角色时，用 `--roles-only` 模式（可重复执行）：
+
+```bash
+cd backend && node scripts/seed-admin.js --roles-only
+```
+
+它只建 `admin`、`editor` 两个系统角色并补上 `isSystem = 1`（早先在后台手工建的同名角色也会补标记）；
+库里没有任何可用账号（启用且未删除）持有 `admin` 时，才把 `admin` 分配给 admin@cms.com。
+不建账号，不改任何账号的密码与启用状态；已有可用的 `admin` 时不动任何角色分配。
+生产上 `scripts/deploy.sh` 每次例行部署都会在 backend 就绪后自动执行它（见 `docs/deploy.md` 5.1）。
+
+不方便跑脚本时，也可以直接在 MySQL 里执行（可重复执行；开发环境容器为 `cms-mysql`，生产为 `prism-mysql`，库名换成实际值，
+`admin@cms.com` 换成要授予 `admin` 的邮箱）：
 
 ```bash
 docker exec -i cms-mysql mysql --default-character-set=utf8mb4 -u cms -pcms123 cms_dev <<'SQL'
 INSERT IGNORE INTO roles (id, name, description, isSystem, createdAt, updatedAt)
-VALUES (UUID(), 'admin', '系统管理员', 1, NOW(6), NOW(6));
+VALUES (UUID(), 'admin', '系统管理员', 1, NOW(6), NOW(6)), (UUID(), 'editor', '内容编辑', 1, NOW(6), NOW(6));
+UPDATE roles SET isSystem = 1 WHERE name IN ('admin', 'editor');
 INSERT IGNORE INTO user_roles (user_id, role_id)
 SELECT u.id, r.id FROM users u JOIN roles r ON r.name = 'admin' WHERE u.email = 'admin@cms.com';
-SELECT u.email, r.name FROM users u
+SELECT u.email, r.name, r.isSystem FROM users u
 JOIN user_roles ur ON ur.user_id = u.id
 JOIN roles r ON r.id = ur.role_id;
 SQL
@@ -139,7 +152,7 @@ SQL
 
 > 不要顺手创建 `user` 角色：注册流程会把它自动分配给每个自助注册的账号，而角色模型只用 `admin` / `editor`。
 >
-> 直接改库补上的角色要让该账号重新登录（登录会清掉 5 分钟的用户缓存）才生效；走后台分配则立即生效。
+> 无论直接改库还是走后台分配，都从该账号的下一个请求起按新角色鉴权（鉴权每个请求直接查库，不经用户缓存）。
 
 ---
 
