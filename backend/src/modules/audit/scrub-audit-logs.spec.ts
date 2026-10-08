@@ -20,11 +20,24 @@ const scrub = require('../../../scripts/scrub-audit-logs.js');
 
 const BACKEND_ROOT = path.resolve(__dirname, '../../..');
 const HASH = '$2b$12$abcdefghijklmnopqrstuuK0e7cFJ2zqvM1cH6nmpUCm1RA5b1Rhm';
-const SECRETS = [HASH, 'Bearer LEGACY-HEADER-SECRET', 'LEGACY-HEADER-SECRET', 'sid=LEGACY-COOKIE'];
+const SECRETS = [
+  HASH,
+  'Bearer LEGACY-HEADER-SECRET',
+  'LEGACY-HEADER-SECRET',
+  'sid=LEGACY-COOKIE',
+  // 修复前采集源 CREATE / UPDATE 记下的 apiUrl 原文：query 里的 key 与 userinfo 里的账号密码
+  'SECRETKEY123',
+  'hunter2',
+  'acct:',
+  'UPDATE-KEY-456',
+  'REMARK-TOKEN-789',
+  'EPISODE-SIGN-000',
+];
 
 interface Row {
   id: string;
   action: string;
+  resourceType?: string;
   oldValues: string | null;
   newValues: string | null;
   userAgent: string | null;
@@ -38,8 +51,15 @@ describe('scrub-audit-logs.js', () => {
   async function insertLegacy(row: Partial<Row> & { id: string; action: string }): Promise<void> {
     await ds.query(
       `INSERT INTO audit_logs (id, userId, action, resourceType, resourceId, ipAddress, userAgent, oldValues, newValues, createdAt)
-       VALUES (?, NULL, ?, 'legacy', NULL, 'system', ?, ?, ?, datetime('now'))`,
-      [row.id, row.action, row.userAgent ?? null, row.oldValues ?? null, row.newValues ?? null],
+       VALUES (?, NULL, ?, ?, NULL, 'system', ?, ?, ?, datetime('now'))`,
+      [
+        row.id,
+        row.action,
+        row.resourceType ?? 'legacy',
+        row.userAgent ?? null,
+        row.oldValues ?? null,
+        row.newValues ?? null,
+      ],
     );
   }
 
@@ -64,13 +84,40 @@ describe('scrub-audit-logs.js', () => {
       action: 'USER_UPDATE',
       newValues: JSON.stringify({ nickname: 'n', passwordHash: HASH }),
     });
+    // 修复前采集源 UPDATE 记的是整份 dto
     await insertLegacy({
       id: 'b-collect-update',
       action: 'UPDATE',
+      resourceType: 'collect_source',
       newValues: JSON.stringify({
-        apiUrl: 'https://res.example.com/api.php',
+        apiUrl: 'https://res.example.com/api.php?ac=list&key=UPDATE-KEY-456',
+        remark: '备用线路 http://mirror.example.net/api.php?token=REMARK-TOKEN-789，勿删',
         extraHeaders: { Authorization: 'Bearer LEGACY-HEADER-SECRET', Cookie: 'sid=LEGACY-COOKIE' },
       }),
+    });
+    // 修复前采集源 CREATE 记的是 { name, apiUrl: saved.apiUrl }
+    await insertLegacy({
+      id: 'h-collect-create',
+      action: 'CREATE',
+      resourceType: 'collect_source',
+      newValues: JSON.stringify({
+        name: '飞速资源',
+        apiUrl: 'https://acct:hunter2@api.example.com/api.php/provide/vod/?key=SECRETKEY123',
+      }),
+    });
+    // 其他资源类型里的 url 键（剧集播放地址常带签名）同样只留 host
+    await insertLegacy({
+      id: 'i-episode-update',
+      action: 'MOVIE_EPISODE_UPDATE',
+      resourceType: 'movie_episode',
+      newValues: JSON.stringify({ title: '第1集', url: 'https://play.example.com/1.m3u8?sign=EPISODE-SIGN-000' }),
+    });
+    // 新写入路径产生的采集源记录：已经只有 host，不应再被改动
+    await insertLegacy({
+      id: 'j-collect-current',
+      action: 'CREATE',
+      resourceType: 'collect_source',
+      newValues: JSON.stringify({ name: 'n', apiHost: 'api.example.com', extraHeaders: null }),
     });
     await insertLegacy({
       id: 'c-content-update',
@@ -126,6 +173,34 @@ describe('scrub-audit-logs.js', () => {
     ).toEqual({ host: 'mysql', port: 3307, user: 'u', password: 'p', database: 'prism' });
   });
 
+  it('scrubRow：采集源行与 apiUrl / url 键按写入路径的规则只留 host（修复前脚本对它们报 0 改动）', () => {
+    const create = scrub.scrubRow(
+      {
+        id: 'c1',
+        action: 'CREATE',
+        resourceType: 'collect_source',
+        newValues: JSON.stringify({
+          name: 'n',
+          apiUrl: 'https://acct:hunter2@api.example.com/api.php/provide/vod/?key=SECRETKEY123',
+        }),
+      },
+      sanitizer,
+    );
+    expect(JSON.parse(create.changes.newValues)).toEqual({ name: 'n', apiUrl: 'api.example.com' });
+    expect(create.report.urls).toEqual(['newValues.apiUrl']);
+    expect(JSON.stringify(create.report)).not.toMatch(/hunter2|SECRETKEY123/);
+
+    // 采集源行里任何字符串中的 URL 都只留 host；其他资源类型只处理 apiUrl / url 键
+    const remark = JSON.stringify({ remark: '见 https://x.example.com/?token=T1' });
+    const collectRemark = scrub.scrubRow(
+      { id: 'c2', action: 'UPDATE', resourceType: 'collect_source', newValues: remark },
+      sanitizer,
+    );
+    expect(JSON.parse(collectRemark.changes.newValues)).toEqual({ remark: '见 x.example.com' });
+    const otherRemark = scrub.scrubRow({ id: 'c3', action: 'UPDATE', resourceType: 'content', newValues: remark }, sanitizer);
+    expect(otherRemark.changes).toEqual({});
+  });
+
   it('scrubRow：只返回需要改的列，干净的行没有改动', () => {
     const dirty = scrub.scrubRow(
       { id: 'x', action: 'USER_UPDATE', newValues: JSON.stringify({ passwordHash: HASH }), oldValues: null, userAgent: null },
@@ -150,17 +225,25 @@ describe('scrub-audit-logs.js', () => {
     const summary = await scrub.scrubAuditLogs(conn, sanitizer, { batchSize: 2 });
 
     expect(summary.apply).toBe(false);
-    expect(summary.scanned).toBe(7);
-    expect(summary.changedRows).toBe(4); // a, b, c, f
+    expect(summary.scanned).toBe(10);
+    expect(summary.changedRows).toBe(6); // a, b, c, f, h, i
     expect(summary.updatedRows).toBe(0);
-    expect(summary.columns).toEqual({ oldValues: 0, newValues: 3, userAgent: 1 });
-    expect(summary.byAction).toEqual({ USER_UPDATE: 1, UPDATE: 1, CONTENT_UPDATE: 1, USER_LOGIN: 1 });
+    expect(summary.columns).toEqual({ oldValues: 0, newValues: 5, userAgent: 1 });
+    expect(summary.byAction).toEqual({
+      USER_UPDATE: 1,
+      UPDATE: 1,
+      CONTENT_UPDATE: 1,
+      USER_LOGIN: 1,
+      CREATE: 1,
+      MOVIE_EPISODE_UPDATE: 1,
+    });
     expect(summary.redactedPaths).toEqual({
       'newValues.passwordHash': 1,
       'newValues.extraHeaders.Authorization': 1,
       'newValues.extraHeaders.Cookie': 1,
     });
     expect(summary.truncatedPaths).toEqual({ 'newValues.body': 1 });
+    expect(summary.urlPaths).toEqual({ 'newValues.apiUrl': 2, 'newValues.remark': 1, 'newValues.url': 1 });
     expect(summary.unparseable).toEqual([{ id: 'e-corrupt', columns: ['newValues'] }]);
     expect(await snapshot()).toEqual(before);
 
@@ -174,8 +257,8 @@ describe('scrub-audit-logs.js', () => {
 
   it('--apply：写回清洗结果，TypeORM 仍能读出；再跑一次 0 行待改', async () => {
     const summary = await scrub.scrubAuditLogs(conn, sanitizer, { apply: true, batchSize: 2 });
-    expect(summary.changedRows).toBe(4);
-    expect(summary.updatedRows).toBe(4);
+    expect(summary.changedRows).toBe(6);
+    expect(summary.updatedRows).toBe(6);
 
     const rows = await snapshot();
     const text = JSON.stringify(rows);
@@ -184,9 +267,15 @@ describe('scrub-audit-logs.js', () => {
     const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
     expect(JSON.parse(byId['a-user-update'].newValues!)).toEqual({ nickname: 'n', passwordHash: AUDIT_REDACTED });
     expect(JSON.parse(byId['b-collect-update'].newValues!)).toEqual({
-      apiUrl: 'https://res.example.com/api.php',
+      apiUrl: 'res.example.com',
+      remark: '备用线路 mirror.example.net，勿删',
       extraHeaders: { Authorization: AUDIT_REDACTED, Cookie: AUDIT_REDACTED },
     });
+    expect(JSON.parse(byId['h-collect-create'].newValues!)).toEqual({ name: '飞速资源', apiUrl: 'api.example.com' });
+    expect(JSON.parse(byId['i-episode-update'].newValues!)).toEqual({ title: '第1集', url: 'play.example.com' });
+    expect(byId['j-collect-current'].newValues).toBe(
+      JSON.stringify({ name: 'n', apiHost: 'api.example.com', extraHeaders: null }),
+    );
     const content = JSON.parse(byId['c-content-update'].newValues!);
     expect(content.title).toBe('t');
     expect(content.body.length).toBeLessThanOrEqual(2000);
@@ -202,10 +291,10 @@ describe('scrub-audit-logs.js', () => {
       .createQueryBuilder('l')
       .where('l.id != :bad', { bad: 'e-corrupt' })
       .getMany();
-    expect(entities).toHaveLength(6);
+    expect(entities).toHaveLength(9);
 
     const again = await scrub.scrubAuditLogs(conn, sanitizer, { apply: true, batchSize: 3 });
-    expect(again.scanned).toBe(7);
+    expect(again.scanned).toBe(10);
     expect(again.changedRows).toBe(0);
     expect(again.updatedRows).toBe(0);
   });

@@ -6,21 +6,40 @@
  *   因此这里只能依赖 Node 内置能力，不能 import Nest / TypeORM。
  *
  * 规则：
- * 1. 键名命中 AUDIT_SENSITIVE_KEY 的值一律打码：字符串 / 数字 / 大整数 / 日期 / 二进制 → '[REDACTED]'；
+ * 1. 键名命中敏感键（isSensitiveAuditKey）的值一律打码：字符串 / 数字 / 大整数 / 日期 / 二进制 → '[REDACTED]'；
  *    对象保留键名、递归打码所有叶子（例如采集源 extraHeaders 只留下请求头名称）；数组逐项打码。
  *    布尔与 null 原样保留 —— 它们不携带秘密，`passwordChanged: true` 这类事实需要留在审计里。
- * 2. 字符串超过 AUDIT_MAX_STRING_LENGTH 截断（结果含标记且总长不超过上限，重复清洗结果不变）。
- * 3. 整个 oldValues / newValues 序列化后超过 AUDIT_MAX_JSON_BYTES 时，替换为只含顶层键名的摘要。
+ * 2. URL 只留 host（与写入路径 auditUrlHost 同一规则：去掉 userinfo、路径、query）：
+ *    - 键名为 apiUrl / url 的字符串（任何资源类型）按 sanitizeAuditUrl 处理；
+ *    - resourceType 属于 AUDIT_URL_HOST_ONLY_RESOURCE_TYPES（采集源）的记录，所有字符串里出现的
+ *      scheme://… 都换成 host。修复前采集源的 CREATE / UPDATE 记的是 apiUrl 原文与整份 dto，
+ *      资源站常把 key 放在 query 里，userinfo 里也可能有账号密码。
+ * 3. 字符串超过 AUDIT_MAX_STRING_LENGTH 截断（结果含标记且总长不超过上限，重复清洗结果不变）。
+ * 4. 整个 oldValues / newValues 序列化后超过 AUDIT_MAX_JSON_BYTES 时，替换为只含顶层键名的摘要。
  *    simple-json 在 MySQL 上是 TEXT（64KB），严格模式下超长会让 INSERT 报错。
- * 4. 循环引用、超深嵌套、函数 / Symbol 不会抛错，分别落为标记或丢弃。
+ * 5. 循环引用、超深嵌套、函数 / Symbol 不会抛错，分别落为标记或丢弃。
  *
  * 所有函数幂等：sanitize(sanitize(x)) 与 sanitize(x) 序列化结果相同，清洗脚本可重复执行。
  */
 
-/** 敏感键名。注意只看键名不看值：调用方仍应只记录白名单字段，这里是兜底 */
-export const AUDIT_SENSITIVE_KEY = /pass(word)?|hash|token|secret|cookie|authorization|header|api[-_]?key/i;
+/**
+ * 敏感键名（子串匹配，不分大小写）。注意只看键名不看值：调用方仍应只记录白名单字段，这里是兜底。
+ * otp 太短，只在作为独立的词出现时匹配（otp、otp_code、x-otp、userOtp），避免 notPublished 之类误伤；
+ * 驼峰写在中间的 userOtpCode 由 AUDIT_SENSITIVE_CAMEL_KEY 补上。
+ */
+export const AUDIT_SENSITIVE_KEY =
+  /pass(word)?|pwd|hash|token|secret|cookie|authorization|header|credential|session|jwt|api[-_]?key|private[-_]?key|access[-_]?key|(?:^|[\W_])otp|otp(?:$|[\W_])/i;
+
+/** 驼峰中间的 Otp / OTP（区分大小写：前面是小写字母或数字，后面不是小写字母） */
+const AUDIT_SENSITIVE_CAMEL_KEY = /[a-z\d](?:Otp|OTP)(?![a-z])/;
 
 export const AUDIT_REDACTED = '[REDACTED]';
+
+/** 值按 URL 处理、只保留 host 的键名（任何资源类型）：采集源 apiUrl、剧集 url 等 */
+export const AUDIT_URL_KEY = /^(?:api[-_]?)?url$/i;
+
+/** 这些资源类型的记录里，所有字符串中出现的 URL 都只保留 host（备注等字段也可能贴着带 key 的地址） */
+export const AUDIT_URL_HOST_ONLY_RESOURCE_TYPES: readonly string[] = Object.freeze(['collect_source']);
 
 /** 单个字符串的最大长度（字符数，含截断标记） */
 export const AUDIT_MAX_STRING_LENGTH = 2000;
@@ -53,14 +72,68 @@ export interface AuditSanitizeReport {
   truncated: string[];
   /** 整体超限而被替换为摘要的字段 */
   oversized: string[];
+  /** 其中的 URL 被缩减为 host（或去掉了 query）的字符串路径 */
+  urls: string[];
 }
 
 export function createAuditSanitizeReport(): AuditSanitizeReport {
-  return { redacted: [], truncated: [], oversized: [] };
+  return { redacted: [], truncated: [], oversized: [], urls: [] };
 }
 
 export function isSensitiveAuditKey(key: string): boolean {
-  return AUDIT_SENSITIVE_KEY.test(key);
+  return AUDIT_SENSITIVE_KEY.test(key) || AUDIT_SENSITIVE_CAMEL_KEY.test(key);
+}
+
+export function isAuditUrlKey(key: string): boolean {
+  return AUDIT_URL_KEY.test(key);
+}
+
+/**
+ * URL 只留 host（含端口）：去掉 userinfo、路径、query 与 fragment。不是合法的绝对 URL 时返回 null。
+ * 写入路径（audit-summary 的 auditUrlHost）与本文件的清洗规则共用这一个实现。
+ */
+export function auditUrlHostOf(url: string): string | null {
+  try {
+    return new URL(url).host || null;
+  } catch {
+    return null;
+  }
+}
+
+const URL_SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
+/** 已经只剩 host[:port] 的值（含 IPv6 方括号写法）：原样保留，保证重复清洗结果不变 */
+const HOST_ONLY = /^(?:[a-z0-9_-]+(?:\.[a-z0-9_-]+)*\.?|\[[0-9a-f:.]+\])(?::\d{1,5})?$/i;
+/**
+ * 文本中出现的 URL：scheme:// 起，到空白、引号 / 尖括号或中文标点（全角逗号、句号等）为止。
+ * 宁可多吞：吞进 URL 的部分最终只留 host，漏掉的才会把 query 里的 key 留在审计里。
+ */
+const URL_IN_TEXT = /[a-z][a-z0-9+.-]*:\/\/[^\s"'<>\u3000-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]+/gi;
+
+/**
+ * apiUrl / url 键的值：
+ * - 绝对 URL（含 scheme://）与协议相对的 //host/… → 只留 host；
+ * - 只有路径（/uploads/a.jpg?sig=…）→ 去掉 query 与 fragment，保留路径；
+ * - 已经是 host[:port]、空串或打码标记 → 原样；
+ * - 其余（res.example.com/api?key=…、user:pw@host/… 这类省略了 scheme 的写法）按 http:// 补全后取 host，
+ *   仍解析不出 host 的一律打码，不保留原文。
+ */
+export function sanitizeAuditUrl(value: string): string {
+  const text = value.trim();
+  if (text === '' || text === AUDIT_REDACTED || HOST_ONLY.test(text)) return text;
+  if (text.startsWith('/') && !text.startsWith('//')) return text.replace(/[?#][\s\S]*$/, '');
+  const absolute = URL_SCHEME.test(text) ? text : text.startsWith('//') ? `http:${text}` : `http://${text}`;
+  return auditUrlHostOf(absolute) ?? AUDIT_REDACTED;
+}
+
+/** 把文本里出现的每个 URL 换成它的 host；解析不出 host 的换成打码标记 */
+export function stripUrlsInAuditText(text: string): string {
+  return text.replace(URL_IN_TEXT, (url) => auditUrlHostOf(url) ?? AUDIT_REDACTED);
+}
+
+/** sanitizeAuditValue 的选项 */
+export interface AuditSanitizeOptions {
+  /** 所有字符串里的 URL 都只留 host（采集源等记录）；apiUrl / url 键不受此开关影响，始终处理 */
+  urlsInText?: boolean;
 }
 
 /** 截断字符串，结果（含标记）不超过 max；已经不超过上限的原样返回，所以重复截断结果不变 */
@@ -83,14 +156,26 @@ function isBinary(value: object): boolean {
   return ArrayBuffer.isView(value) || value instanceof ArrayBuffer;
 }
 
+/** 一次清洗过程中不变的上下文 */
+interface WalkContext {
+  ancestors: Set<object>;
+  report: AuditSanitizeReport | undefined;
+  urlsInText: boolean;
+}
+
+/**
+ * @param redact 位于敏感键之下：叶子一律打码
+ * @param urlKey 位于 apiUrl / url 键之下：字符串按 sanitizeAuditUrl 只留 host
+ */
 function walk(
   value: unknown,
   redact: boolean,
+  urlKey: boolean,
   depth: number,
   path: string,
-  ancestors: Set<object>,
-  report: AuditSanitizeReport | undefined,
+  ctx: WalkContext,
 ): unknown {
+  const { ancestors, report } = ctx;
   if (value === null) return null;
 
   switch (typeof value) {
@@ -100,16 +185,20 @@ function walk(
     case 'function':
     case 'symbol':
       return undefined;
-    case 'string':
+    case 'string': {
       if (redact) {
         if (value !== AUDIT_REDACTED) report?.redacted.push(path);
         return AUDIT_REDACTED;
       }
-      if (value.length > AUDIT_MAX_STRING_LENGTH) {
+      // URL 先缩减再截断：截断不会留下半截带 key 的 query
+      const text = urlKey ? sanitizeAuditUrl(value) : ctx.urlsInText ? stripUrlsInAuditText(value) : value;
+      if (text !== value) report?.urls.push(path);
+      if (text.length > AUDIT_MAX_STRING_LENGTH) {
         report?.truncated.push(path);
-        return truncateAuditString(value);
+        return truncateAuditString(text);
       }
-      return value;
+      return text;
+    }
     case 'number':
     case 'bigint':
       if (redact) {
@@ -155,7 +244,7 @@ function walk(
     if (json !== obj) {
       ancestors.add(obj);
       try {
-        return walk(json, redact, depth + 1, path, ancestors, report);
+        return walk(json, redact, urlKey, depth + 1, path, ctx);
       } finally {
         ancestors.delete(obj);
       }
@@ -167,7 +256,7 @@ function walk(
     if (Array.isArray(obj)) {
       // 与 JSON.stringify 一致：数组里的 undefined / 函数落为 null
       return obj.map((item, i) => {
-        const cleaned = walk(item, redact, depth + 1, joinPath(path, i), ancestors, report);
+        const cleaned = walk(item, redact, urlKey, depth + 1, joinPath(path, i), ctx);
         return cleaned === undefined ? null : cleaned;
       });
     }
@@ -178,10 +267,10 @@ function walk(
       const cleaned = walk(
         child,
         redact || isSensitiveAuditKey(key),
+        urlKey || isAuditUrlKey(key),
         depth + 1,
         childPath,
-        ancestors,
-        report,
+        ctx,
       );
       if (cleaned !== undefined) setOwn(out, key, cleaned);
     }
@@ -214,10 +303,12 @@ export function sanitizeAuditValue(
   value: unknown,
   report?: AuditSanitizeReport,
   path = '',
+  options: AuditSanitizeOptions = {},
 ): unknown {
   if (value === undefined) return undefined;
 
-  const cleaned = walk(value, false, 0, path, new Set<object>(), report);
+  const ctx: WalkContext = { ancestors: new Set<object>(), report, urlsInText: options.urlsInText === true };
+  const cleaned = walk(value, false, false, 0, path, ctx);
   if (cleaned === undefined) return undefined;
 
   const json = JSON.stringify(cleaned);
@@ -246,11 +337,17 @@ function clip(value: string | undefined | null, max: number): string | undefined
   return text.length > max ? text.slice(0, max) : text;
 }
 
-/** 整条记录的清洗：值脱敏 + 截断，普通列按表结构长度裁剪。不会抛错（除非入参本身不是对象） */
+/**
+ * 整条记录的清洗：值脱敏 + 截断，普通列按表结构长度裁剪。不会抛错（除非入参本身不是对象）。
+ * resourceType 决定是否把所有字符串里的 URL 缩减为 host（见 AUDIT_URL_HOST_ONLY_RESOURCE_TYPES）。
+ */
 export function sanitizeAuditRecord(
   data: AuditRecordInput,
   report?: AuditSanitizeReport,
 ): AuditRecordInput {
+  const options: AuditSanitizeOptions = {
+    urlsInText: AUDIT_URL_HOST_ONLY_RESOURCE_TYPES.includes(String(data.resourceType ?? '')),
+  };
   return {
     userId: clip(data.userId, AUDIT_COLUMN_LIMITS.userId),
     action: clip(data.action, AUDIT_COLUMN_LIMITS.action) as string,
@@ -258,7 +355,7 @@ export function sanitizeAuditRecord(
     resourceId: clip(data.resourceId, AUDIT_COLUMN_LIMITS.resourceId),
     ipAddress: clip(data.ipAddress, AUDIT_COLUMN_LIMITS.ipAddress),
     userAgent: clip(data.userAgent, AUDIT_COLUMN_LIMITS.userAgent),
-    oldValues: sanitizeAuditValue(data.oldValues, report, 'oldValues'),
-    newValues: sanitizeAuditValue(data.newValues, report, 'newValues'),
+    oldValues: sanitizeAuditValue(data.oldValues, report, 'oldValues', options),
+    newValues: sanitizeAuditValue(data.newValues, report, 'newValues', options),
   };
 }

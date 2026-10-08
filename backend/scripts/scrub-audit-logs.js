@@ -3,9 +3,11 @@
  * 一次性清洗 audit_logs 存量行（批次 1-F-1 / C6）。
  *
  * 修复前写入的审计日志里可能有：管理员重置密码时的 passwordHash、采集源 extraHeaders 原文
- * （Authorization / Cookie / API key）、内容更新的整份正文等。新写入已在 AuditService.log 里统一脱敏，
+ * （Authorization / Cookie / API key）、采集源 apiUrl 原文（query 里的 key、userinfo 里的账号密码）、
+ * 内容更新的整份正文等。新写入已在 AuditService.log 里统一脱敏，
  * 这个脚本用**同一份规则**（后端编译产物 dist/modules/audit/audit-sanitizer.js）清洗已有的行：
- * 敏感键打码、超长字符串截断、超过 16KB 的 oldValues / newValues 换成只含键名的摘要、userAgent 截断。
+ * 敏感键打码；apiUrl / url 键与采集源（resourceType = collect_source）行里所有字符串中的 URL 只留 host；
+ * 超长字符串截断、超过 16KB 的 oldValues / newValues 换成只含键名的摘要、userAgent 截断。
  * 规则幂等，可重复执行；第二次执行应报告 0 行待改。
  *
  * 默认只读预演，只输出会改哪些行、哪些键路径（从不输出值）；加 --apply 才写回。
@@ -78,7 +80,8 @@ function normalizePath(p) {
 
 /**
  * 计算一行需要写回的列（纯函数，不碰数据库）。
- * @param row {id, action?, userAgent, oldValues, newValues}，JSON 列是库里的原始文本
+ * @param row {id, action?, resourceType?, userAgent, oldValues, newValues}，JSON 列是库里的原始文本；
+ *   resourceType 决定是否按采集源规则把所有字符串里的 URL 缩减为 host
  * @returns {{ id, changes: Record<string,string|null>, report, unparseable: string[] }}
  *   changes 只含确实需要改的列；JSON 列的值是要写回的 JSON 文本
  */
@@ -102,7 +105,7 @@ function scrubRow(row, sanitizer) {
   const record = sanitizer.sanitizeAuditRecord(
     {
       action: '',
-      resourceType: '',
+      resourceType: toText(row.resourceType) || '',
       userAgent: userAgent === null ? undefined : userAgent,
       oldValues: parsed.oldValues,
       newValues: parsed.newValues,
@@ -138,6 +141,7 @@ async function scrubAuditLogs(conn, sanitizer, { apply = false, batchSize = 500 
     redactedPaths: {},
     truncatedPaths: {},
     oversizedPaths: {},
+    urlPaths: {},
     unparseable: [],
     samples: [],
   };
@@ -148,7 +152,7 @@ async function scrubAuditLogs(conn, sanitizer, { apply = false, batchSize = 500 
   let lastId = '';
   for (;;) {
     const [rows] = await conn.query(
-      'SELECT id, action, userAgent, oldValues, newValues FROM audit_logs WHERE id > ? ORDER BY id LIMIT ?',
+      'SELECT id, action, resourceType, userAgent, oldValues, newValues FROM audit_logs WHERE id > ? ORDER BY id LIMIT ?',
       [lastId, batchSize],
     );
     if (!rows || rows.length === 0) break;
@@ -168,6 +172,7 @@ async function scrubAuditLogs(conn, sanitizer, { apply = false, batchSize = 500 
       new Set(result.report.redacted.map(normalizePath)).forEach((p) => bump(summary.redactedPaths, p));
       new Set(result.report.truncated.map(normalizePath)).forEach((p) => bump(summary.truncatedPaths, p));
       new Set(result.report.oversized.map(normalizePath)).forEach((p) => bump(summary.oversizedPaths, p));
+      new Set(result.report.urls.map(normalizePath)).forEach((p) => bump(summary.urlPaths, p));
       if (summary.samples.length < MAX_SAMPLES) {
         summary.samples.push({
           id: row.id,
@@ -176,6 +181,7 @@ async function scrubAuditLogs(conn, sanitizer, { apply = false, batchSize = 500 
           redacted: result.report.redacted.slice(0, MAX_SAMPLE_PATHS),
           truncated: result.report.truncated.slice(0, MAX_SAMPLE_PATHS),
           oversized: result.report.oversized,
+          urls: result.report.urls.slice(0, MAX_SAMPLE_PATHS),
         });
       }
 
@@ -203,6 +209,7 @@ function printSummary(summary, log = console.log) {
   log(`[scrub-audit-logs] 打码的键路径（行数）：${JSON.stringify(summary.redactedPaths)}`);
   log(`[scrub-audit-logs] 截断的字符串路径（行数）：${JSON.stringify(summary.truncatedPaths)}`);
   log(`[scrub-audit-logs] 整体超限换成摘要（行数）：${JSON.stringify(summary.oversizedPaths)}`);
+  log(`[scrub-audit-logs] URL 只留 host 的字符串路径（行数）：${JSON.stringify(summary.urlPaths)}`);
   if (summary.unparseable.length > 0) {
     log(
       `[scrub-audit-logs] ⚠️ ${summary.unparseable.length} 行的 JSON 列无法解析，已跳过（需人工检查）：` +

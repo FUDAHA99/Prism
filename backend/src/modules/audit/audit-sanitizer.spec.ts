@@ -5,11 +5,15 @@ import {
   AUDIT_MAX_STRING_LENGTH,
   AUDIT_REDACTED,
   createAuditSanitizeReport,
+  isAuditUrlKey,
   isSensitiveAuditKey,
   sanitizeAuditRecord,
+  sanitizeAuditUrl,
   sanitizeAuditValue,
+  stripUrlsInAuditText,
   truncateAuditString,
 } from './audit-sanitizer';
+import { auditUrlHost } from './audit-summary';
 
 /** 断言序列化结果里不出现任何一个秘密值 */
 function expectNoSecrets(value: unknown, secrets: string[]): void {
@@ -39,16 +43,54 @@ describe('audit-sanitizer 敏感键判定', () => {
     'api_key',
     'api-key',
     'X-API-KEY',
+    // 兜底扩展：口令缩写、凭据、私钥 / 访问密钥、会话、JWT、一次性验证码
+    'pwd',
+    'newPwd',
+    'credential',
+    'credentials',
+    'awsCredentials',
+    'privateKey',
+    'private_key',
+    'private-key',
+    'accessKey',
+    'access_key',
+    'AccessKeyId',
+    'session',
+    'sessionId',
+    'SESSION_ID',
+    'jwt',
+    'jwtPayload',
+    'otp',
+    'OTP',
+    'otpCode',
+    'otp_code',
+    'x-otp',
+    'userOtp',
+    'userOtpCode',
+    'smsOTP',
   ])('%s 是敏感键', (key) => {
     expect(isSensitiveAuditKey(key)).toBe(true);
   });
 
-  it.each(['title', 'slug', 'email', 'username', 'apiUrl', 'apiHost', 'userAgent', 'changedFields', 'name'])(
-    '%s 不是敏感键',
-    (key) => {
-      expect(isSensitiveAuditKey(key)).toBe(false);
-    },
-  );
+  it.each([
+    'title',
+    'slug',
+    'email',
+    'username',
+    'apiUrl',
+    'apiHost',
+    'url',
+    'userAgent',
+    'changedFields',
+    'name',
+    // otp 只按独立的词匹配，这些普通键名不能被误伤
+    'notPublished',
+    'footprint',
+    'hotpot',
+    'isTopPick',
+  ])('%s 不是敏感键', (key) => {
+    expect(isSensitiveAuditKey(key)).toBe(false);
+  });
 });
 
 describe('sanitizeAuditValue 打码', () => {
@@ -59,13 +101,13 @@ describe('sanitizeAuditValue 打码', () => {
     expectNoSecrets(out, [hash, 'Plain123!']);
   });
 
-  it('采集源 extraHeaders：保留请求头名称，值全部打码', () => {
+  it('采集源 extraHeaders：保留请求头名称，值全部打码；apiUrl 只留 host', () => {
     const out = sanitizeAuditValue({
       apiUrl: 'https://res.example.com/api.php/provide/vod',
       extraHeaders: { Authorization: 'Bearer sk-live-123', Cookie: 'sid=abc', 'X-Trace': 'ok' },
     });
     expect(out).toEqual({
-      apiUrl: 'https://res.example.com/api.php/provide/vod',
+      apiUrl: 'res.example.com',
       extraHeaders: { Authorization: AUDIT_REDACTED, Cookie: AUDIT_REDACTED, 'X-Trace': AUDIT_REDACTED },
     });
     expectNoSecrets(out, ['sk-live-123', 'sid=abc']);
@@ -236,7 +278,143 @@ describe('幂等：重复清洗结果不变（存量清洗脚本可重复执行�
     const report = createAuditSanitizeReport();
     const twice = sanitizeAuditValue(reloaded, report);
     expect(JSON.stringify(twice)).toBe(JSON.stringify(once));
-    expect(report).toEqual({ redacted: [], truncated: [], oversized: [] });
+    expect(report).toEqual({ redacted: [], truncated: [], oversized: [], urls: [] });
+  });
+
+  it('采集源记录（所有字符串里的 URL 只留 host）重复清洗结果不变', () => {
+    const legacy = {
+      name: '飞速 https://a:b@res.example.com/x?key=K1',
+      apiUrl: 'https://acct:hunter2@api.example.com:8443/api.php/provide/vod/?ac=list&key=K2',
+      remark: `备用 http://mirror.example.net/api?token=K3 ${'备'.repeat(3000)} 末尾 https://tail.example.org/?k=K4`,
+      extraHeaders: { Authorization: 'Bearer K5' },
+    };
+    const options = { urlsInText: true };
+    const once = sanitizeAuditValue(legacy, undefined, '', options);
+    const report = createAuditSanitizeReport();
+    const twice = sanitizeAuditValue(JSON.parse(JSON.stringify(once)), report, '', options);
+    expect(JSON.stringify(twice)).toBe(JSON.stringify(once));
+    expect(report).toEqual({ redacted: [], truncated: [], oversized: [], urls: [] });
+    expectNoSecrets(once, ['K1', 'K2', 'K3', 'K4', 'K5', 'hunter2', 'acct', 'a:b@']);
+  });
+});
+
+describe('URL 只留 host（与写入路径 auditUrlHost 同一规则）', () => {
+  const SECRET_URL = 'https://acct:hunter2@api.example.com:8443/api.php/provide/vod/?ac=list&key=SECRETKEY123#frag';
+
+  it('apiUrl / url 键名判定（不分大小写，只认这两个名字）', () => {
+    for (const key of ['apiUrl', 'api_url', 'api-url', 'APIURL', 'url', 'URL', 'Url']) {
+      expect(isAuditUrlKey(key)).toBe(true);
+    }
+    for (const key of ['apiHost', 'posterUrl', 'coverUrl', 'urls', 'curl', 'urlPattern']) {
+      expect(isAuditUrlKey(key)).toBe(false);
+    }
+  });
+
+  it.each([
+    [SECRET_URL, 'api.example.com:8443'],
+    ['http://res.example.com/x?token=t', 'res.example.com'],
+    ['HTTPS://Res.Example.COM/a', 'res.example.com'],
+    ['https://[2001:db8::1]:8080/a?k=1', '[2001:db8::1]:8080'],
+    ['https://例子.测试/api?key=K', 'xn--fsqu00a.xn--0zwm56d'],
+    ['//cdn.example.com/a.m3u8?sign=S', 'cdn.example.com'],
+    ['res.example.com/api.php?key=K', 'res.example.com'],
+    ['acct:hunter2@res.example.com/api.php', 'res.example.com'],
+    ['/uploads/2026/a.jpg?sig=S#x', '/uploads/2026/a.jpg'],
+    ['res.example.com', 'res.example.com'],
+    ['res.example.com:8080', 'res.example.com:8080'],
+    ['[::1]:3000', '[::1]:3000'],
+    ['', ''],
+    [AUDIT_REDACTED, AUDIT_REDACTED],
+    ['not a url with key=SECRET', AUDIT_REDACTED],
+    ['http://', AUDIT_REDACTED],
+  ])('sanitizeAuditUrl(%j) → %j', (input, expected) => {
+    expect(sanitizeAuditUrl(input)).toBe(expected);
+    // 幂等
+    expect(sanitizeAuditUrl(sanitizeAuditUrl(input))).toBe(expected);
+  });
+
+  it('绝对 URL 的结果与写入路径 auditUrlHost 完全一致', () => {
+    for (const url of [SECRET_URL, 'http://res.example.com/x?token=t', 'https://[2001:db8::1]:8080/a?k=1']) {
+      expect(sanitizeAuditUrl(url)).toBe(auditUrlHost(url));
+    }
+  });
+
+  it('任何资源类型里 apiUrl / url 键都只留 host，数组与嵌套对象同样处理；报告只记路径', () => {
+    const report = createAuditSanitizeReport();
+    const out = sanitizeAuditValue(
+      {
+        apiUrl: SECRET_URL,
+        episodes: [{ url: 'https://play.example.com/a.m3u8?token=TOKEN1' }],
+        url: ['https://u:p@x.example.com/?k=K2', { main: 'https://y.example.com/?k=K3' }],
+        posterUrl: 'https://img.example.com/p.jpg?x=1',
+      },
+      report,
+      'newValues',
+    );
+    expect(out).toEqual({
+      apiUrl: 'api.example.com:8443',
+      episodes: [{ url: 'play.example.com' }],
+      url: ['x.example.com', { main: 'y.example.com' }],
+      // 普通资源类型里其他键不动：封面等公开地址要留在审计里
+      posterUrl: 'https://img.example.com/p.jpg?x=1',
+    });
+    expect(report.urls).toEqual([
+      'newValues.apiUrl',
+      'newValues.episodes.0.url',
+      'newValues.url.0',
+      'newValues.url.1.main',
+    ]);
+    expectNoSecrets(report, ['hunter2', 'SECRETKEY123', 'TOKEN1', 'K2', 'K3']);
+  });
+
+  it('敏感键优先于 URL 规则：apiKey 下的 URL 整体打码', () => {
+    expect(sanitizeAuditValue({ apiKey: { url: 'https://h.example.com/?k=1' } })).toEqual({
+      apiKey: { url: AUDIT_REDACTED },
+    });
+  });
+
+  it('stripUrlsInAuditText：文本里每个 URL 换成 host，其余文字原样', () => {
+    expect(
+      stripUrlsInAuditText('主线 https://a:b@one.example.com/x?key=K1，备线 mysql://root:pw@db:3306/cms 完'),
+    ).toBe('主线 one.example.com，备线 db:3306 完');
+    expect(stripUrlsInAuditText('没有地址')).toBe('没有地址');
+  });
+
+  it('sanitizeAuditRecord：collect_source 记录里所有字符串的 URL 只留 host，其他资源类型不受影响', () => {
+    const values = {
+      name: '源 https://res.example.com/?key=K1',
+      remark: '见 http://u:p@doc.example.com/a?token=K2',
+      apiHost: 'res.example.com',
+      extraHeaders: { 'X-Api-Key': 'K3' },
+      changedFields: ['apiUrl', 'remark'],
+    };
+    const report = createAuditSanitizeReport();
+    const collect = sanitizeAuditRecord(
+      { action: 'UPDATE', resourceType: 'collect_source', oldValues: values, newValues: values },
+      report,
+    );
+    const expected = {
+      name: '源 res.example.com',
+      remark: '见 doc.example.com',
+      apiHost: 'res.example.com',
+      extraHeaders: { 'X-Api-Key': AUDIT_REDACTED },
+      changedFields: ['apiUrl', 'remark'],
+    };
+    expect(collect.newValues).toEqual(expected);
+    expect(collect.oldValues).toEqual(expected);
+    expect(report.urls).toEqual(['oldValues.name', 'oldValues.remark', 'newValues.name', 'newValues.remark']);
+
+    const content = sanitizeAuditRecord({ action: 'CONTENT_UPDATE', resourceType: 'content', newValues: values });
+    expect((content.newValues as typeof values).remark).toBe(values.remark);
+  });
+
+  it('写入路径当前的采集源记录形状（apiHost + 请求头名）清洗后不变', () => {
+    const current = { name: '飞速资源', apiHost: 'api.example.com:8443', extraHeaders: { Authorization: AUDIT_REDACTED } };
+    const report = createAuditSanitizeReport();
+    expect(
+      sanitizeAuditRecord({ action: 'CREATE', resourceType: 'collect_source', newValues: current }, report).newValues,
+    ).toEqual(current);
+    expect(report).toEqual({ redacted: [], truncated: [], oversized: [], urls: [] });
   });
 });
 

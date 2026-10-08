@@ -1,4 +1,4 @@
-import { AUDIT_REDACTED } from './audit-sanitizer';
+import { AUDIT_REDACTED, auditUrlHostOf } from './audit-sanitizer';
 
 /**
  * 业务 service 组装审计 oldValues / newValues 时用的小工具（批次 1-F-1 / C6）。
@@ -83,15 +83,11 @@ export function pickAuditFields<T extends object, K extends keyof T & string>(
 
 /**
  * URL 只留 host（含端口）：资源站常把 key 放在 query 里，userinfo 里也可能有账号密码。
- * 不是合法 URL 时返回 null，不回显原文。
+ * 不是合法 URL 时返回 null，不回显原文。与存量清洗（audit-sanitizer 的 URL 规则）共用 auditUrlHostOf。
  */
 export function auditUrlHost(url: string | null | undefined): string | null {
   if (!url) return null;
-  try {
-    return new URL(url).host || null;
-  } catch {
-    return null;
-  }
+  return auditUrlHostOf(url);
 }
 
 /** 只保留键名、值一律打码，例如请求头：{ Authorization: '[REDACTED]' } */
