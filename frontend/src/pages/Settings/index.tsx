@@ -7,6 +7,7 @@ import { changePassword, updateProfile } from '../../api/auth'
 import { errorMessage } from '../../api/errors'
 import PageHeader from '../../components/common/PageHeader'
 import { useAuthStore } from '../../stores/authStore'
+import { PASSWORD_HINT, passwordRule } from '../../utils/password'
 import {
   PROFILE_AVATAR_URL_MAX,
   PROFILE_NICKNAME_MAX,
@@ -177,23 +178,12 @@ function PasswordTab() {
       <Form.Item
         name="newPassword"
         label="新密码"
-        rules={[
-          { required: true, message: '请输入新密码' },
-          { min: 8, message: '密码长度不能少于 8 位' },
-          { pattern: /[A-Za-z]/, message: '新密码必须包含字母' },
-          { pattern: /\d/, message: '新密码必须包含数字' },
-          {
-            // 与后端一致：bcrypt 只取前 72 字节
-            validator: (_, value?: string) =>
-              !value || new TextEncoder().encode(value).length <= 72
-                ? Promise.resolve()
-                : Promise.reject(new Error('新密码过长（不能超过 72 字节）')),
-          },
-        ]}
+        // 与后端同一套口令策略（utils/password.ts，后台新建用户也用它）
+        rules={[{ required: true, message: '请输入新密码' }, passwordRule('新密码')]}
       >
         <Input.Password
           prefix={<LockOutlined />}
-          placeholder="至少 8 位，包含字母和数字"
+          placeholder={PASSWORD_HINT}
           autoComplete="new-password"
         />
       </Form.Item>

@@ -11,6 +11,7 @@ import { Transform } from 'class-transformer';
 import { IsAccountEmail } from '../../auth/dto/account-email.decorator';
 import { rawValue } from '../../movie/dto/movie-dto.helpers';
 import { nicknameCreateInput } from '../display-name';
+import { IsAccountPassword, PASSWORD_MAX_BYTES, PASSWORD_MIN_LENGTH } from '../../auth/dto/password-policy';
 
 /** 用户名：字母、数字、下划线、连字符；入库前去空白并转小写（新建与编辑同一规则） */
 export const USERNAME_PATTERN = /^[a-zA-Z0-9_-]+$/;
@@ -48,12 +49,16 @@ export class CreateUserDto {
   @IsAccountEmail()
   email: string;
 
+  /**
+   * 明文口令，服务端哈希后入库。与本人改密同一套策略（见 auth/dto/password-policy.ts）：此前只校验是字符串，
+   * 管理员能建出空口令、1 位口令，或超过 72 字节、后半截被 bcrypt 静默忽略的口令
+   */
   @ApiProperty({
-    example: 'hashed_password',
-    description: '密码哈希',
+    example: 'Staff2026x',
+    description: `初始密码：至少 ${PASSWORD_MIN_LENGTH} 位，同时包含字母和数字，不超过 ${PASSWORD_MAX_BYTES} 字节`,
     required: true,
   })
-  @IsString({ message: '密码必须是字符串' })
+  @IsAccountPassword('密码')
   password: string;
 
   /**

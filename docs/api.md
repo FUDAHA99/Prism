@@ -510,6 +510,16 @@
 字段：`username`、`email`、`password`、`nickname`、`avatarUrl`、`isActive`（只接受 JSON 的 `true` / `false`，缺省为 `true`）；其余字段 `400`。
 `nickname` 与 `username` 受「附：显示名唯一」约束（`409`）。
 
+`password` 与本人改密（1.6）同一套口令策略：至少 8 个字符、同时包含字母和数字、不超过 72 字节（bcrypt 只取前 72 字节），
+原样哈希、不去空白；不满足时 `400`，提示如「密码必须包含数字」。此前只校验是字符串，空口令也能建出来。
+
+请求体不收角色（带 `roleIds` 为 `400`）：建好后用 7.7 分配。后台「用户管理 → 新建用户」就是这样两步提交的，默认分配 `editor`；
+第二步失败时账号已经建好、没有角色，后台会提示到「编辑」里补上。公开注册（1.2）默认关闭，后台账号都从这里开设。
+
+```json
+{ "username": "editor_zhang", "email": "zhang@example.com", "password": "Staff2026x", "nickname": "小张", "isActive": true }
+```
+
 ### 7.4 更新用户
 `PATCH /users/:id`
 ```json

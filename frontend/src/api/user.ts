@@ -23,6 +23,21 @@ export async function getUser(id: string): Promise<User> {
   return res.data
 }
 
+/** POST /users 的请求体（后端 CreateUserDto）：不含角色，角色建好后用 assignRoles 分配 */
+export interface CreateUserData {
+  username: string
+  email: string
+  password: string
+  nickname?: string
+  isActive: boolean
+}
+
+/** 新建用户（仅 admin）。返回的用户还没有角色 */
+export async function createUser(data: CreateUserData): Promise<User> {
+  const res = await apiClient.post<User>('/users', data)
+  return res.data
+}
+
 export async function updateUser(
   id: string,
   data: { nickname?: string; email?: string; avatarUrl?: string; isActive?: boolean }

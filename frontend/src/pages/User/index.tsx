@@ -13,7 +13,7 @@ import {
   Tag,
 } from 'antd'
 import type { TableColumnsType } from 'antd'
-import { DeleteOutlined, EditOutlined, SearchOutlined } from '@ant-design/icons'
+import { DeleteOutlined, EditOutlined, PlusOutlined, SearchOutlined } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { assignRoles, deleteUser, getUsers, removeRoles, updateUser } from '../../api/user'
 import { getRoles } from '../../api/role'
@@ -23,6 +23,7 @@ import { QueryErrorSwitch } from '../../components/common/QueryErrorResult'
 import { formatDate } from '../../utils'
 import { ASCII_EMAIL_RULE } from '../../utils/email'
 import type { Role, User } from '../../types'
+import CreateUserModal from './CreateUserModal'
 
 const ROLE_COLORS = ['blue', 'green', 'orange', 'purple', 'cyan', 'magenta', 'gold', 'volcano']
 
@@ -45,6 +46,10 @@ export default function UserPage() {
   const [searchInput, setSearchInput] = useState('')
   const [editVisible, setEditVisible] = useState(false)
   const [editingUser, setEditingUser] = useState<User | null>(null)
+  const [createVisible, setCreateVisible] = useState(false)
+  // 每次打开新建弹窗换一个 key：整个弹窗（含表单状态）重新挂载，不残留上一次填的值或错误提示 ——
+  // 不依赖关闭动画结束后的销毁（动画没走完就再次打开时，destroyOnHidden 还没来得及清）
+  const [createKey, setCreateKey] = useState(0)
   const [form] = Form.useForm<EditFormValues>()
 
   const queryClient = useQueryClient()
@@ -54,7 +59,7 @@ export default function UserPage() {
     queryFn: () => getUsers({ search: search || undefined }),
   })
 
-  const { data: rolesData } = useQuery({
+  const { data: rolesData, isLoading: rolesLoading, isError: rolesFailed } = useQuery({
     queryKey: ['roles'],
     queryFn: () => getRoles(),
   })
@@ -135,6 +140,11 @@ export default function UserPage() {
         originalEmail: editingUser.email,
       })
     })
+  }
+
+  const openCreate = () => {
+    setCreateKey((key) => key + 1)
+    setCreateVisible(true)
   }
 
   const handleSearchConfirm = () => {
@@ -241,7 +251,15 @@ export default function UserPage() {
 
   return (
     <div style={{ padding: 24 }}>
-      <PageHeader title="用户管理" />
+      <PageHeader
+        title="用户管理"
+        extra={
+          // 等角色列表回来再开：新建弹窗默认选中 editor
+          <Button type="primary" icon={<PlusOutlined />} loading={rolesLoading} onClick={openCreate}>
+            新建用户
+          </Button>
+        }
+      />
 
       <div style={{ marginBottom: 16, display: 'flex', gap: 8 }}>
         <Input
@@ -274,6 +292,14 @@ export default function UserPage() {
           size="middle"
         />
       </QueryErrorSwitch>
+
+      <CreateUserModal
+        key={createKey}
+        open={createVisible}
+        roles={rolesData}
+        rolesFailed={rolesFailed}
+        onClose={() => setCreateVisible(false)}
+      />
 
       <Modal
         title={`编辑用户：${editingUser?.username ?? ''}`}
