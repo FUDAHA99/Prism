@@ -90,13 +90,14 @@ async function request<T>(
  *
  * 这里改用 unstable_cache 缓存函数结果：404 记成 null 一并缓存，所以过期后刷新一次就生效；其他错误（5xx、网络、
  * 非 JSON）照常抛出、不写缓存 —— 首次加载时按取不到处理（页面 404，下次请求再试），后台刷新失败时保留旧值。
- * 内层 fetch 不再单独缓存（revalidate: 0）。React cache 把同一次渲染里 generateMetadata 与页面的两次调用合成一次。
+ * fetchItem 里的 request 传 revalidate: 0，不再单独走 fetch 缓存。React cache 把同一次渲染里 generateMetadata
+ * 与页面的两次调用合成一次。（fetchItem 里要用字面量路径调用 request：backend 的 route-access.spec 按这种写法扫描门户调用了哪些接口。）
  */
-function cachedItem<T>(name: string, revalidate: number, pathOf: (key: string) => string) {
+function cachedItem<T>(name: string, revalidate: number, fetchItem: (key: string) => Promise<T>) {
   const load = unstable_cache(
     async (key: string): Promise<T | null> => {
       try {
-        return await request<T>(pathOf(key), { revalidate: 0 })
+        return await fetchItem(key)
       } catch (e) {
         if (e instanceof ApiError && e.status === 404) return null
         throw e
@@ -131,10 +132,10 @@ export async function getContents(params: {
   return request<Pagination<Content>>(`/contents?${qs.toString()}`)
 }
 
-export const getContentBySlug = cachedItem<Content>(
+export const getContentBySlug = cachedItem(
   'content-by-slug',
   REVALIDATE_LIST,
-  (slug) => `/contents/slug/${encodeURIComponent(slug)}`,
+  (slug) => request<Content>(`/contents/slug/${encodeURIComponent(slug)}`, { revalidate: 0 }),
 )
 
 // ─── 分类 ──────────────────────────────
@@ -214,10 +215,10 @@ export async function getMovies(
   return request<Pagination<Movie>>(`/movies?${qs}`)
 }
 
-export const getMovieBySlug = cachedItem<Movie>(
+export const getMovieBySlug = cachedItem(
   'movie-by-slug',
   REVALIDATE_DETAIL,
-  (slug) => `/movies/slug/${encodeURIComponent(slug)}`,
+  (slug) => request<Movie>(`/movies/slug/${encodeURIComponent(slug)}`, { revalidate: 0 }),
 )
 
 // ─── 小说 ──────────────────────────────
@@ -236,10 +237,10 @@ export async function getNovels(
   return request<Pagination<Novel>>(`/novels?${qs}`)
 }
 
-export const getNovelBySlug = cachedItem<Novel>(
+export const getNovelBySlug = cachedItem(
   'novel-by-slug',
   REVALIDATE_DETAIL,
-  (slug) => `/novels/slug/${encodeURIComponent(slug)}`,
+  (slug) => request<Novel>(`/novels/slug/${encodeURIComponent(slug)}`, { revalidate: 0 }),
 )
 
 export async function getNovelChapters(
@@ -257,10 +258,10 @@ export async function getNovelChapters(
   }
 }
 
-export const getNovelChapter = cachedItem<NovelChapter>(
+export const getNovelChapter = cachedItem(
   'novel-chapter',
   REVALIDATE_DETAIL,
-  (chapterId) => `/novels/chapters/${encodeURIComponent(chapterId)}`,
+  (chapterId) => request<NovelChapter>(`/novels/chapters/${encodeURIComponent(chapterId)}`, { revalidate: 0 }),
 )
 
 // ─── 漫画 ──────────────────────────────
@@ -279,10 +280,10 @@ export async function getComics(
   return request<Pagination<Comic>>(`/comics?${qs}`)
 }
 
-export const getComicBySlug = cachedItem<Comic>(
+export const getComicBySlug = cachedItem(
   'comic-by-slug',
   REVALIDATE_DETAIL,
-  (slug) => `/comics/slug/${encodeURIComponent(slug)}`,
+  (slug) => request<Comic>(`/comics/slug/${encodeURIComponent(slug)}`, { revalidate: 0 }),
 )
 
 export async function getComicChapters(
@@ -299,10 +300,10 @@ export async function getComicChapters(
   }
 }
 
-export const getComicChapter = cachedItem<ComicChapter>(
+export const getComicChapter = cachedItem(
   'comic-chapter',
   REVALIDATE_DETAIL,
-  (chapterId) => `/comics/chapters/${encodeURIComponent(chapterId)}`,
+  (chapterId) => request<ComicChapter>(`/comics/chapters/${encodeURIComponent(chapterId)}`, { revalidate: 0 }),
 )
 
 // ─── 站点配置 ──────────────────────────
