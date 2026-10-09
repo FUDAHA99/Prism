@@ -190,7 +190,7 @@ $COMPOSE up -d --no-deps --force-recreate nginx
 
 **① 确认管理员带 `admin` / `editor` 角色。** 从本批次起，评论管理的 8 个接口要求 `admin` 或 `editor` 角色（完整的 `seed-admin.js` 只在首次部署时运行，已有库里的管理员可能没有任何角色，也可能没有 `editor` 角色和 `isSystem` 标记）。缺角色时这些接口全部返回 403，而管理后台的评论页会先转圈十几秒、再显示成空列表，看起来像「没有评论」。
 
-新版 `deploy.sh` 每次例行部署都会在 backend 就绪后执行 `seed-admin.js --roles-only`：只建好 `admin`、`editor` 两个系统角色并补上 `isSystem = 1`，**不分配任何角色**，也不建账号、不改任何密码与启用状态。库里没有任何可用账号（启用且未删除）持有 `admin` 时，它打印警告和下面「分配 `admin`」那段命令，部署照常完成——`admin` 必须由运维手工分配给自己确认过的账号：注册接口是公开的，`admin@cms.com` 这类默认邮箱可能是别人自助注册的，脚本无从分辨。它失败时部署同样照常完成，只打印警告。部署前想先确认时，在服务器的项目目录执行（库名、账号、密码取自 `prism-mysql` 容器自己的环境变量，无需手填）：
+新版 `deploy.sh` 每次例行部署都会在 backend 就绪后执行 `seed-admin.js --roles-only`：只建好 `admin`、`editor` 两个系统角色并补上 `isSystem = 1`，**不分配任何角色**，也不建账号、不改任何密码与启用状态。库里没有任何可用账号（启用且未删除）持有 `admin` 时，它打印警告和下面「分配 `admin`」那段命令，部署照常完成——`admin` 必须由运维手工分配给自己确认过的账号：旧版本的注册接口对所有人开放（新版默认关闭，但已有安装沿用库里原来的开关值，见 5.3 ⑥），`admin@cms.com` 这类默认邮箱可能是别人自助注册的，脚本无从分辨。它失败时部署同样照常完成，只打印警告。部署前想先确认时，在服务器的项目目录执行（库名、账号、密码取自 `prism-mysql` 容器自己的环境变量，无需手填）：
 
 ```bash
 docker exec -i prism-mysql sh -c 'exec mysql --default-character-set=utf8mb4 -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' <<'SQL'
@@ -308,6 +308,21 @@ SQL
 文章是后台有意定时的，保持不动；采集来的影视 / 小说 / 漫画（`collectSource` 不为空）如果希望立即恢复显示，可以把发布时间改成现在，
 例如 `UPDATE movies SET publishedAt = NOW() WHERE collectSource IS NOT NULL AND status = 'published' AND publishedAt > NOW();`
 （小说、漫画把表名换成 `novels` / `comics`）。
+
+**⑥ 公开注册改由后端执行，默认关闭；已有安装要自己确认开关的当前值。** 此前后台「系统配置 → 功能设置 → 允许注册」只是记下一个值，
+`POST /auth/register` 始终对所有人开放。从本版本起，只有站点配置 `enable_register` 恰好是 `true` 时才能注册，否则返回 403「暂未开放注册」。
+新装默认是 `false`；**已有安装保留库里原来的值**（旧版本写入的默认值是 `true`，也就是升级后注册仍然开着）。门户没有注册入口，
+后台账号由管理员在「用户管理」里新建，没有特别需要就关掉。升级后查看当前值（只读，可重复执行）：
+
+```bash
+docker exec -i prism-mysql sh -c 'exec mysql --default-character-set=utf8mb4 -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' <<'SQL'
+SELECT `key`, value FROM site_settings WHERE `key` = 'enable_register';
+SQL
+```
+
+输出 `true` 时，在管理后台「系统配置 → 功能设置」关闭「允许注册」并保存即可，立即生效，不需要重启（也可以执行
+``UPDATE site_settings SET value = 'false' WHERE `key` = 'enable_register';``）。没有输出（这一项不存在）或输出 `false` 都表示注册已关闭。
+关闭注册不影响已有账号登录；顺带看一眼 `users` 表里有没有不认识的自助注册账号（审计日志里的「注册」记录），需要时在「用户管理」里禁用。
 
 ---
 

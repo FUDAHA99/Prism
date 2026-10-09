@@ -29,6 +29,8 @@ import { MediaFile } from '../media/entities/media-file.entity';
 import { Content } from '../content/entities/content.entity';
 import { Category } from '../category/entities/category.entity';
 import { Comment } from '../comment/entities/comment.entity';
+import { SiteSetting } from '../site-setting/entities/site-setting.entity';
+import { SiteSettingService } from '../site-setting/site-setting.service';
 import { Access } from '../../common/authz/access.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { HttpExceptionFilter } from '../../common/filters/http-exception.filter';
@@ -119,11 +121,11 @@ describe('角色分配：MySQL 安全 SQL、前后端路由一致、改角色立
           type: 'better-sqlite3',
           database: ':memory:',
           // 只装载 User 关联闭包里的实体（小说章节等用了 SQLite 不支持的 longtext）
-          entities: [User, Role, Permission, AuditLog, MediaFile, Content, Category, Comment],
+          entities: [User, Role, Permission, AuditLog, MediaFile, Content, Category, Comment, SiteSetting],
           synchronize: true,
           logging: false,
         }),
-        TypeOrmModule.forFeature([User, Role, Permission, AuditLog]),
+        TypeOrmModule.forFeature([User, Role, Permission, AuditLog, SiteSetting]),
         PassportModule,
         JwtModule.register({ secret: 'role-spec-access-secret-0123456789abcdef', signOptions: { expiresIn: 3600 } }),
       ],
@@ -136,6 +138,8 @@ describe('角色分配：MySQL 安全 SQL、前后端路由一致、改角色立
         UserService,
         RoleService,
         AuditService,
+        // AuthController 读注册开关（enable_register）
+        SiteSettingService,
         {
           provide: ConfigService,
           useValue: new ConfigService({
@@ -291,6 +295,11 @@ describe('角色分配：MySQL 安全 SQL、前后端路由一致、改角色立
   });
 
   describe('注册的默认角色', () => {
+    // 注册默认关闭（1-F-3）：这组用例验证的是开放注册时的默认角色
+    beforeAll(async () => {
+      await ds.getRepository(SiteSetting).update({ key: 'enable_register' }, { value: 'true' });
+    });
+
     const register = (n: number) =>
       http()
         .post('/auth/register')

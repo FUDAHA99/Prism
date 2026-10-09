@@ -18,7 +18,9 @@ const DEFAULT_SETTINGS: DefaultSetting[] = [
   { key: 'site_icp', value: '', group: 'general', description: 'ICP备案号' },
   { key: 'site_logo', value: '', group: 'general', description: '站点Logo' },
   { key: 'site_favicon', value: '', group: 'general', description: '站点Favicon' },
-  { key: 'enable_register', value: 'true', group: 'security', description: '是否开放注册' },
+  // 默认关闭公开注册（1-F-3，后端在 POST /auth/register 执行，见 auth/registration-policy.ts）。
+  // initDefaults 只补库里没有的键，已有安装里这一行的值不受影响（升级须知见 docs/deploy.md）
+  { key: 'enable_register', value: 'false', group: 'security', description: '是否开放注册' },
   { key: 'enable_comment', value: 'true', group: 'general', description: '是否开启评论' },
   { key: 'comment_audit', value: 'true', group: 'general', description: '评论是否需要审核' },
   { key: 'posts_per_page', value: '20', group: 'general', description: '每页文章数' },

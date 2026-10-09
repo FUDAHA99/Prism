@@ -13,6 +13,7 @@ import { UserModule } from '../user/user.module';
 import { RoleModule } from '../role/role.module';
 import { AuditModule } from '../audit/audit.module';
 import { RedisModule } from '../../shared/redis/redis.module';
+import { SiteSettingModule } from '../site-setting/site-setting.module';
 
 @Module({
   imports: [
@@ -21,6 +22,8 @@ import { RedisModule } from '../../shared/redis/redis.module';
     RoleModule,
     AuditModule,
     RedisModule,
+    // 注册开关 enable_register（AuthController.register 每次读库）
+    SiteSettingModule,
     
     // Passport配置
     PassportModule,

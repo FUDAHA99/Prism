@@ -3,6 +3,8 @@ import { UserController } from './user.controller';
 import { User } from './entities/user.entity';
 import { NICKNAME_TAKEN_MESSAGE, USERNAME_TAKEN_AS_NICKNAME_MESSAGE } from './display-name';
 import { AuthController } from '../auth/auth.controller';
+import { SiteSetting } from '../site-setting/entities/site-setting.entity';
+import { SiteSettingService } from '../site-setting/site-setting.service';
 import { createHttpHarness, HttpHarness } from '../../common/testing/http-harness';
 
 /**
@@ -32,8 +34,14 @@ describe('显示名唯一：注册 / 后台新建 / 后台编辑', () => {
     h.post('/users', 'admin', { username, email: `${username}@cms.test`, password: PASSWORD, nickname });
 
   beforeAll(async () => {
-    h = await createHttpHarness({ controllers: [UserController, AuthController], providers: [] });
+    h = await createHttpHarness({
+      controllers: [UserController, AuthController],
+      providers: [SiteSettingService],
+      entities: [SiteSetting],
+    });
     users = h.ds.getRepository(User);
+    // 注册默认关闭（见 registration.http.spec.ts）；这里验证的是开放注册时的昵称规则
+    await h.ds.getRepository(SiteSetting).update({ key: 'enable_register' }, { value: 'true' });
   });
 
   afterAll(async () => {

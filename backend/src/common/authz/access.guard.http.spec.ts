@@ -31,6 +31,8 @@ import { Comment } from '../../modules/comment/entities/comment.entity';
 import { WatchHistory } from '../../modules/watch-history/entities/watch-history.entity';
 import { WatchHistoryController } from '../../modules/watch-history/watch-history.controller';
 import { WatchHistoryService } from '../../modules/watch-history/watch-history.service';
+import { SiteSetting } from '../../modules/site-setting/entities/site-setting.entity';
+import { SiteSettingService } from '../../modules/site-setting/site-setting.service';
 import { Access } from './access.decorator';
 import { AccessGuard } from './access.guard';
 import { CurrentViewer, isAdmin, isStaff, Viewer } from './viewer';
@@ -197,11 +199,11 @@ describe('全局 AccessGuard（真实 HTTP）：严格可选登录、staff / adm
           type: 'better-sqlite3',
           database: ':memory:',
           // 只装载 User 关联闭包里的实体（小说章节等用了 SQLite 不支持的 longtext）+ 观看记录
-          entities: [User, Role, Permission, AuditLog, MediaFile, Content, Category, Comment, WatchHistory],
+          entities: [User, Role, Permission, AuditLog, MediaFile, Content, Category, Comment, WatchHistory, SiteSetting],
           synchronize: true,
           logging: false,
         }),
-        TypeOrmModule.forFeature([User, Role, Permission, AuditLog, WatchHistory]),
+        TypeOrmModule.forFeature([User, Role, Permission, AuditLog, WatchHistory, SiteSetting]),
         PassportModule,
         JwtModule.register({ secret: ACCESS_SECRET, signOptions: { expiresIn: 3600 } }),
       ],
@@ -215,6 +217,8 @@ describe('全局 AccessGuard（真实 HTTP）：严格可选登录、staff / adm
         RoleService,
         AuditService,
         WatchHistoryService,
+        // AuthController 读注册开关（enable_register）
+        SiteSettingService,
         {
           provide: ConfigService,
           useValue: new ConfigService({

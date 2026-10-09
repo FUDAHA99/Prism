@@ -9,6 +9,7 @@ import {
   Patch,
   UseInterceptors,
   ClassSerializerInterceptor,
+  ForbiddenException,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
@@ -24,6 +25,12 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Access } from '../../common/authz/access.decorator';
 import { clientIp } from '../../common/utils/client-ip';
 import { extractAccessToken } from './access-token.extractor';
+import {
+  REGISTER_SETTING_KEY,
+  REGISTRATION_CLOSED_MESSAGE,
+  registrationOpenFrom,
+} from './registration-policy';
+import { SiteSettingService } from '../site-setting/site-setting.service';
 
 /**
  * 认证接口的限流额度，由 AppModule 的全局 ThrottlerBehindProxyGuard 执行（按 req.ip 计、每个接口各自一个桶）。
@@ -41,7 +48,10 @@ export const AUTH_THROTTLE = {
 @Controller('auth')
 @UseInterceptors(ClassSerializerInterceptor)
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(
+    private readonly authService: AuthService,
+    private readonly siteSettingService: SiteSettingService,
+  ) {}
 
   @Post('login')
   @Access('public')
@@ -90,7 +100,7 @@ export class AuthController {
   @Access('public')
   @HttpCode(HttpStatus.CREATED)
   @Throttle({ default: AUTH_THROTTLE.register })
-  @ApiOperation({ summary: '用户注册' })
+  @ApiOperation({ summary: '用户注册（站点配置 enable_register 为 true 时才开放，默认关闭）' })
   @ApiResponse({
     status: 201,
     description: '注册成功',
@@ -114,13 +124,20 @@ export class AuthController {
       },
     },
   })
-  @ApiResponse({ status: 409, description: '邮箱或用户名已存在' })
+  @ApiResponse({ status: 403, description: '暂未开放注册（enable_register 不是 true）' })
+  @ApiResponse({ status: 409, description: '邮箱、用户名或昵称已被使用' })
   @ApiResponse({ status: 429, description: '注册尝试次数过多' })
   async register(
     @Body() registerDto: RegisterDto,
     @Request() req: any,
   ): Promise<LoginResponse> {
-    // 注册开关（enable_register）由 1-F-3 收口；这里只把真实 IP / UA 记进审计（此前写死 'unknown'）
+    // 注册开关（见 registration-policy.ts）：只有 enable_register 恰好是 'true' 才开放，缺省关闭。
+    // 每次都读库，后台关掉开关立即生效。检查在查重之前：关闭时一律 403，不会借 409 透露邮箱 / 用户名是否已注册。
+    // 请求体校验（400）与限流（429）在进入这里之前就已执行，被拒绝的请求同样计入注册额度
+    if (!registrationOpenFrom(await this.siteSettingService.findValues([REGISTER_SETTING_KEY]))) {
+      throw new ForbiddenException(REGISTRATION_CLOSED_MESSAGE);
+    }
+    // 审计记真实 IP / UA（此前写死 'unknown'）
     return this.authService.register(registerDto, {
       ip: clientIp(req),
       userAgent: req.headers['user-agent'],

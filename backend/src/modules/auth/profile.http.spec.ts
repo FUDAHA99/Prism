@@ -6,6 +6,8 @@ import { UserService } from '../user/user.service';
 import { userCacheKey } from '../user/user-cache';
 import { NICKNAME_TAKEN_MESSAGE } from '../user/display-name';
 import { AuditLog } from '../audit/entities/audit-log.entity';
+import { SiteSetting } from '../site-setting/entities/site-setting.entity';
+import { SiteSettingService } from '../site-setting/site-setting.service';
 import { createHttpHarness, HttpHarness, WHO } from '../../common/testing/http-harness';
 
 /**
@@ -33,7 +35,8 @@ describe('PATCH /auth/me（本人修改资料）', () => {
   const patchMe = (who: Parameters<HttpHarness['patch']>[1], body: object) => h.patch('/auth/me', who, body);
 
   beforeAll(async () => {
-    h = await createHttpHarness({ controllers: [AuthController], providers: [] });
+    // AuthController 还要读注册开关（SiteSettingService），这组用例用不到它
+    h = await createHttpHarness({ controllers: [AuthController], providers: [SiteSettingService], entities: [SiteSetting] });
     users = h.ds.getRepository(User);
     audits = h.ds.getRepository(AuditLog);
   });

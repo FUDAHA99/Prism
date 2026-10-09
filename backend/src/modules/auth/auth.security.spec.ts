@@ -42,6 +42,9 @@ import { MediaFile } from '../media/entities/media-file.entity';
 import { Content } from '../content/entities/content.entity';
 import { Category } from '../category/entities/category.entity';
 import { Comment } from '../comment/entities/comment.entity';
+import { SiteSetting } from '../site-setting/entities/site-setting.entity';
+import { SiteSettingService } from '../site-setting/site-setting.service';
+import { REGISTRATION_CLOSED_MESSAGE } from './registration-policy';
 import { Access } from '../../common/authz/access.decorator';
 import { AccessGuard } from '../../common/authz/access.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -149,7 +152,7 @@ async function createHarness({ throttle = false } = {}): Promise<Harness> {
         type: 'better-sqlite3',
         database: ':memory:',
         // 只装载 User 关联闭包里的实体（小说章节等用了 SQLite 不支持的 longtext）
-        entities: [User, Role, Permission, AuditLog, MediaFile, Content, Category, Comment],
+        entities: [User, Role, Permission, AuditLog, MediaFile, Content, Category, Comment, SiteSetting],
         synchronize: true,
         // 只记录执行过的 SQL，用来断言每个请求的查询数（不打印）
         logger: {
@@ -163,7 +166,7 @@ async function createHarness({ throttle = false } = {}): Promise<Harness> {
           log: () => undefined,
         },
       }),
-      TypeOrmModule.forFeature([User, Role, Permission, AuditLog]),
+      TypeOrmModule.forFeature([User, Role, Permission, AuditLog, SiteSetting]),
       PassportModule,
       // 与 AuthModule.registerAsync 相同的取值：access 密钥 + access 有效期（秒）
       JwtModule.register({ secret: ACCESS_SECRET, signOptions: { expiresIn: ACCESS_TTL } }),
@@ -176,6 +179,8 @@ async function createHarness({ throttle = false } = {}): Promise<Harness> {
       UserService,
       RoleService,
       AuditService,
+      // AuthController 读注册开关 enable_register（新库的默认值是 'false'，即关闭）
+      SiteSettingService,
       { provide: ConfigService, useValue: config },
       { provide: CACHE_MANAGER, useValue: cache },
       ...(throttle ? [{ provide: APP_GUARD, useClass: ThrottlerBehindProxyGuard }] : []),
@@ -1207,6 +1212,8 @@ describe('认证核心安全行为', () => {
         .expect(200);
       expect((await lastAudit('USER_LOGOUT', h.adminId)).ipAddress).toBe('203.0.113.99');
 
+      // 注册默认关闭（1-F-3），这里验证的是开放注册时的审计
+      await h.ds.getRepository(SiteSetting).update({ key: 'enable_register' }, { value: 'true' });
       const reg = await h
         .http()
         .post('/auth/register')
@@ -1294,6 +1301,12 @@ describe('限流：只由全局 ThrottlerBehindProxyGuard 执行，额度按毫�
     };
     // 请求体非法（400）同样计数：限流在校验之前
     expect(await run(4, '/auth/register', '203.0.113.20', {})).toEqual([400, 400, 400, 429]);
+    // 注册关闭（默认）时合法的请求体得 403，同样计数：关着注册也不能拿它无限探测
+    const valid = { username: 'probe', email: 'probe@cms.test', password: 'Probe123!', nickname: '探测' };
+    const closed: request.Response[] = [];
+    for (let i = 0; i < 4; i += 1) closed.push(await post('/auth/register', '203.0.113.24', valid));
+    expect(closed.map((r) => r.status)).toEqual([403, 403, 403, 429]);
+    expect(closed[0].body.message).toBe(REGISTRATION_CLOSED_MESSAGE);
     expect(await run(11, '/auth/refresh', '203.0.113.21', { refreshToken: 'x' })).toEqual([
       ...Array(10).fill(401),
       429,
