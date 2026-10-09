@@ -52,7 +52,8 @@ export class UserController {
     return this.userService.create(createUserDto, {
       actorId: currentUser.id,
       ip: clientIp(req),
-      userAgent: typeof userAgent === 'string' ? userAgent : null,
+      // 没带 UA 的真实请求记 'unknown'（与 PATCH /auth/me 一致），'system' 只留给没有请求上下文的内部调用
+      userAgent: typeof userAgent === 'string' ? userAgent : 'unknown',
     });
   }
 
