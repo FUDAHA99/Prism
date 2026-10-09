@@ -10,6 +10,7 @@ import {
   Breadcrumb,
   theme,
   Typography,
+  message,
 } from 'antd'
 import {
   DashboardOutlined,
@@ -40,9 +41,13 @@ import {
   PictureOutlined as PictureIcon,
   CloudDownloadOutlined,
 } from '@ant-design/icons'
-import { logout } from '../../api/auth'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { getProfile } from '../../api/auth'
 import { useAuthStore } from '../../stores/authStore'
+import { NO_BACKOFFICE_ACCESS_MESSAGE, endSession } from '../../stores/session'
 import { useTabsStore } from '../../stores/tabsStore'
+import { canAccessPath, filterNavByRoles, hasBackofficeAccess } from '../../utils/access'
+import ForbiddenPage from '../common/ForbiddenPage'
 import TabBar from './TabBar'
 
 const { Sider, Header, Content } = Layout
@@ -78,6 +83,7 @@ const NAV_META: NavMeta[] = [
   { key: '/settings', label: '个人设置', parent: '系统' },
 ]
 
+// 全部菜单项；渲染时按当前用户的角色过滤（filterNavByRoles，各页面需要的角色见 utils/access.ts）
 const menuItems = [
   { key: '/', icon: <DashboardOutlined />, label: '控制台' },
   {
@@ -137,13 +143,45 @@ export default function MainLayout() {
   const navigate = useNavigate()
   const location = useLocation()
   const { token } = theme.useToken()
+  const queryClient = useQueryClient()
   const user = useAuthStore((s) => s.user)
-  const clearAuth = useAuthStore((s) => s.clearAuth)
+  const updateUser = useAuthStore((s) => s.updateUser)
   const openTab = useTabsStore((s) => s.openTab)
   const setActiveKey = useTabsStore((s) => s.setActiveKey)
 
+  const roles = user?.roles
+  const visibleMenuItems = useMemo(() => filterNavByRoles(menuItems, roles), [roles])
+  const canViewCurrentPage = canAccessPath(roles, location.pathname)
+
+  // 进入后台时按 /auth/me 同步一次资料与角色：后端每个请求按库里的当前角色鉴权，
+  // 登录后被调整了角色的账号，菜单与页面守卫也要跟着变，而不是一直用登录那一刻的快照
+  const { data: profile } = useQuery({ queryKey: ['auth', 'me'], queryFn: getProfile })
+  useEffect(() => {
+    if (!profile) return
+    if (!hasBackofficeAccess(profile.roles)) {
+      // 后台角色已被撤销：结束会话（ProtectedRoute 随即转去登录页）
+      endSession({ queryClient })
+      message.error({ content: NO_BACKOFFICE_ACCESS_MESSAGE, key: 'no-backoffice-access' })
+      return
+    }
+    updateUser({
+      username: profile.username,
+      email: profile.email,
+      nickname: profile.nickname,
+      avatarUrl: profile.avatarUrl,
+      roles: profile.roles,
+      permissions: profile.permissions,
+      isActive: profile.isActive,
+    })
+  }, [profile, queryClient, updateUser])
+
   // 路径变化时同步 Tab：若是已知菜单项，自动 openTab
   useEffect(() => {
+    if (!canAccessPath(roles, location.pathname)) {
+      // 没权限的页面（显示 403）不开标签
+      setActiveKey(location.pathname)
+      return
+    }
     const meta = NAV_META.find((m) => {
       if (m.key === '/') return location.pathname === '/'
       return location.pathname === m.key
@@ -197,16 +235,11 @@ export default function MainLayout() {
   }
 
   const handleLogout = () => {
-    // 先取出两个 token，再立即清本地状态并跳转：退出不等后端（此前先 await 注销请求，后端无响应时要卡 15 秒）。
-    const accessToken = localStorage.getItem('access_token')
-    const refreshToken = localStorage.getItem('refresh_token')
-    clearAuth()
+    // 立即清本地状态并跳转，退出不等后端（此前先 await 注销请求，后端无响应时要卡 15 秒）。
+    // endSession 在后台通知后端拉黑 access token、吊销 refresh token（否则它们在过期前一直有效），
+    // 并清空标签页与查询缓存：下一个登录的账号可能角色不同
+    endSession({ queryClient })
     navigate('/login')
-    // 后台通知后端拉黑 access token、吊销 refresh token（否则它们在过期前一直有效）。
-    // logout 显式带 Authorization、3 秒超时；失败（如 token 已过期得 401、后端无响应）一律忽略
-    if (accessToken) {
-      logout(accessToken, refreshToken).catch(() => undefined)
-    }
   }
 
   const handleFullscreen = async () => {
@@ -326,7 +359,7 @@ export default function MainLayout() {
           theme="dark"
           mode="inline"
           selectedKeys={[selectedKey]}
-          items={menuItems}
+          items={visibleMenuItems}
           onClick={handleMenuClick}
           style={{
             border: 'none',
@@ -448,7 +481,8 @@ export default function MainLayout() {
             minHeight: 'calc(100vh - 56px - 40px - 32px)',
           }}
         >
-          <Outlet key={refreshKey} />
+          {/* 页面守卫：角色不够时显示 403 页，页面本身不渲染、不发请求（各页面需要的角色见 utils/access.ts） */}
+          {canViewCurrentPage ? <Outlet key={refreshKey} /> : <ForbiddenPage />}
         </Content>
       </Layout>
     </Layout>

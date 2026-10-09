@@ -1,8 +1,11 @@
 import React, { Suspense, lazy, useEffect } from 'react'
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
-import { Spin } from 'antd'
+import { Spin, message } from 'antd'
+import { useQueryClient } from '@tanstack/react-query'
 import NProgress from 'nprogress'
 import { useAuthStore } from './stores/authStore'
+import { NO_BACKOFFICE_ACCESS_MESSAGE, endSession } from './stores/session'
+import { hasBackofficeAccess } from './utils/access'
 import MainLayout from './components/layout/MainLayout'
 
 const Login = lazy(() => import('./pages/Auth/Login'))
@@ -47,17 +50,41 @@ interface ProtectedRouteProps {
   children: React.ReactNode
 }
 
-function ProtectedRoute({ children }: ProtectedRouteProps) {
+/** 已登录且有后台角色（admin / editor）。角色以登录时 /auth/me 的结果为准，MainLayout 进入后台时会再同步一次 */
+function useBackofficeSession() {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
+  const roles = useAuthStore((s) => s.user?.roles)
+  return { isAuthenticated, allowed: isAuthenticated && hasBackofficeAccess(roles) }
+}
+
+/**
+ * 已登录、却没有后台角色的会话（例如本次升级前就登录着的普通账号）：结束会话（吊销 token）并提示，
+ * 之后 isAuthenticated 变为 false，ProtectedRoute 转去登录页。
+ */
+function RevokeNonStaffSession() {
+  const queryClient = useQueryClient()
+  useEffect(() => {
+    endSession({ queryClient })
+    // 固定 key：StrictMode 下开发环境 effect 会跑两次，同一条提示不叠两条
+    message.error({ content: NO_BACKOFFICE_ACCESS_MESSAGE, key: 'no-backoffice-access' })
+  }, [queryClient])
+  return fallback
+}
+
+function ProtectedRoute({ children }: ProtectedRouteProps) {
+  const { isAuthenticated, allowed } = useBackofficeSession()
   if (!isAuthenticated) {
     return <Navigate to="/login" replace />
+  }
+  if (!allowed) {
+    return <RevokeNonStaffSession />
   }
   return <>{children}</>
 }
 
 function PublicRoute({ children }: ProtectedRouteProps) {
-  const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
-  if (isAuthenticated) {
+  const { allowed } = useBackofficeSession()
+  if (allowed) {
     return <Navigate to="/" replace />
   }
   return <>{children}</>

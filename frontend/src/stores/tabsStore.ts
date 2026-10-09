@@ -22,6 +22,8 @@ interface TabsState {
   closeAll: () => string
   /** 设置激活 Tab */
   setActiveKey: (key: string) => void
+  /** 退出登录时清空：下一个登录的账号（可能角色不同）不该看到上一个账号打开过的页面 */
+  reset: () => void
 }
 
 const HOME_TAB: TabItem = { key: '/', label: '控制台', closable: false }
@@ -72,4 +74,6 @@ export const useTabsStore = create<TabsState>()((set, get) => ({
   },
 
   setActiveKey: (key) => set({ activeKey: key }),
+
+  reset: () => set({ tabs: [HOME_TAB], activeKey: '/' }),
 }))
