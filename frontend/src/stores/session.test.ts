@@ -1,13 +1,18 @@
 // 必须第一个 import：authStore 的 persist 在模块加载时就取 localStorage
 import { memoryStorage as storage } from '../test-utils/browser-globals'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { readFileSync, readdirSync, statSync } from 'fs'
+import { join } from 'path'
+import { fileURLToPath } from 'url'
 import { AxiosError } from 'axios'
 import type { AxiosAdapter, InternalAxiosRequestConfig } from 'axios'
-import { QueryClient } from '@tanstack/react-query'
+import { QueryClient, QueryObserver } from '@tanstack/react-query'
+import { changePassword, getProfile } from '../api/auth'
 import { apiClient } from '../api/client'
 import { ApiError } from '../api/errors'
+import { createQueryClient } from '../api/queryClient'
 import { useAuthStore } from './authStore'
-import { endSession, signIn } from './session'
+import { AUTH_ME_QUERY_KEY, endSession, signIn } from './session'
 import { useTabsStore } from './tabsStore'
 import type { User } from '../types'
 
@@ -199,5 +204,123 @@ describe('signIn（登录页）', () => {
     expect(useAuthStore.getState().isAuthenticated).toBe(false)
     await flush()
     expect(urls()).toEqual(['POST /auth/login'])
+  })
+})
+
+/**
+ * 1-F-3 复审 medium：改密成功后此前只调了 clearAuth()，查询缓存与标签页都没清。MainLayout 的 ['auth','me']
+ * 缓存 5 分钟，同一标签页里下一个登录的账号挂载 MainLayout 时直接命中上一个账号的资料（不发请求），
+ * 再拿它覆盖自己的登录态：editor 登录后看到 admin 的菜单，用户、审计等页面直接显示 admin 缓存的数据。
+ * 现在改密走 endSession（与退出登录同一条路径）；signIn 建立登录态前也先清空缓存、再放入这次的资料。
+ */
+describe('改密后换账号登录：下一个账号只看到自己的资料与角色', () => {
+  const adminA: User = { ...editor, id: 'id-a', username: 'admin_a', email: 'a@cms.test', nickname: '管理员A', roles: ['admin'] }
+  const editorB: User = { ...editor, id: 'id-b', username: 'editor_b', email: 'b@cms.test', nickname: '编辑B', roles: ['editor'] }
+  let queryClient: QueryClient
+
+  /** 与 main.tsx 同一个工厂：查询缓存 staleTime 5 分钟，与线上一致 */
+  beforeEach(() => {
+    queryClient = createQueryClient({ onUnhandledMutationError: () => undefined, retryDelay: () => 0 })
+    // A 已登录并进过后台：资料与用户列表都在缓存里
+    useAuthStore.getState().setAuth(adminA, 'a-access', 'a-refresh')
+    queryClient.setQueryData(AUTH_ME_QUERY_KEY, adminA)
+    queryClient.setQueryData(['users', ''], { data: [adminA, editorB] })
+    sent = []
+    routes['POST /auth/login'] = {
+      status: 200,
+      data: { user: editorB, tokens: { accessToken: 'b-access', refreshToken: 'b-refresh', expiresIn: 900, tokenType: 'Bearer' } },
+    }
+    routes['GET /auth/me'] = { status: 200, data: editorB }
+  })
+
+  afterEach(() => {
+    queryClient.clear()
+  })
+
+  /** 按 MainLayout 的写法挂一个 ['auth','me'] 观察者：返回它拿到的资料与真正发出的 /auth/me 次数 */
+  async function mainLayoutProfile() {
+    let fetches = 0
+    const observer = new QueryObserver(queryClient, {
+      queryKey: AUTH_ME_QUERY_KEY,
+      queryFn: () => {
+        fetches += 1
+        return getProfile()
+      },
+    })
+    const unsubscribe = observer.subscribe(() => undefined)
+    await flush()
+    const data = observer.getCurrentResult().data
+    unsubscribe()
+    return { data, fetches }
+  }
+
+  it('改密成功 → endSession（设置页的做法）→ B 登录：登录态、MainLayout 读到的资料都是 B，A 缓存的列表不在了', async () => {
+    routes['POST /auth/change-password'] = { status: 200, data: { message: '密码修改成功' } }
+    await changePassword({ currentPassword: 'Old12345', newPassword: 'New12345' })
+    endSession({ queryClient })
+    expect(queryClient.getQueryData(AUTH_ME_QUERY_KEY)).toBeUndefined()
+    expect(useTabsStore.getState().tabs.map((t) => t.key)).toEqual(['/'])
+    await flush()
+    // 注销请求带的是 A 的 token（后端改密时已吊销，401 也无妨）
+    const logout = sent.find((c) => c.url === '/auth/logout')
+    expect(logout?.headers.get('Authorization')).toBe('Bearer a-access')
+
+    const result = await signIn('b@cms.test', 'pw', queryClient)
+
+    expect(result.status).toBe('signed-in')
+    expect(useAuthStore.getState().user).toMatchObject({ username: 'editor_b', roles: ['editor'] })
+    const { data, fetches } = await mainLayoutProfile()
+    expect(data).toMatchObject({ username: 'editor_b', roles: ['editor'] })
+    // signIn 已放入这次取到的资料，MainLayout 不必再请求一次
+    expect(fetches).toBe(0)
+    expect(queryClient.getQueryData(['users', ''])).toBeUndefined()
+  })
+
+  it('纵深防御：上一个会话只清了登录态（缓存全留着）时，signIn 照样换掉缓存', async () => {
+    // 此前改密成功走的就是这条：只有 clearAuth()
+    useAuthStore.getState().clearAuth()
+
+    await signIn('b@cms.test', 'pw', queryClient)
+
+    const { data, fetches } = await mainLayoutProfile()
+    expect(data).toMatchObject({ id: 'id-b', username: 'editor_b', nickname: '编辑B', roles: ['editor'] })
+    expect(fetches).toBe(0)
+    expect(queryClient.getQueryData(['users', ''])).toBeUndefined()
+    expect(useAuthStore.getState().user?.roles).toEqual(['editor'])
+  })
+
+  it('反过来：editor 改密后 admin 登录，admin 拿到的是自己的角色，不会被降成 editor', async () => {
+    useAuthStore.getState().setAuth(editorB, 'b-access', 'b-refresh')
+    queryClient.setQueryData(AUTH_ME_QUERY_KEY, editorB)
+    useAuthStore.getState().clearAuth()
+    routes['POST /auth/login'] = {
+      status: 200,
+      data: { user: adminA, tokens: { accessToken: 'a2-access', refreshToken: 'a2-refresh', expiresIn: 900, tokenType: 'Bearer' } },
+    }
+    routes['GET /auth/me'] = { status: 200, data: adminA }
+
+    await signIn('a@cms.test', 'pw', queryClient)
+
+    expect((await mainLayoutProfile()).data).toMatchObject({ username: 'admin_a', roles: ['admin'] })
+  })
+})
+
+/** 结束会话只走 endSession：页面、组件里直接调 clearAuth() 会漏掉查询缓存与标签页（上面那个 bug 的成因） */
+describe('结束会话的入口', () => {
+  const srcRoot = fileURLToPath(new URL('..', import.meta.url))
+  const files: string[] = []
+  ;(function walk(dir: string) {
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name)
+      if (statSync(full).isDirectory()) walk(full)
+      else if (/\.tsx?$/.test(name) && !/\.test\.tsx?$/.test(name)) files.push(full)
+    }
+  })(srcRoot)
+
+  it('除 stores/authStore.ts 与 stores/session.ts 外，没有代码直接调用 clearAuth()', () => {
+    const allowed = [join(srcRoot, 'stores', 'authStore.ts'), join(srcRoot, 'stores', 'session.ts')]
+    expect(files.length).toBeGreaterThan(20)
+    const offenders = files.filter((file) => !allowed.includes(file) && /\bclearAuth\b/.test(readFileSync(file, 'utf8')))
+    expect(offenders).toEqual([])
   })
 })

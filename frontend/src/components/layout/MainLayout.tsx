@@ -44,7 +44,7 @@ import {
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getProfile } from '../../api/auth'
 import { useAuthStore } from '../../stores/authStore'
-import { NO_BACKOFFICE_ACCESS_MESSAGE, endSession } from '../../stores/session'
+import { AUTH_ME_QUERY_KEY, NO_BACKOFFICE_ACCESS_MESSAGE, endSession } from '../../stores/session'
 import { useTabsStore } from '../../stores/tabsStore'
 import { canAccessPath, filterNavByRoles, hasBackofficeAccess } from '../../utils/access'
 import { portalUrl } from '../../utils/portal-url'
@@ -156,7 +156,7 @@ export default function MainLayout() {
 
   // 进入后台时按 /auth/me 同步一次资料与角色：后端每个请求按库里的当前角色鉴权，
   // 登录后被调整了角色的账号，菜单与页面守卫也要跟着变，而不是一直用登录那一刻的快照
-  const { data: profile } = useQuery({ queryKey: ['auth', 'me'], queryFn: getProfile })
+  const { data: profile } = useQuery({ queryKey: AUTH_ME_QUERY_KEY, queryFn: getProfile })
   useEffect(() => {
     if (!profile) return
     if (!hasBackofficeAccess(profile.roles)) {

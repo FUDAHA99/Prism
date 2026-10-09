@@ -7,6 +7,7 @@ import { changePassword, updateProfile } from '../../api/auth'
 import { errorMessage } from '../../api/errors'
 import PageHeader from '../../components/common/PageHeader'
 import { useAuthStore } from '../../stores/authStore'
+import { AUTH_ME_QUERY_KEY, endSession } from '../../stores/session'
 import { PASSWORD_HINT, passwordRule } from '../../utils/password'
 import {
   PROFILE_AVATAR_URL_MAX,
@@ -60,7 +61,7 @@ function ProfileTab() {
     try {
       const res = await updateProfile(payload)
       // 返回值与 GET /auth/me 同形状：同时刷新登录态与 MainLayout 的资料缓存
-      queryClient.setQueryData(['auth', 'me'], res)
+      queryClient.setQueryData(AUTH_ME_QUERY_KEY, res)
       updateUserStore({
         nickname: res.nickname,
         avatarUrl: res.avatarUrl,
@@ -128,7 +129,7 @@ function ProfileTab() {
 function PasswordTab() {
   const [form] = Form.useForm<PasswordFormValues>()
   const [loading, setLoading] = React.useState(false)
-  const clearAuth = useAuthStore((s) => s.clearAuth)
+  const queryClient = useQueryClient()
   const navigate = useNavigate()
 
   const handleSubmit = async () => {
@@ -147,10 +148,13 @@ function PasswordTab() {
         currentPassword: values.currentPassword,
         newPassword: values.newPassword,
       })
-      // 改密成功后后端已吊销本账号此前签发的全部 token（含当前这个），直接回登录页
+      // 改密成功后后端已吊销本账号此前签发的全部 token（含当前这个），回登录页重新登录。
+      // 与退出登录走同一条 endSession：登录态、标签页与查询缓存一并清空 —— 此前只清了登录态，
+      // 同一标签页里 5 分钟内登录的下一个账号会读到这个账号缓存的 /auth/me（含角色）与各页面数据。
+      // endSession 在后台发的注销请求会因 token 已吊销得到 401，失败一律忽略
       message.success('密码修改成功，请重新登录')
       form.resetFields()
-      clearAuth()
+      endSession({ queryClient })
       navigate('/login')
     } catch (err: unknown) {
       // apiClient 的响应拦截器已把后端的 message 包成 Error.message（如「当前密码错误」）
