@@ -47,6 +47,7 @@ import { useAuthStore } from '../../stores/authStore'
 import { NO_BACKOFFICE_ACCESS_MESSAGE, endSession } from '../../stores/session'
 import { useTabsStore } from '../../stores/tabsStore'
 import { canAccessPath, filterNavByRoles, hasBackofficeAccess } from '../../utils/access'
+import { portalUrl } from '../../utils/portal-url'
 import ForbiddenPage from '../common/ForbiddenPage'
 import TabBar from './TabBar'
 
@@ -411,7 +412,7 @@ export default function MainLayout() {
               <Button
                 type="text"
                 icon={<GlobalOutlined />}
-                onClick={() => window.open('http://localhost:3002', '_blank')}
+                onClick={() => window.open(portalUrl(), '_blank', 'noopener')}
                 style={iconBtn}
               />
             </Tooltip>
