@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { ApiError, messageForError } from './errors'
 
 export const apiClient = axios.create({
   baseURL: '/api/v1',
@@ -34,7 +35,7 @@ apiClient.interceptors.response.use(
     return response
   },
   (error) => {
-    const status = error.response?.status
+    const status: number | undefined = error.response?.status
     if (status === 401 && !sentWithStaleToken(error.config)) {
       // 完整清理：localStorage 的 token + zustand persist 里的 isAuthenticated
       localStorage.removeItem('access_token')
@@ -49,22 +50,18 @@ apiClient.interceptors.response.use(
       }
     }
 
-    // 413 的 body 不可用（nginx 是 HTML、后端是英文），统一给中文提示，但要分来源：
-    // - 文件上传（FormData）：撞的是 nginx/multer 的上传上限 → 提示 10MB
-    // - 普通 JSON 提交：撞的是后端 body-parser 默认 100kb（如很长的小说章节），
-    //   与上传上限无关，提示 10MB 会误导
+    // 带上状态码抛出 ApiError：react-query 据此只对网络错误 / 5xx 重试，页面据此区分 403 与空数据。
+    // 文案（403、5xx、413、超时等的中文提示）统一在 messageForError 里决定，见 errors.ts。
     // axios 的 transformRequest 对 FormData 原样透传，error.config.data 仍是 FormData 实例
-    const isUpload = error.config?.data instanceof FormData
-    const message =
-      status === 413
-        ? isUpload
-          ? '文件过大，超过服务器允许的上传上限（10MB）'
-          : '提交内容过大，请缩减后重试'
-        : error.response?.data?.message ??
-          error.response?.data?.error ??
-          error.message ??
-          '请求失败，请稍后重试'
+    const isUpload = typeof FormData !== 'undefined' && error.config?.data instanceof FormData
+    const message = messageForError({
+      status,
+      data: error.response?.data,
+      code: error.code,
+      message: error.message,
+      isUpload,
+    })
 
-    return Promise.reject(new Error(message))
+    return Promise.reject(new ApiError(message, { status, code: error.code }))
   }
 )
