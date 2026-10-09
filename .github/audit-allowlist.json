@@ -1,0 +1,248 @@
+{
+  "backend": [
+    {
+      "id": "GHSA-36xv-jgw5-4q75",
+      "package": "@nestjs/core",
+      "reason": "需要 Nest 11（第七节 #1）：@nestjs/core 10.4.22 已是 10.x 最后一版，修复在 11.1.18",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-v422-hmwv-36x6",
+      "package": "body-parser",
+      "reason": "需要 Nest 11（第七节 #1）：@nestjs/platform-express 10.4.22 精确锁定 body-parser 1.20.4（修复版 1.20.6）；只在传入无效 limit 时触发，main.ts 没有自定义 body-parser 的 limit",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-5v7r-6r5c-r473",
+      "package": "file-type",
+      "reason": "需要 Nest 11（第七节 #1）：@nestjs/common 10.4.22 精确锁定 file-type 20.4.1（修复版 21.3.2）；只有 FileTypeValidator 会加载它，后端没有使用 FileTypeValidator / ParseFilePipe",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-j47w-4g3g-c36v",
+      "package": "file-type",
+      "reason": "需要 Nest 11（第七节 #1）：@nestjs/common 10.4.22 精确锁定 file-type 20.4.1（修复版 21.3.2）；只有 FileTypeValidator 会加载它，后端没有使用 FileTypeValidator / ParseFilePipe",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-2883-xcg3-v3hh",
+      "package": "js-yaml",
+      "reason": "需要 Nest 11（第七节 #1）：js-yaml 只由 @nestjs/swagger 7.4.2 引入并精确锁定 4.1.0，只在 SwaggerModule.setup 输出 YAML 文档时使用；SwaggerModule 从未挂载，当前不可达",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-52cp-r559-cp3m",
+      "package": "js-yaml",
+      "reason": "需要 Nest 11（第七节 #1）：js-yaml 只由 @nestjs/swagger 7.4.2 引入并精确锁定 4.1.0，只在 SwaggerModule.setup 输出 YAML 文档时使用；SwaggerModule 从未挂载，当前不可达",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-5p4m-2wfm-xmqj",
+      "package": "js-yaml",
+      "reason": "需要 Nest 11（第七节 #1）：js-yaml 只由 @nestjs/swagger 7.4.2 引入并精确锁定 4.1.0，只在 SwaggerModule.setup 输出 YAML 文档时使用；SwaggerModule 从未挂载，当前不可达",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-h67p-54hq-rp68",
+      "package": "js-yaml",
+      "reason": "需要 Nest 11（第七节 #1）：js-yaml 只由 @nestjs/swagger 7.4.2 引入并精确锁定 4.1.0，只在 SwaggerModule.setup 输出 YAML 文档时使用；SwaggerModule 从未挂载，当前不可达",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-mh29-5h37-fv8m",
+      "package": "js-yaml",
+      "reason": "需要 Nest 11（第七节 #1）：js-yaml 只由 @nestjs/swagger 7.4.2 引入并精确锁定 4.1.0，只在 SwaggerModule.setup 输出 YAML 文档时使用；SwaggerModule 从未挂载，当前不可达",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-r5fr-rjxr-66jc",
+      "package": "lodash",
+      "reason": "需要 Nest 11（第七节 #1）：@nestjs/config 3.3.0、@nestjs/swagger 7.4.2 精确锁定 lodash 4.17.21（修复版 4.18.0）；漏洞在 _.template，两者和业务代码都没有用到 _.template",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-f23m-r3pf-42rh",
+      "package": "lodash",
+      "reason": "需要 Nest 11（第七节 #1）：@nestjs/config 3.3.0、@nestjs/swagger 7.4.2 精确锁定 lodash 4.17.21（修复版 4.18.0）；config 只用 get/has/set，swagger 只对装饰器元数据用字面键调 omit，不经手请求数据；业务代码不直接用 lodash",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-xxjr-mmjv-4gpg",
+      "package": "lodash",
+      "reason": "需要 Nest 11（第七节 #1）：@nestjs/config 3.3.0、@nestjs/swagger 7.4.2 精确锁定 lodash 4.17.21（修复版 4.18.0）；config 只用 get/has/set，swagger 只对装饰器元数据用字面键调 omit，不经手请求数据；业务代码不直接用 lodash",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-4mjr-xmp4-gh2g",
+      "package": "qs",
+      "reason": "需要 Nest 11（第七节 #1，随之升到 express 5）：express 4.22.1 与 body-parser 1.20.4 用 ~6.14.0 锁住 qs 6.14.2（修复版 6.16.0）；express 4 解析查询串会用 qs，不能算不可达。提前处理只能像 multer 那样加 overrides，需要回归测试",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-q8mj-m7cp-5q26",
+      "package": "qs",
+      "reason": "需要 Nest 11（第七节 #1，随之升到 express 5）：express 4.22.1 与 body-parser 1.20.4 用 ~6.14.0 锁住 qs 6.14.2（修复版 6.16.0）；漏洞在 qs.stringify 的 comma 格式，后端代码不直接调用 qs",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-x5fp-wj9c-mxmx",
+      "package": "qs",
+      "reason": "需要 Nest 11（第七节 #1，随之升到 express 5）：express 4.22.1 与 body-parser 1.20.4 用 ~6.14.0 锁住 qs 6.14.2（修复版 6.16.0）；express 4 解析查询串会用 qs，不能算不可达。提前处理只能像 multer 那样加 overrides，需要回归测试",
+      "expires": "2027-01-09"
+    }
+  ],
+  "frontend": [
+    {
+      "id": "GHSA-337j-9hxr-rhxg",
+      "package": "react-router",
+      "reason": "只有 v7 能修（7.18.0，第七节 #5）；漏洞在 SSR 水合的 deserializeErrors，管理后台是纯 CSR（Vite SPA），没有 SSR 水合",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-wrjc-x8rr-h8h6",
+      "package": "react-router",
+      "reason": "只有 v7 能修（7.18.0，第七节 #5）；<Link> / navigate 的目标都以代码里的字面路径开头（id 只拼在固定前缀之后），不从查询参数或后端数据读跳转目标。一旦出现这类逻辑（如登录后 returnUrl、后端驱动的菜单），必须先迁到 v7",
+      "expires": "2027-01-09"
+    }
+  ],
+  "portal": [
+    {
+      "id": "GHSA-2xp9-vwfh-vxw4",
+      "package": "next",
+      "reason": "需 Next 16（14.x 已停止回溯，没有 14.x 修复版；第七节 #2）；已由 images.unoptimized + nginx 对 /_next/image 返回 404 屏蔽（图片优化器不可达）",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-p293-qw3h-jr36",
+      "package": "next",
+      "reason": "需 Next 16（14.x 已停止回溯，没有 14.x 修复版；第七节 #2）；只影响跑在 Windows 主机上的服务，生产是 node:20-alpine（Linux）容器。注意本地在 Windows 上跑 next dev / next start 时受影响，不要把端口暴露到局域网",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-36qx-fr4f-26g5",
+      "package": "next",
+      "reason": "需 Next 16（14.x 已停止回溯，没有 14.x 修复版；第七节 #2）；只影响用了 i18n 的 Pages Router，门户是纯 App Router（没有 pages/ 目录），也没有 middleware 和 i18n 配置",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-89xv-2m56-2m9x",
+      "package": "next",
+      "reason": "需 Next 16（14.x 已停止回溯，没有 14.x 修复版；第七节 #2）；门户没有任何 'use server'（无 Server Actions / Server Functions），不可达",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-8h8q-6873-q5fj",
+      "package": "next",
+      "reason": "需 Next 16（14.x 已停止回溯，没有 14.x 修复版；第七节 #2）；门户是 App Router（用到 RSC），适用，没有缓解措施；接受风险到 Next 16",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-c4j6-fc7j-m34r",
+      "package": "next",
+      "reason": "需 Next 16（14.x 已停止回溯，没有 14.x 修复版；第七节 #2）；nginx 的 location / 会把 Upgrade 头透传给门户，不能算不可达；接受风险到 Next 16",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-h25m-26qc-wcjf",
+      "package": "next",
+      "reason": "需 Next 16（14.x 已停止回溯，没有 14.x 修复版；第七节 #2）；门户是 App Router（用到 RSC），适用，没有缓解措施；接受风险到 Next 16",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-m99w-x7hq-7vfj",
+      "package": "next",
+      "reason": "需 Next 16（14.x 已停止回溯，没有 14.x 修复版；第七节 #2）；门户没有任何 'use server'（无 Server Actions / Server Functions），不可达",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-p9j2-gv94-2wf4",
+      "package": "next",
+      "reason": "需 Next 16（14.x 已停止回溯，没有 14.x 修复版；第七节 #2）；需要 rewrites，next.config.js 没有 rewrites（1-C 已删除）",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-q4gf-8mx6-v5v3",
+      "package": "next",
+      "reason": "需 Next 16（14.x 已停止回溯，没有 14.x 修复版；第七节 #2）；门户是 App Router（用到 RSC），适用，没有缓解措施；接受风险到 Next 16",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-3x4c-7xq6-9pq8",
+      "package": "next",
+      "reason": "需 Next 16（14.x 已停止回溯，没有 14.x 修复版；第七节 #2）；已由 images.unoptimized + nginx 对 /_next/image 返回 404 屏蔽（图片优化器不可达）",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-4633-3j49-mh5q",
+      "package": "next",
+      "reason": "需 Next 16（14.x 已停止回溯，没有 14.x 修复版；第七节 #2）；门户是 App Router（用到 RSC），适用，没有缓解措施；接受风险到 Next 16",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-4c39-4ccg-62r3",
+      "package": "next",
+      "reason": "需 Next 16（14.x 已停止回溯，没有 14.x 修复版；第七节 #2）；门户没有任何 'use server'（无 Server Actions / Server Functions），不可达，也没有 Edge runtime",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-68g3-v927-f742",
+      "package": "next",
+      "reason": "需 Next 16（14.x 已停止回溯，没有 14.x 修复版；第七节 #2）；门户是 App Router（用到 RSC），适用，没有缓解措施；接受风险到 Next 16",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-955p-x3mx-jcvp",
+      "package": "next",
+      "reason": "需 Next 16（14.x 已停止回溯，没有 14.x 修复版；第七节 #2）；门户没有任何 'use server'（无 Server Actions / Server Functions），不可达",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-9g9p-9gw9-jx7f",
+      "package": "next",
+      "reason": "需 Next 16（14.x 已停止回溯，没有 14.x 修复版；第七节 #2）；已由 images.unoptimized + nginx 对 /_next/image 返回 404 屏蔽（图片优化器不可达），也没有配置 remotePatterns",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-ffhc-5mcf-pf4q",
+      "package": "next",
+      "reason": "需 Next 16（14.x 已停止回溯，没有 14.x 修复版；第七节 #2）；需要 CSP nonce，门户没有使用 nonce",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-ggv3-7p47-pfv8",
+      "package": "next",
+      "reason": "需 Next 16（14.x 已停止回溯，没有 14.x 修复版；第七节 #2）；需要 rewrites，next.config.js 没有 rewrites（1-C 已删除）",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-gx5p-jg67-6x7h",
+      "package": "next",
+      "reason": "需 Next 16（14.x 已停止回溯，没有 14.x 修复版；第七节 #2）；需要 strategy=\"beforeInteractive\" 的脚本，门户没有",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-h64f-5h5j-jqjh",
+      "package": "next",
+      "reason": "需 Next 16（14.x 已停止回溯，没有 14.x 修复版；第七节 #2）；已由 images.unoptimized + nginx 对 /_next/image 返回 404 屏蔽（图片优化器不可达）",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-wfc6-r584-vfw7",
+      "package": "next",
+      "reason": "需 Next 16（14.x 已停止回溯，没有 14.x 修复版；第七节 #2）；门户是 App Router（用到 RSC），适用，没有缓解措施；接受风险到 Next 16",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-3g8h-86w9-wvmq",
+      "package": "next",
+      "reason": "需 Next 16（14.x 已停止回溯，没有 14.x 修复版；第七节 #2）；需要 middleware 做重定向，门户没有 middleware",
+      "expires": "2027-01-09"
+    },
+    {
+      "id": "GHSA-vfv6-92ff-j949",
+      "package": "next",
+      "reason": "需 Next 16（14.x 已停止回溯，没有 14.x 修复版；第七节 #2）；门户是 App Router（用到 RSC），适用，没有缓解措施；接受风险到 Next 16",
+      "expires": "2027-01-09"
+    }
+  ]
+}

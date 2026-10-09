@@ -1,0 +1,79 @@
+name: Dependency audit
+
+# 依赖审计门禁。故意和 deploy.yml 分开：
+# - deploy.yml 的 deploy job 只排除了 pull_request，把 schedule 加进去，定时触发会真的去部署；
+# - 新公告随时会出现，不能让它挡住无关修复的上线，所以 deploy 的 needs 里也不加这里的 job。
+# 规则：生产依赖（--omit=dev）的公告必须在 .github/audit-allowlist.json 里按 GHSA 编号登记且未过期，否则失败；
+# 开发依赖的公告只报告。例外到期后，每周的定时运行会按设计变红，提醒有人重新评估。
+# 本地复现：node scripts/audit-gate.mjs <backend|frontend|portal> --registry=https://registry.npmjs.org
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/package.json'
+      - '**/package-lock.json'
+      - '.github/audit-allowlist.json'
+      - 'scripts/audit-gate.mjs'
+      - '.github/workflows/audit.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - '**/package.json'
+      - '**/package-lock.json'
+      - '.github/audit-allowlist.json'
+      - 'scripts/audit-gate.mjs'
+      - '.github/workflows/audit.yml'
+  # 公告库会更新，lockfile 不变也要定期复查。每周一 01:17 UTC（北京时间 09:17）
+  schedule:
+    - cron: '17 1 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Audit ${{ matrix.project }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false        # 一个挂了也要看到另外两个的结果
+      matrix:
+        project: [backend, frontend, portal]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # 与 deploy.yml、三个 Dockerfile 一致。这里只读 lockfile、不装依赖，所以不开 npm 缓存
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+
+      # 不带 --registry 装包时，本机默认的 npmmirror 地址会被写进 lockfile 的 resolved，
+      # 之后 CI 和 Docker 构建都会从镜像站下载。这里要求 resolved 全部来自官方源
+      - name: lockfile 只用官方源
+        working-directory: ${{ matrix.project }}
+        run: |
+          node -e '
+            const lock = require("./package-lock.json");
+            if (!lock.packages) {
+              console.log("::error::package-lock.json 没有 packages 字段（需要 lockfileVersion 2 及以上）");
+              process.exit(1);
+            }
+            const entries = Object.entries(lock.packages).filter(([path]) => path);
+            const bad = entries.filter(([, meta]) => meta.resolved && !meta.resolved.startsWith("https://registry.npmjs.org/"));
+            for (const [path, meta] of bad) console.log("::error::" + path + " resolved=" + meta.resolved);
+            if (bad.length) {
+              console.log(bad.length + " 个包不是从官方源解析的：改回 https://registry.npmjs.org/（核对 integrity 不变），以后装包都带 --registry=https://registry.npmjs.org");
+              process.exit(1);
+            }
+            console.log("lockfile 里 " + entries.length + " 个条目，resolved 全部来自 https://registry.npmjs.org/");
+          '
+
+      - name: npm audit（生产依赖按例外清单阻断，开发依赖只报告）
+        run: node scripts/audit-gate.mjs ${{ matrix.project }} --registry=https://registry.npmjs.org

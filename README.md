@@ -81,10 +81,10 @@ docker compose up -d
 # 2. 配置后端环境变量
 cd backend && cp .env.example .env
 
-# 3. 启动三端服务（分三个终端）
-cd backend  && npm install && npm run start:dev
-cd frontend && npm install && npm run dev
-cd portal   && npm install && npm run dev
+# 3. 启动三端服务（分三个终端；装包一律带官方源参数，原因见下文「依赖安装与安全审计」）
+cd backend  && npm install --registry=https://registry.npmjs.org && npm run start:dev
+cd frontend && npm install --registry=https://registry.npmjs.org && npm run dev
+cd portal   && npm install --registry=https://registry.npmjs.org && npm run dev
 
 # 4. 初始化账户和演示数据
 node backend/scripts/seed-admin.js   # admin@cms.com / Admin123!
@@ -129,6 +129,53 @@ bash scripts/deploy.sh
 - bcrypt 密码哈希（salt rounds = 12）
 - NestJS ValidationPipe（whitelist 模式，拒绝多余字段）
 - CORS 白名单 + Rate Limit 限流
+
+---
+
+## 依赖安装与安全审计
+
+**装包必须走 npm 官方源**：每条 npm 命令都带 `--registry=https://registry.npmjs.org`（本机默认源是 npmmirror 时尤其如此）。
+
+```bash
+npm ci --registry=https://registry.npmjs.org
+npm i <包名>@<版本> --registry=https://registry.npmjs.org
+```
+
+走 npmmirror 时，有两件事不会给出任何提示：
+
+- `npm install` / `npm ci` 不打印「N vulnerabilities」那一行，看上去像没有漏洞；
+- 新装或升级的包会把 `https://registry.npmmirror.com/...` 写进 `package-lock.json` 的 `resolved`，之后 CI 和 Docker 构建都会去镜像站下载。
+
+`npm audit` 走 npmmirror 则会直接报错退出（镜像站没有实现审计接口），不会显示「没有漏洞」。
+
+**查漏洞用审计门禁脚本** `scripts/audit-gate.mjs`。它零依赖，只读 lockfile，不需要先装依赖：
+
+```bash
+node scripts/audit-gate.mjs backend  --registry=https://registry.npmjs.org
+node scripts/audit-gate.mjs frontend --registry=https://registry.npmjs.org
+node scripts/audit-gate.mjs portal   --registry=https://registry.npmjs.org
+grep -c registry.npmmirror.com */package-lock.json   # 三个都应为 0
+```
+
+| 退出码 | 含义 |
+|---|---|
+| 0 | 生产依赖（`--omit=dev`）的公告全部已登记且未过期；开发依赖的公告只报告，不阻断 |
+| 1 | 生产依赖出现未登记的公告，或登记已过期，或例外清单格式不对 |
+| 2 | 没有拿到有效的审计报告（源不支持 audit，如 npmmirror；网络故障）或参数不对 |
+
+**例外登记在 `.github/audit-allowlist.json`**，按项目、按 GHSA 编号逐条登记：
+
+```json
+{ "portal": [{ "id": "GHSA-xxxx-xxxx-xxxx", "package": "next", "reason": "为什么现在不修、什么时候修", "expires": "YYYY-MM-DD" }] }
+```
+
+- 生产依赖的公告不分级别一律阻断。修不了的才登记，`reason` 写清楚依赖链、可达性和要等的升级，`expires` 一次给 3 个月。
+- 到期日当天仍有效，次日起失败。到期后重新评估：能修就修；修不了就更新理由，再顺延。
+- 清单里有、但 audit 已不再报告（或只出现在开发依赖里）的条目，会给 warning，顺手删掉即可。
+- 不用 `npm audit --audit-level`：next 14 的 critical 没有 14.x 修复版本，按级别卡会一直是红的，也没法逐条豁免、到期复查。
+- 仓库里不跑 `npm audit fix`。升级用限定包名的 `npm update <包名>` 或 `npm i <包名>@<版本>`，lockfile 一并提交。
+
+CI 中由 `.github/workflows/audit.yml` 执行：改动 `package.json`、`package-lock.json`、例外清单或门禁脚本时触发，另外每周一定时跑一次（公告库会更新）。三个子项目各一个 job，先检查 lockfile 的 `resolved` 全部来自官方源，再跑上面的门禁。它和部署流水线互相独立，变红不会挡住部署。
 
 ---
 
