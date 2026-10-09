@@ -361,10 +361,10 @@ db.close();
 | 命令 | 说明 |
 |------|------|
 | `npm run start:dev` | 开发模式（热重载）|
-| `npm run build` | 生产构建 |
+| `npm run build` | 生产构建（`nest build` 用 `tsconfig.build.json`：不编译 `*.spec.ts` 与 `src/common/testing/` 测试夹具，产物里没有测试文件）|
 | `npm run start:prod` | 生产模式运行 |
 | `npm run lint` | ESLint 检查 |
-| `npm run test` | 运行单元测试 |
+| `npm run test` | 运行单元测试（ts-jest 按 `tsconfig.json` 编译，测试文件的类型错误在这里报出，不在 build）|
 
 ### 前端
 | 命令 | 说明 |
