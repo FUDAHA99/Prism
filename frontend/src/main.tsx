@@ -12,6 +12,7 @@ import App from './App';
 import { createQueryClient } from './api/queryClient';
 import './styles/index.css';
 import './styles/nprogress.css';
+import { watchCrossTabSession } from './stores/session';
 
 // 设置dayjs语言
  dayjs.locale('zh-cn');
@@ -31,6 +32,9 @@ NProgress.configure({
   minimum: 0.1,
   trickleSpeed: 200,
 });
+
+// 另一个标签页换了账号时整页重载，避免本页沿用旧账号的菜单与缓存（见 watchCrossTabSession）
+watchCrossTabSession();
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

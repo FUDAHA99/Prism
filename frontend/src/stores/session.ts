@@ -76,3 +76,25 @@ export async function signIn(email: string, password: string, queryClient?: Quer
   useAuthStore.getState().setAuth(user, tokens.accessToken, tokens.refreshToken)
   return { status: 'signed-in', user }
 }
+
+type StorageEventLike = Event & { key?: string | null; oldValue?: string | null; newValue?: string | null; storageArea?: unknown }
+
+/**
+ * 跨标签页的账号切换：另一个标签页退出、登录或换了账号时，localStorage 里的 access_token 变了，
+ * 但本页的 zustand 状态（菜单、角色）和 react-query 缓存（用户列表、审计日志、/auth/me……）都还属于旧账号，
+ * 而之后发出的请求已经带着新账号的 token（复审 low）。只要 access_token 变了（或整块存储被清空，key 为 null），
+ * 就整页重载：持久化的登录态按新值重建，内存缓存全部丢弃。返回取消监听的函数。
+ */
+export function watchCrossTabSession(
+  target: Pick<EventTarget, 'addEventListener' | 'removeEventListener'> = window,
+  storageArea: unknown = typeof localStorage === 'undefined' ? undefined : localStorage,
+  reload: () => void = () => window.location.reload(),
+): () => void {
+  const onStorage = (event: Event) => {
+    const e = event as StorageEventLike
+    if (storageArea !== undefined && e.storageArea !== storageArea) return
+    if (e.key === null || (e.key === 'access_token' && e.oldValue !== e.newValue)) reload()
+  }
+  target.addEventListener('storage', onStorage)
+  return () => target.removeEventListener('storage', onStorage)
+}
