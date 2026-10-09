@@ -648,8 +648,8 @@
 
 ## 十四、友情链接 `/friend-links`
 
-`GET /friend-links` — 列表，可选登录：`admin` 看到全部友链与完整字段（含 `isVisible`、`sortOrder`）；
-其他人（游客、其他角色）只看到「显示」中且地址为 http(s) 的友链，每条只有 `id`、`name`、`url`、`logo`、`description`。
+`GET /friend-links` — 列表，可选登录：后台角色（`admin` / `editor`）看到全部友链与完整字段（含 `isVisible`、`sortOrder`，后台友链页要用；只读）；
+其他人（游客、无角色用户）只看到「显示」中且地址为 http(s) 的友链，每条只有 `id`、`name`、`url`、`logo`、`description`。
 按 `sortOrder` 升序、新建的在前。
 
 🔒 写操作需要 `admin` 角色：

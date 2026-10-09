@@ -4,9 +4,9 @@ import { Repository } from 'typeorm';
 import { FriendLink } from './entities/friend-link.entity';
 import { CreateFriendLinkDto, FRIEND_LINK_URL_PATTERN } from './dto/create-friend-link.dto';
 import { UpdateFriendLinkDto } from './dto/update-friend-link.dto';
-import { isAdmin, Viewer } from '../../common/authz/viewer';
+import { isStaff, Viewer } from '../../common/authz/viewer';
 
-/** 非管理员看到的友链：只有展示需要的字段，不含显示开关、排序值与时间戳 */
+/** 游客与非后台角色看到的友链：只有展示需要的字段，不含显示开关、排序值与时间戳 */
 export interface PublicFriendLink {
   id: string;
   name: string;
@@ -29,12 +29,14 @@ export class FriendLinkService {
 
   /**
    * GET /friend-links（可选登录）由后台友链页与公开读共用：
-   * - 管理员（友链由 admin 管理）：全部友链、完整字段，与此前一致；
-   * - 其他人（游客、无角色用户、editor）：只有「显示」的友链，按 PublicFriendLink 白名单出参；
+   * - 后台角色（admin / editor）：全部友链、完整字段（含 isVisible / sortOrder）。读是无害的，后台友链页的
+   *   「显示」「排序」两列要用这两个字段 —— 此前只给 admin，editor 打开友链页时每一行都显示成「隐藏」、排序列为空、
+   *   隐藏的链接整行不见。新建 / 编辑 / 删除仍只有 admin（见 controller）；
+   * - 其他人（游客、无角色用户）：只有「显示」的友链，按 PublicFriendLink 白名单出参；
    *   地址不是 http(s) 的历史数据（接口此前不限协议）一并略过，不交给任何前台去渲染成链接。
    */
   async findAll(viewer?: Viewer): Promise<FriendLink[] | PublicFriendLink[]> {
-    if (isAdmin(viewer)) {
+    if (isStaff(viewer)) {
       return this.friendLinkRepository.find({ order: LIST_ORDER });
     }
     const rows = await this.friendLinkRepository.find({

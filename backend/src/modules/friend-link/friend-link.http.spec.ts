@@ -73,7 +73,7 @@ describe('友情链接接口 HTTP', () => {
       await make('legacy', { sortOrder: 0, url: 'javascript:alert(1)' });
     });
 
-    it.each<Who>(['anonymous', 'plain', 'editor'])('%s：只有显示中的 http(s) 友链，按排序值，公开字段白名单', async (who) => {
+    it.each<Who>(['anonymous', 'plain'])('%s：只有显示中的 http(s) 友链，按排序值，公开字段白名单', async (who) => {
       const res = await h.get('/friend-links', who).expect(200);
       const rows = res.body.data as Array<Record<string, unknown>>;
       expect(rows.map((r) => r.name)).toEqual(['a', 'b']);
@@ -82,13 +82,17 @@ describe('友情链接接口 HTTP', () => {
       expect(JSON.stringify(res.body)).not.toMatch(/hidden|javascript|isVisible|sortOrder|createdAt/);
     });
 
-    it('admin：全部友链（含隐藏与历史数据）与完整字段，后台友链页照常', async () => {
-      const res = await h.get('/friend-links', 'admin').expect(200);
-      const rows = res.body.data as FriendLink[];
-      expect(rows.map((r) => r.name).sort()).toEqual(['a', 'b', 'hidden', 'legacy']);
-      expect(rows.find((r) => r.name === 'hidden')).toMatchObject({ isVisible: false, sortOrder: 0 });
-      expect(Object.keys(rows[0])).toEqual(expect.arrayContaining(['isVisible', 'sortOrder', 'createdAt', 'updatedAt']));
-    });
+    it.each<Who>(['editor', 'admin'])(
+      '%s：全部友链（含隐藏与历史数据）与完整字段，后台友链页的「显示」「排序」两列照常（此前 editor 只拿到公开视图）',
+      async (who) => {
+        const res = await h.get('/friend-links', who).expect(200);
+        const rows = res.body.data as FriendLink[];
+        expect(rows.map((r) => r.name).sort()).toEqual(['a', 'b', 'hidden', 'legacy']);
+        expect(rows.find((r) => r.name === 'hidden')).toMatchObject({ isVisible: false, sortOrder: 0 });
+        expect(rows.find((r) => r.name === 'b')).toMatchObject({ isVisible: true, sortOrder: 2 });
+        expect(Object.keys(rows[0])).toEqual(expect.arrayContaining(['isVisible', 'sortOrder', 'createdAt', 'updatedAt']));
+      },
+    );
 
     it('带了无效 token → 401（严格可选登录：管理员 token 过期不会静默降级成游客视图）', async () => {
       await h.http().get('/friend-links').set('Authorization', 'Bearer not-a-token').expect(401);
@@ -166,6 +170,13 @@ describe('友情链接接口 HTTP', () => {
       await h.post('/friend-links', 'plain', createForm()).expect(403);
       await h.post('/friend-links', 'editor', createForm()).expect(403);
       expect(await repo.count()).toBe(0);
+    });
+
+    it('editor 能读全量视图，但仍改不了、删不了（管理只有 admin）', async () => {
+      const link = await make('keep', { sortOrder: 3, isVisible: false });
+      await h.patch(`/friend-links/${link.id}`, 'editor', { isVisible: true }).expect(403);
+      await h.del(`/friend-links/${link.id}`, 'editor').expect(403);
+      expect(await repo.findOneByOrFail({ id: link.id })).toMatchObject({ isVisible: false, sortOrder: 3 });
     });
   });
 });

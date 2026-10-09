@@ -26,10 +26,10 @@ import { CurrentViewer, Viewer } from '../../common/authz/viewer';
 export class FriendLinkController {
   constructor(private readonly friendLinkService: FriendLinkService) {}
 
-  /** 后台友链页与公开读共用：管理员看全部，其他人只看「显示」的友链与公开字段（见 FriendLinkService.findAll） */
+  /** 后台友链页与公开读共用：后台角色看全部（只读；写接口仍只有 admin），其他人只看「显示」的友链与公开字段（见 FriendLinkService.findAll） */
   @Get()
   @Access('optional')
-  @ApiOperation({ summary: '获取友情链接列表（管理员看全部；其他人只看显示中的友链）' })
+  @ApiOperation({ summary: '获取友情链接列表（后台角色看全部；其他人只看显示中的友链）' })
   @ApiResponse({ status: 200, description: '获取成功' })
   @HttpCode(HttpStatus.OK)
   async findAll(@CurrentViewer() viewer: Viewer) {
