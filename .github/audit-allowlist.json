@@ -3,7 +3,7 @@
     {
       "id": "GHSA-36xv-jgw5-4q75",
       "package": "@nestjs/core",
-      "reason": "需要 Nest 11（第七节 #1）：@nestjs/core 10.4.22 已是 10.x 最后一版，修复在 11.1.18",
+      "reason": "需要 Nest 11（第七节 #1）：@nestjs/core 10.4.22 已是 10.x 最后一版，修复在 11.1.18。漏洞在 SseStream，后端没有任何 @Sse / text/event-stream 端点，当前不可达；新增 SSE 端点时必须重新评估",
       "expires": "2027-01-09"
     },
     {
@@ -75,7 +75,7 @@
     {
       "id": "GHSA-4mjr-xmp4-gh2g",
       "package": "qs",
-      "reason": "需要 Nest 11（第七节 #1，随之升到 express 5）：express 4.22.1 与 body-parser 1.20.4 用 ~6.14.0 锁住 qs 6.14.2（修复版 6.16.0）；express 4 解析查询串会用 qs，不能算不可达。提前处理只能像 multer 那样加 overrides，需要回归测试",
+      "reason": "需要 Nest 11（第七节 #1，随之升到 express 5）：express 4.22.1 与 body-parser 1.20.4 用 ~6.14.0 锁住 qs 6.14.2（修复版 6.16.0）。触发条件（comma:true 解析 / parse 后再 stringify）express 默认解析与后端代码都不走，保守按可达处理；提前处理只能像 multer 那样加 overrides，需要回归测试",
       "expires": "2027-01-09"
     },
     {
@@ -87,7 +87,7 @@
     {
       "id": "GHSA-x5fp-wj9c-mxmx",
       "package": "qs",
-      "reason": "需要 Nest 11（第七节 #1，随之升到 express 5）：express 4.22.1 与 body-parser 1.20.4 用 ~6.14.0 锁住 qs 6.14.2（修复版 6.16.0）；express 4 解析查询串会用 qs，不能算不可达。提前处理只能像 multer 那样加 overrides，需要回归测试",
+      "reason": "需要 Nest 11（第七节 #1，随之升到 express 5）：express 4.22.1 与 body-parser 1.20.4 用 ~6.14.0 锁住 qs 6.14.2（修复版 6.16.0）。触发条件（comma:true 解析 / parse 后再 stringify）express 默认解析与后端代码都不走，保守按可达处理；提前处理只能像 multer 那样加 overrides，需要回归测试",
       "expires": "2027-01-09"
     }
   ],
