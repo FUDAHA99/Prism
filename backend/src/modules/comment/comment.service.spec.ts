@@ -22,7 +22,7 @@ describe('CommentService.findApprovedByContent（公共接口出参白名单）'
   // 被评论的内容已发布：count 命中 1 行
   const contents = { count: jest.fn().mockResolvedValue(1) };
   const NOW = new Date('2026-10-09T08:00:00.000Z');
-  const svc = new CommentService(repo as any, contents as any, {} as any, { now: () => NOW });
+  const svc = new CommentService(repo as any, contents as any, {} as any, {} as any, { now: () => NOW });
 
   it('查询只 select 白名单列，不取 guestEmail / ipAddress', async () => {
     await svc.findApprovedByContent('c1');
@@ -54,7 +54,7 @@ describe('CommentService.findApprovedByContent（公共接口出参白名单）'
 
   it('内容不存在 / 未发布 / 已删除：返回空列表，不再查评论', async () => {
     const commentRepo = { find: jest.fn().mockResolvedValue(rows) };
-    const hidden = new CommentService(commentRepo as any, { count: jest.fn().mockResolvedValue(0) } as any, {} as any);
+    const hidden = new CommentService(commentRepo as any, { count: jest.fn().mockResolvedValue(0) } as any, {} as any, {} as any);
     expect(await hidden.findApprovedByContent('c1')).toEqual([]);
     expect(await hidden.findApprovedByContent('')).toEqual([]);
     expect(commentRepo.find).not.toHaveBeenCalled();
@@ -97,7 +97,7 @@ describe('CommentService.findAll（管理端分页参数）', () => {
   }
   async function run(query: Record<string, unknown>) {
     const { qb, repo } = fakeRepo();
-    const out = await new CommentService(repo as any, {} as any, {} as any).findAll(query as any);
+    const out = await new CommentService(repo as any, {} as any, {} as any, {} as any).findAll(query as any);
     return { skip: qb.expressionMap.skip, take: qb.expressionMap.take, meta: out.meta };
   }
 

@@ -5,6 +5,7 @@ import { Comment } from './entities/comment.entity';
 import { CreateCommentDto, COMMENT_GUEST_NAME_MAX } from './dto/create-comment.dto';
 import { QueryCommentDto } from './dto/query-comment.dto';
 import { Content, ContentStatus } from '../content/entities/content.entity';
+import { User } from '../user/entities/user.entity';
 import { SiteSettingService } from '../site-setting/site-setting.service';
 import { Viewer } from '../../common/authz/viewer';
 import { publishedDue } from '../../common/authz/publish-window';
@@ -81,6 +82,9 @@ function truncateChars(value: string, max: number): string {
   return chars.length <= max ? value : chars.slice(0, max).join('');
 }
 
+/** 游客昵称与注册用户重名时的提示（门户 CommentSection 原样显示后端的 message） */
+export const GUEST_NAME_TAKEN_MESSAGE = '这个昵称已被注册用户使用，请换一个昵称';
+
 /** 公开视图：逐字段构造，不出 guestEmail / ipAddress / userId（userId 只用来算 isRegistered） */
 function toPublicComment(c: Comment): PublicComment {
   return {
@@ -104,6 +108,8 @@ export class CommentService {
     @InjectRepository(Content)
     private readonly contentRepository: Repository<Content>,
     private readonly siteSettingService: SiteSettingService,
+    @InjectRepository(User)
+    private readonly userRepository: Repository<User>,
     @Optional() private readonly clock: Clock = SYSTEM_CLOCK,
   ) {}
 
@@ -195,6 +201,8 @@ export class CommentService {
    *   回复必须指向同一内容下已公开的评论，否则 400；
    * - userId 取登录身份；登录用户的显示名取账号昵称（没有则用户名），请求体里的 guestName / guestEmail 忽略 ——
    *   登录用户不能借「注册用户」的身份顶着别的名字发言，账号邮箱也不复制进评论表；
+   * - 游客昵称去首尾空白，空的按匿名（不存昵称）；与任何注册用户的用户名或昵称相同（按库的排序规则比较，
+   *   不区分大小写与重音）时 400 —— 游客不能顶着管理员的名字发言，门户另按 isRegistered 标出注册用户；
    * - ipAddress 取 req.ip；
    * - status 按 comment_audit：需要审核为 pending，否则直接 approved。
    *
@@ -222,14 +230,15 @@ export class CommentService {
     }
 
     const user = author.viewer;
+    const guestName = user
+      ? truncateChars(user.nickname?.trim() || user.username, COMMENT_GUEST_NAME_MAX)
+      : await this.guestNameOf(dto.guestName);
     const comment = this.commentRepository.create({
       contentId: dto.contentId,
       parentId: dto.parentId ?? undefined,
       body: dto.body,
       userId: user?.id ?? undefined,
-      guestName: user
-        ? truncateChars(user.nickname?.trim() || user.username, COMMENT_GUEST_NAME_MAX)
-        : dto.guestName ?? undefined,
+      guestName,
       guestEmail: user ? undefined : dto.guestEmail || undefined,
       ipAddress: author.ip ? truncateChars(author.ip, IP_COLUMN_MAX) : undefined,
       status: policy.requireAudit ? 'pending' : 'approved',
@@ -272,6 +281,23 @@ export class CommentService {
     if (ids.length > 0) {
       await this.commentRepository.delete(ids);
     }
+  }
+
+  /**
+   * 游客自填的昵称：去首尾空白，空的返回 undefined（匿名）；与注册用户（未删除）的用户名或昵称相同则 400。
+   * 比较在 SQL 里做，用列的排序规则（生产 utf8mb4_unicode_ci：'Admin'、'ádmin'、'admin ' 都等于 'admin'），
+   * 不在 JS 里用 ===（那样大小写、重音一变就绕过去了）。
+   */
+  private async guestNameOf(raw: string | null | undefined): Promise<string | undefined> {
+    const name = typeof raw === 'string' ? raw.trim() : '';
+    if (!name) return undefined;
+    const taken = await this.userRepository
+      .createQueryBuilder('user')
+      .select('user.id')
+      .where('(user.username = :name OR user.nickname = :name)', { name })
+      .getExists();
+    if (taken) throw new BadRequestException(GUEST_NAME_TAKEN_MESSAGE);
+    return truncateChars(name, COMMENT_GUEST_NAME_MAX);
   }
 
   /**

@@ -1,10 +1,11 @@
 import { Repository } from 'typeorm';
 import { CommentController } from './comment.controller';
-import { CommentService, PublicComment } from './comment.service';
+import { CommentService, GUEST_NAME_TAKEN_MESSAGE, PublicComment } from './comment.service';
 import { Comment } from './entities/comment.entity';
 import { COMMENT_BATCH_MAX } from './dto/comment-batch.dto';
 import { COMMENT_BODY_MAX } from './dto/create-comment.dto';
 import { Content, ContentStatus } from '../content/entities/content.entity';
+import { User } from '../user/entities/user.entity';
 import { SiteSetting } from '../site-setting/entities/site-setting.entity';
 import { SiteSettingService } from '../site-setting/site-setting.service';
 import { createHttpHarness, HttpHarness, Who } from '../../common/testing/http-harness';
@@ -177,6 +178,42 @@ describe('评论接口 HTTP', () => {
       const res = await h.post('/comments', 'anonymous', portalPayload({ contentId })).expect(404);
       expect(res.body.message).toBe('评论的内容不存在或未发布');
       expect(await comments.count()).toBe(0);
+    });
+  });
+
+  describe('POST /comments：游客昵称', () => {
+    it.each([
+      ['注册用户的用户名', 'admin'],
+      ['注册用户的昵称', 'editor-昵称'],
+      ['无角色注册用户的用户名（带首尾空白）', '  plain  '],
+    ])('与%s相同 → 400（中文原因），库里没有新评论', async (_label, guestName) => {
+      const res = await h.post('/comments', 'anonymous', portalPayload({ guestName })).expect(400);
+      expect(res.body.message).toBe(GUEST_NAME_TAKEN_MESSAGE);
+      expect(await comments.count()).toBe(0);
+    });
+
+    it('去首尾空白后保存；纯空白 / 不填按匿名（不存昵称），公开视图照常带 isRegistered = false', async () => {
+      await setSetting('comment_audit', 'false');
+      const named = await h.post('/comments', 'anonymous', portalPayload({ guestName: '  路人乙  ', body: 'a' })).expect(201);
+      expect(named.body.data).toMatchObject({ guestName: '路人乙', isRegistered: false });
+      const blank = await h.post('/comments', 'anonymous', portalPayload({ guestName: '   ', body: 'b' })).expect(201);
+      expect(blank.body.data).toMatchObject({ guestName: null, isRegistered: false });
+      const none = await h.post('/comments', 'anonymous', portalPayload({ guestName: undefined, body: 'c' })).expect(201);
+      expect(none.body.data).toMatchObject({ guestName: null, isRegistered: false });
+      expect((await comments.find({ order: { body: 'ASC' } })).map((c) => c.guestName)).toEqual(['路人乙', null, null]);
+      const list = await h.get(`/comments/public?contentId=${contentIds.published}`, 'anonymous').expect(200);
+      expect(list.body.data.every((c: PublicComment) => c.isRegistered === false)).toBe(true);
+    });
+
+    it('已删除（软删除）账号的名字不再占用；登录用户不受这条限制（显示名取账号本身）', async () => {
+      const users = h.ds.getRepository(User);
+      const gone = await users.save({ username: 'gone_user', email: 'gone@cms.test', passwordHash: 'x', nickname: '已注销' } as Partial<User>);
+      await h.post('/comments', 'anonymous', portalPayload({ guestName: 'gone_user' })).expect(400);
+      await users.softDelete(gone.id);
+      await h.post('/comments', 'anonymous', portalPayload({ guestName: 'gone_user' })).expect(201);
+
+      const res = await h.post('/comments', 'editor', portalPayload({ guestName: 'admin' })).expect(201);
+      expect(res.body.data).toMatchObject({ guestName: 'editor-昵称', isRegistered: true });
     });
   });
 
