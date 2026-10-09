@@ -14,6 +14,8 @@ import {
   defaultRoleIds,
   emailProblem,
   normalizeUsername,
+  registrationNotice,
+  registrationStateFrom,
   roleSelectionNotice,
   usernameProblem,
   type CreateUserField,
@@ -236,5 +238,54 @@ describe('createUserErrorField（后端的提示显示在哪个输入框下）',
     expect(createUserErrorField('服务器出错，请稍后重试')).toBeUndefined()
     expect(createUserErrorField('')).toBeUndefined()
     expect(createUserErrorField(undefined)).toBeUndefined()
+  })
+})
+
+/**
+ * 1-F-3 复审 low：新建用户弹窗此前写死「公开注册默认关闭」。默认值只对新装生效，从旧版本升级上来的站点
+ * enable_register 仍是 'true'，这句话会让管理员误以为注册已经关了。现在按系统配置里的实际值说。
+ */
+describe('新建用户弹窗的注册状态提示', () => {
+  const setting = (key: string, value: string) => ({ key, value })
+
+  it("与后端 registration-policy.ts 同一条规则：键是 enable_register，只有恰好是 'true' 才算开放", () => {
+    const policy = backendSource('modules/auth/registration-policy.ts')
+    expect(policy).toContain("export const REGISTER_SETTING_KEY = 'enable_register';")
+    expect(policy).toMatch(/values\.get\(REGISTER_SETTING_KEY\) === 'true'/)
+  })
+
+  it.each<[string, Array<{ key: string; value: string }> | undefined, string]>([
+    ['还没读到 / 读取失败', undefined, 'unknown'],
+    ["'true'", [setting('site_name', 'x'), setting('enable_register', 'true')], 'open'],
+    ["'false'", [setting('enable_register', 'false')], 'closed'],
+    ["'TRUE'（后端按关闭处理）", [setting('enable_register', 'TRUE')], 'closed'],
+    ["' true'", [setting('enable_register', ' true')], 'closed'],
+    ['缺这一项', [setting('site_name', 'x')], 'closed'],
+  ])('%s → %s', (_label, settings, state) => {
+    expect(registrationStateFrom(settings)).toBe(state)
+  })
+
+  it('开着：警告并说明到哪里关；关着：说明已关闭；不知道：中性说法。都不再写「默认关闭」', () => {
+    const open = registrationNotice('open')
+    expect(open.type).toBe('warning')
+    expect(open.text).toContain('公开注册目前是开启的')
+    expect(open.text).toContain('系统配置 → 功能设置')
+    const closed = registrationNotice('closed')
+    expect(closed).toMatchObject({ type: 'info' })
+    expect(closed.text).toContain('公开注册已关闭')
+    const unknown = registrationNotice('unknown')
+    expect(unknown).toMatchObject({ type: 'info' })
+    expect(unknown.text).toContain('以「系统配置 → 功能设置 → 允许注册」为准')
+    for (const notice of [open, closed, unknown]) {
+      expect(notice.text).not.toContain('默认关闭')
+      expect(notice.text).toContain('后台账号在这里开设')
+    }
+  })
+
+  it('弹窗接线：按 GET /site-settings 的结果显示，不再写死文案', () => {
+    const modal = readFileSync(fileURLToPath(new URL('../pages/User/CreateUserModal.tsx', import.meta.url)), 'utf8')
+    expect(modal).toContain('registrationNotice(registrationStateFrom(settings))')
+    expect(modal).toContain("queryKey: ['site-settings']")
+    expect(modal).not.toContain('默认关闭')
   })
 })

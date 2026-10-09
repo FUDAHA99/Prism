@@ -1,6 +1,7 @@
 import React from 'react'
 import { Alert, App, Form, Input, Modal, Select, Switch, Typography } from 'antd'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { getSiteSettings } from '../../api/siteSetting'
 import { assignRoles, createUser } from '../../api/user'
 import { actionErrorMessage, errorMessage } from '../../api/errors'
 import type { Role, User } from '../../types'
@@ -13,6 +14,8 @@ import {
   createUserErrorField,
   defaultRoleIds,
   emailProblem,
+  registrationNotice,
+  registrationStateFrom,
   roleSelectionNotice,
   usernameProblem,
   type CreateUserFormValues,
@@ -72,7 +75,7 @@ function RoleField({ options, rolesFailed }: { options: Role[]; rolesFailed: boo
 /**
  * 后台「用户管理 → 新建用户」（仅 admin：整个用户管理页只对 admin 开放）。
  *
- * 公开注册默认关闭后，后台账号只能从这里开设。分两步：POST /users 建账号，再 POST /users/:id/assign-roles 分配角色
+ * 公开注册关闭时，后台账号只能从这里开设（顶部提示按系统配置里注册开关的实际值说，见 registrationNotice）。分两步：POST /users 建账号，再 POST /users/:id/assign-roles 分配角色
  * （后端新建接口不收角色）。第二步失败时账号已经建好：关闭弹窗、刷新列表，并说明要在「编辑」里补角色 ——
  * 不能停在弹窗里让人重试，再提交一次只会得到「该用户名已被使用」。
  * 后端拒绝新建时，认得出字段的提示（如 409「该邮箱已被注册」）显示在对应输入框下，其余整体提示。
@@ -82,6 +85,10 @@ export default function CreateUserModal({ open, roles, rolesFailed, onClose }: C
   const queryClient = useQueryClient()
   const [form] = Form.useForm<CreateUserFormValues>()
   const options = assignableRoles(roles)
+  // 与「系统配置」页同一个查询（admin 才进得了用户管理，也就读得了系统配置）；打开弹窗时才读。
+  // 读取失败只是提示改用中性说法，不影响新建
+  const { data: settings } = useQuery({ queryKey: ['site-settings'], queryFn: getSiteSettings, enabled: open })
+  const notice = registrationNotice(registrationStateFrom(settings))
 
   const mutation = useMutation({
     mutationFn: async (values: CreateUserFormValues): Promise<CreateResult> => {
@@ -146,12 +153,7 @@ export default function CreateUserModal({ open, roles, rolesFailed, onClose }: C
       width={520}
       destroyOnHidden
     >
-      <Alert
-        type="info"
-        showIcon
-        style={{ margin: '16px 0' }}
-        message="公开注册默认关闭，后台账号在这里开设。建好后把邮箱和初始密码告诉本人，提醒其登录后在「个人设置」里改密码。"
-      />
+      <Alert type={notice.type} showIcon style={{ margin: '16px 0' }} message={notice.text} />
       <Form
         form={form}
         layout="vertical"

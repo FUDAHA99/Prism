@@ -1,5 +1,5 @@
 import type { CreateUserData } from '../api/user'
-import type { Role } from '../types'
+import type { Role, SiteSetting } from '../types'
 import { ADMIN_ROLE, EDITOR_ROLE, hasBackofficeAccess } from './access'
 import { ASCII_EMAIL_MESSAGE, ASCII_EMAIL_PATTERN } from './email'
 
@@ -130,4 +130,37 @@ export function createUserErrorField(message: string | undefined | null): Create
   if (/^密码/.test(text)) return 'password'
   if (/^isActive\b/.test(text)) return 'isActive'
   return undefined
+}
+
+/** 公开注册的当前状态：读自系统配置 enable_register；还没读到或读取失败时为 unknown */
+export type RegistrationState = 'open' | 'closed' | 'unknown'
+
+/** 与后端 registration-policy.ts 同一条规则：只有恰好是 'true' 才开放，缺这一项或其他写法都算关闭 */
+export function registrationStateFrom(settings: ReadonlyArray<Pick<SiteSetting, 'key' | 'value'>> | undefined): RegistrationState {
+  if (!settings) return 'unknown'
+  return settings.find((item) => item.key === 'enable_register')?.value === 'true' ? 'open' : 'closed'
+}
+
+const HAND_OVER = '建好后把邮箱和初始密码告诉本人，提醒其登录后在「个人设置」里改密码。'
+
+/**
+ * 新建用户弹窗顶部的提示。此前写死「公开注册默认关闭」，但默认值只对新装生效：从旧版本升级上来的站点
+ * enable_register 仍是 'true'（docs/deploy.md 5.3 ⑥），这句话会让管理员误以为注册已经关了。
+ * 现在按系统配置里的实际值说；还没读到时用中性的说法。
+ */
+export function registrationNotice(state: RegistrationState): { type: 'info' | 'warning'; text: string } {
+  switch (state) {
+    case 'open':
+      return {
+        type: 'warning',
+        text: `公开注册目前是开启的，任何人都能自助注册账号；不需要时到「系统配置 → 功能设置」关闭「允许注册」。后台账号在这里开设，${HAND_OVER}`,
+      }
+    case 'closed':
+      return { type: 'info', text: `公开注册已关闭，后台账号在这里开设。${HAND_OVER}` }
+    default:
+      return {
+        type: 'info',
+        text: `是否开放公开注册以「系统配置 → 功能设置 → 允许注册」为准；后台账号在这里开设。${HAND_OVER}`,
+      }
+  }
 }

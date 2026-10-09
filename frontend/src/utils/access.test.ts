@@ -235,7 +235,8 @@ const PAGE_RESOURCES: Record<string, string[]> = {
   '/novels': ['/novels'],
   '/comics': ['/comics'],
   '/notices': ['/notices'],
-  '/users': ['/users'],
+  // 新建用户弹窗按系统配置里的注册开关显示提示（GET /site-settings，admin）
+  '/users': ['/users', '/site-settings'],
   '/roles': ['/roles'],
   '/audit-logs': ['/audit-logs'],
   '/site-settings': ['/site-settings'],
