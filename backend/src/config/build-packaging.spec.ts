@@ -74,3 +74,15 @@ describe('backend 构建配置：生产产物不含测试文件', () => {
     expect(ci).toMatch(/working-directory: \$\{\{ matrix\.project \}\}\n\s+run: npm run build/);
   });
 });
+
+describe('原生依赖与镜像基础版本的匹配（批次 2 / 3A 复审）', () => {
+  it('镜像仍是 node:20 时，better-sqlite3 必须精确锁定在 12.9.0（12.10.0 起没有 Node 20 预编译包）', () => {
+    // CI 跑在带编译工具链的 ubuntu 上，改回 ^ 并升到 12.10+ 照样变绿；要到服务器 docker build（alpine 无 python）
+    // 才失败。原因与解除条件见 docs/dev-guide.md「better-sqlite3 锁定在 12.9.0」：升到 Node 22 后再放开
+    const dockerfile = read('Dockerfile');
+    const pkg = JSON.parse(read('package.json')) as { dependencies: Record<string, string> };
+    if (/^FROM node:20\b/m.test(dockerfile)) {
+      expect(pkg.dependencies['better-sqlite3']).toBe('12.9.0');
+    }
+  });
+});
