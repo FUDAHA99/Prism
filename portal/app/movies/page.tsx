@@ -3,6 +3,7 @@
 import Link from 'next/link'
 import type { Metadata } from 'next'
 import { getMovies } from '@/lib/api'
+import { parsePageParam } from '@/lib/page-param'
 import PosterCard from '@/components/PosterCard'
 import Pagination from '@/components/Pagination'
 import type { MovieType } from '@/lib/types'
@@ -30,7 +31,7 @@ const TYPE_TABS: { key: MovieType | 'all'; label: string }[] = [
 
 export default async function MoviesPage({ searchParams }: PageProps) {
   // 查询串来自地址栏，先收成后端认的值：后端对非法 page / year / 类型返回 400，原样透传会让整页显示「加载失败」
-  const page = Math.max(1, parseInt(searchParams.page || '1', 10) || 1)
+  const page = parsePageParam(searchParams.page)
   const movieType = TYPE_TABS.some((t) => t.key !== 'all' && t.key === searchParams.type)
     ? (searchParams.type as MovieType)
     : undefined
