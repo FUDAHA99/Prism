@@ -3,6 +3,14 @@
 import { useEffect, useRef, useState } from 'react'
 import { safeExternalHref, safeMediaSrc } from '@/lib/safe-url'
 
+/** MediaError.code → 提示文字 */
+const NATIVE_ERROR_TEXT: Record<number, string> = {
+  1: '已中止',
+  2: '网络错误',
+  3: '解码失败',
+  4: '格式不支持或地址无法访问',
+}
+
 interface Props {
   src: string
   poster?: string | null
@@ -68,6 +76,15 @@ export default function HlsPlayer({
       }
     }
 
+    // 原生播放（Safari，以及 canPlayType 报支持 HLS 的新版 Chromium）失败时 <video> 只触发 error 事件：
+    // 不监听的话会一直停在「加载中…」，外部播放器链接也出不来。hls.js 路径只认它上报的致命错误（见下方 Hls.Events.ERROR），不挂这个监听
+    const onNativeError = () => {
+      if (cancelled) return
+      const code = video.error?.code ?? 0
+      setError(`播放失败: ${NATIVE_ERROR_TEXT[code] ?? '未知错误'}`)
+      setLoading(false)
+    }
+
     video.addEventListener('canplay', onCanPlay)
     video.addEventListener('timeupdate', handleTimeUpdate)
 
@@ -75,6 +92,7 @@ export default function HlsPlayer({
       cancelled = true
       video.removeEventListener('canplay', onCanPlay)
       video.removeEventListener('timeupdate', handleTimeUpdate)
+      video.removeEventListener('error', onNativeError)
       if (hls) { try { hls.destroy() } catch {} }
     }
 
@@ -103,6 +121,7 @@ export default function HlsPlayer({
       })
     } else {
       // 原生支持
+      video.addEventListener('error', onNativeError)
       video.src = url
       if (autoPlay) video.play().catch(() => {})
     }
