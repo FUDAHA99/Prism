@@ -119,6 +119,29 @@ describe('POST /auth/register：注册开关 enable_register（默认关闭）',
     await expectClosed();
   });
 
+  it('开放时口令与后台新建用户、本人改密同一套策略（字母 + 数字、8 位起、不超过 72 字节），提示是中文', async () => {
+    await setRegister('true');
+    try {
+      // 此前注册另要大写字母与特殊字符：管理员能设的这种口令注册时被拒
+      const ok = await register({ ...body(), password: 'staff2026x' }).expect(201);
+      expect(ok.body.data.tokens.accessToken).toEqual(expect.any(String));
+      const cases: Array<[string, string]> = [
+        ['abcdefgh', '密码必须包含数字'],
+        ['12345678', '密码必须包含字母'],
+        ['ab1', '密码长度不能少于 8 位'],
+        ['a1'.repeat(36) + 'x', '密码过长（不能超过 72 字节，约 72 个英文字符或 24 个汉字）'],
+      ];
+      for (const [password, message] of cases) {
+        const before = await users.count();
+        const res = await register({ ...body(), password }).expect(400);
+        expect({ password, message: res.body.message }).toEqual({ password, message });
+        expect(await users.count()).toBe(before);
+      }
+    } finally {
+      await setRegister('false');
+    }
+  });
+
   it('已有安装的值不被启动时的默认值覆盖：库里已是 true 时 initDefaults 之后仍是 true；缺这一行才补，补的是 false', async () => {
     const service = h.moduleRef.get(SiteSettingService);
     await setRegister('true');

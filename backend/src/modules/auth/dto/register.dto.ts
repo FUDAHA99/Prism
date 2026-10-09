@@ -2,6 +2,7 @@ import { IsString, MinLength, MaxLength, Matches } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import { IsAccountEmail } from './account-email.decorator';
+import { IsAccountPassword, PASSWORD_MAX_BYTES, PASSWORD_MIN_LENGTH } from './password-policy';
 import { nicknameCreateInput } from '../../user/display-name';
 
 export class RegisterDto {
@@ -29,19 +30,17 @@ export class RegisterDto {
   @IsAccountEmail()
   email: string;
 
+  /**
+   * 与本人改密、后台新建用户同一套口令策略（见 password-policy.ts）。此前注册另有一套更早的规则（大小写字母、
+   * 数字、特殊字符各至少一个，最长 50 个字符）：管理员能设的口令（如 Staff2026x）注册时被拒，注册用户之后又能经
+   * 改密换成按通用策略更弱的口令 —— 两套规则只会让人困惑，不增加安全性。
+   */
   @ApiProperty({
     example: 'Password123!',
-    description: '用户密码',
+    description: `密码：至少 ${PASSWORD_MIN_LENGTH} 位，同时包含字母和数字，不超过 ${PASSWORD_MAX_BYTES} 字节`,
     required: true,
-    minLength: 8,
-    maxLength: 50,
   })
-  @IsString({ message: '密码必须是字符串' })
-  @MinLength(8, { message: '密码长度不能少于8个字符' })
-  @MaxLength(50, { message: '密码长度不能超过50个字符' })
-  @Matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]/, {
-    message: '密码必须包含至少一个大写字母、一个小写字母、一个数字和一个特殊字符',
-  })
+  @IsAccountPassword('密码')
   password: string;
 
   /** 与后台新建用户同一条规则：先规范化再校验；不能与其他账号的用户名或昵称相同（409，见 user/display-name.ts） */

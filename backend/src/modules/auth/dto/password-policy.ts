@@ -1,10 +1,9 @@
 import { IsByteLength, IsString, Matches, MinLength } from 'class-validator';
 
 /**
- * 账号口令策略 —— 唯一来源。本人改密（ChangePasswordDto.newPassword）与后台新建用户（CreateUserDto.password）
- * 都用 IsAccountPassword；后台前端的同一套预检（frontend/src/utils/password.ts）由 password.test.ts 读取本文件逐字比对。
- *
- * 自助注册（RegisterDto）另有一套更早的规则，且默认关闭，不在此列。
+ * 账号口令策略 —— 唯一来源。本人改密（ChangePasswordDto.newPassword）、后台新建用户（CreateUserDto.password）
+ * 与自助注册（RegisterDto.password）都用 IsAccountPassword；后台前端的同一套预检（frontend/src/utils/password.ts）
+ * 由 password.test.ts 读取本文件逐字比对。
  */
 
 /** bcrypt 只取口令的前 72 字节，更长的部分被静默忽略；超过即拒绝，免得用户以为长口令更安全 */

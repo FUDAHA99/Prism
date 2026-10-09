@@ -2,10 +2,11 @@ import { ArgumentMetadata, BadRequestException, ValidationPipe } from '@nestjs/c
 import { globalValidationPipeOptions } from '../../../common/pipes/global-validation';
 import { CreateUserDto } from '../../user/dto/create-user.dto';
 import { ChangePasswordDto } from './change-password.dto';
+import { RegisterDto } from './register.dto';
 import { passwordPolicyMessages } from './password-policy';
 
 /**
- * 口令策略只有一份（password-policy.ts）：本人改密与后台新建用户经全局 ValidationPipe 得到同样的裁决，
+ * 口令策略只有一份（password-policy.ts）：本人改密、后台新建用户与自助注册经全局 ValidationPipe 得到同样的裁决，
  * 提示只差字段名（「新密码」/「密码」）。改密的提示文案与抽出共用策略之前逐字相同。
  */
 
@@ -68,4 +69,30 @@ describe('口令策略（password-policy.ts）', () => {
       expect(created).toBe(changed === null ? null : changed.replace(/^新密码/, '密码'));
     },
   );
+
+  /**
+   * 自助注册此前另有一套规则（大小写字母、数字、特殊字符各至少一个，最长 50 个字符）：管理员能设的口令注册时被拒，
+   * 注册用户之后又能经改密换成按通用策略更弱的口令。现在与新建用户逐条相同。
+   */
+  it.each(SAMPLES.map((value) => [JSON.stringify(value) ?? 'undefined', value]))(
+    '%s：自助注册与后台新建用户裁决、提示逐字相同',
+    async (_label, value) => {
+      const registered = await firstMessage(RegisterDto, {
+        username: 'staff',
+        email: 'staff@cms.test',
+        password: value,
+        nickname: '某位新人',
+      });
+      const created = await firstMessage(CreateUserDto, { username: 'staff', email: 'staff@cms.test', password: value });
+      expect(registered).toBe(created);
+    },
+  );
+
+  it('此前注册才收、通用策略之外的写法不再特殊：只有字母 + 数字的口令可以注册，51–72 字节的长口令也可以', async () => {
+    const register = (password: string) =>
+      firstMessage(RegisterDto, { username: 'staff', email: 'staff@cms.test', password, nickname: '某位新人' });
+    expect(await register('Staff2026x')).toBeNull();
+    expect(await register('a1'.repeat(30))).toBeNull();
+    expect(await register('Abcdefg!')).toBe('密码必须包含数字');
+  });
 });
