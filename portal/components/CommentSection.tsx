@@ -13,11 +13,30 @@ interface Props {
 const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:3001'
 
-/** 显示用昵称：游客名 → 注册用户（暂未带 user 关系，先回退到"用户"） → 匿名 */
+/**
+ * 显示用昵称：注册用户的 guestName 由后端取账号昵称 / 用户名，游客的是自己填的（去空白后为空按匿名）。
+ * 旧数据里可能是纯空白，这里也按没填处理。
+ */
 function displayName(c: Pick<PublicComment, 'guestName' | 'isRegistered'>): string {
-  if (c.guestName) return c.guestName
-  if (c.isRegistered) return '注册用户'
-  return '匿名'
+  const name = c.guestName?.trim()
+  if (name) return name
+  return c.isRegistered ? '用户' : '匿名'
+}
+
+/**
+ * 昵称旁的身份标识。游客可以随便填昵称（后端只拦与注册用户重名的），所以昵称本身不能证明身份，
+ * 以后端按 userId 推导的 isRegistered 为准。
+ */
+function IdentityBadge({ isRegistered }: Pick<PublicComment, 'isRegistered'>) {
+  return isRegistered ? (
+    <span className="ml-1.5 align-middle text-[10px] font-normal px-1.5 py-0.5 rounded bg-brand-50 text-brand-600">
+      注册用户
+    </span>
+  ) : (
+    <span className="ml-1.5 align-middle text-[10px] font-normal px-1.5 py-0.5 rounded bg-gray-100 text-gray-500">
+      游客
+    </span>
+  )
 }
 
 export default function CommentSection({ contentId, enabled, needAudit }: Props) {
@@ -137,7 +156,10 @@ export default function CommentSection({ contentId, enabled, needAudit }: Props)
               className="border-l-2 border-brand-500 bg-gray-50 px-4 py-3 rounded-r"
             >
               <div className="flex items-center justify-between mb-1">
-                <span className="font-medium text-gray-800">{displayName(c)}</span>
+                <span className="font-medium text-gray-800">
+                  {displayName(c)}
+                  <IdentityBadge isRegistered={c.isRegistered} />
+                </span>
                 <time className="text-xs text-gray-500">
                   {dayjs(c.createdAt).format('YYYY-MM-DD HH:mm')}
                 </time>
@@ -152,6 +174,7 @@ export default function CommentSection({ contentId, enabled, needAudit }: Props)
                       <div className="flex items-center justify-between mb-0.5">
                         <span className="font-medium text-gray-700">
                           ↪ {displayName(child)}
+                          <IdentityBadge isRegistered={child.isRegistered} />
                         </span>
                         <time className="text-xs text-gray-400">
                           {dayjs(child.createdAt).format('MM-DD HH:mm')}

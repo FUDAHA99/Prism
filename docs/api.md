@@ -366,7 +366,7 @@
 
 - 站点配置 `enable_comment` 不是 `true` 时 403「评论功能已关闭」；
 - `comment_audit` 为 `false` 时评论直接 `approved`（立即公开），否则为 `pending`（审核后公开）；
-- 登录用户发评论：显示名取账号昵称（没有则用户名），请求体里的 `guestName` / `guestEmail` 被忽略；公开视图的 `isRegistered` 标明是否注册用户发表。
+- 登录用户发评论：显示名取账号昵称（没有则用户名），请求体里的 `guestName` / `guestEmail` 被忽略；公开视图的 `isRegistered` 标明是否注册用户发表（门户据此在昵称旁显示「注册用户」或「游客」；昵称本身不能证明身份）。
 
 返回与 5.1 相同形状的单条评论；门户据返回的 `status` 提示「审核通过后公开」或直接刷新列表。
 
