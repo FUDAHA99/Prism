@@ -39,6 +39,9 @@ export function storedNicknameAsDisplayName(stored: string | null | undefined): 
  * 写库还会把它改成与管理员一模一样的规范写法。
  */
 export function isNicknameChange(stored: string | null | undefined, submitted: string | null): boolean {
+  // 清空昵称时以库里的原值为准：只含不可见字符的存量昵称规范化后是「没有昵称」，但门户评论按 trim 后的原值
+  // 显示（一个空白的作者名）。不当作变更的话，清空请求返回 200 却什么都不写，这个昵称就永远清不掉（复审 low）
+  if (submitted === null) return typeof stored === 'string' && stored.trim() !== '';
   return storedNicknameAsDisplayName(stored) !== submitted;
 }
 
