@@ -15,11 +15,11 @@ import {
   ApiOperation,
   ApiResponse,
   ApiBearerAuth,
-  ApiQuery,
 } from '@nestjs/swagger';
 import { TagService } from './tag.service';
 import { CreateTagDto } from './dto/create-tag.dto';
 import { UpdateTagDto } from './dto/update-tag.dto';
+import { QueryTagDto } from './dto/query-tag.dto';
 import { Access } from '../../common/authz/access.decorator';
 
 @ApiTags('标签管理')
@@ -30,11 +30,10 @@ export class TagController {
   @Get()
   @Access('public')
   @ApiOperation({ summary: '获取标签列表' })
-  @ApiQuery({ name: 'search', required: false, description: '搜索关键词' })
   @ApiResponse({ status: 200, description: '获取成功' })
   @HttpCode(HttpStatus.OK)
-  async findAll(@Query('search') search?: string) {
-    const tags = await this.tagService.findAll(search);
+  async findAll(@Query() query: QueryTagDto) {
+    const tags = await this.tagService.findAll(query.search);
     return tags;
   }
 

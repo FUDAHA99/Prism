@@ -7,17 +7,16 @@ import {
   Request,
   HttpCode,
   HttpStatus,
-  BadRequestException,
-  DefaultValuePipe,
-  ParseIntPipe,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { WatchHistoryService } from './watch-history.service';
 import { ReportProgressDto } from './dto/report-progress.dto';
-import { WatchContentType } from './entities/watch-history.entity';
+import { QueryRecentWatchDto, QueryWatchProgressDto } from './dto/query-watch-history.dto';
 import { Access } from '../../common/authz/access.decorator';
 
-const CONTENT_TYPES: WatchContentType[] = ['movie', 'novel', 'comic'];
+/** GET /watch-history/recent 的条数：缺省 10，夹到 1–50（避免 ?limit=100000 拖库） */
+const RECENT_DEFAULT_LIMIT = 10;
+const RECENT_MAX_LIMIT = 50;
 
 /**
  * 观看记录。三条接口都是「登录可用、游客也可用」。
@@ -42,13 +41,6 @@ export class WatchHistoryController {
     return req.user?.id;
   }
 
-  private assertContentType(value: string): WatchContentType {
-    if (!CONTENT_TYPES.includes(value as WatchContentType)) {
-      throw new BadRequestException('contentType 必须是 movie / novel / comic');
-    }
-    return value as WatchContentType;
-  }
-
   @Post('report')
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: '上报播放进度（登录用户与游客均可）' })
@@ -58,17 +50,12 @@ export class WatchHistoryController {
 
   @Get()
   @ApiOperation({ summary: '查询播放进度' })
-  async findProgress(
-    @Query('contentType') contentType: string,
-    @Query('contentId') contentId: string,
-    @Query('guestId') guestId: string,
-    @Request() req: any,
-  ) {
+  async findProgress(@Query() query: QueryWatchProgressDto, @Request() req: any) {
     const record = await this.service.findProgress(
-      this.assertContentType(contentType),
-      contentId,
+      query.contentType,
+      query.contentId,
       this.userIdOf(req),
-      guestId,
+      query.guestId,
     );
 
     if (!record) return null;
@@ -85,13 +72,8 @@ export class WatchHistoryController {
 
   @Get('recent')
   @ApiOperation({ summary: '最近观看列表' })
-  async findRecent(
-    @Query('limit', new DefaultValuePipe(10), ParseIntPipe) limit: number,
-    @Query('guestId') guestId: string,
-    @Request() req: any,
-  ) {
-    // 夹紧上限，避免 ?limit=100000 拖库
-    const safeLimit = Math.min(Math.max(limit, 1), 50);
-    return this.service.findRecent(this.userIdOf(req), guestId, safeLimit);
+  async findRecent(@Query() query: QueryRecentWatchDto, @Request() req: any) {
+    const safeLimit = Math.min(Math.max(query.limit ?? RECENT_DEFAULT_LIMIT, 1), RECENT_MAX_LIMIT);
+    return this.service.findRecent(this.userIdOf(req), query.guestId, safeLimit);
   }
 }

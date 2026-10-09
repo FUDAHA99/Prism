@@ -281,6 +281,27 @@ describe('评论接口 HTTP', () => {
       expect(JSON.stringify(res.body)).not.toMatch(/a@b\.c|9\.9\.9\.9/);
     });
 
+    it('查询参数：大写的 contentId 转小写照常命中；不传 / 空串返回空列表（与此前一致）', async () => {
+      await comments.save({ contentId: contentIds.published, body: 'ok', status: 'approved' });
+      const upper = await h.get(`/comments/public?contentId=${contentIds.published.toUpperCase()}`, 'anonymous').expect(200);
+      expect(upper.body.data.map((c: PublicComment) => c.body)).toEqual(['ok']);
+      expect((await h.get('/comments/public', 'anonymous').expect(200)).body.data).toEqual([]);
+      expect((await h.get('/comments/public?contentId=', 'anonymous').expect(200)).body.data).toEqual([]);
+    });
+
+    it.each([
+      ['数组（重复参数）', (id: string) => `contentId=${id}&contentId=${id}`],
+      ['数组（contentId[]）', (id: string) => `contentId[]=${id}`],
+      ['对象（contentId[id]）', () => 'contentId[id]=1'],
+      ['对象（contentId[$ne]）', () => 'contentId[$ne]=x'],
+      ['不是 UUID', () => 'contentId=abc'],
+      ['多余参数', (id: string) => `contentId=${id}&status=pending`],
+    ])('查询参数 %s → 400（此前原样进到 TypeORM where）', async (_label, qs) => {
+      await comments.save({ contentId: contentIds.published, body: 'ok', status: 'approved' });
+      const res = await h.get(`/comments/public?${qs(contentIds.published)}`, 'anonymous').expect(400);
+      expect(JSON.stringify(res.body)).not.toContain('"ok"');
+    });
+
     it.each(['draft', 'deleted'] as const)('%s 内容下的已审核评论不再公开', async (key) => {
       await comments.save({ contentId: contentIds[key], body: 'hidden', status: 'approved' });
       const res = await h.get(`/comments/public?contentId=${contentIds[key]}`, 'anonymous').expect(200);

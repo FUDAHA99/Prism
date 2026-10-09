@@ -86,6 +86,16 @@ describe('标签接口 HTTP', () => {
     }
   });
 
+  it('搜索参数：只认一个字符串，数组 / 对象 / 超长 / 多余参数 → 400（此前原样拼进 LIKE）', async () => {
+    await make('vue');
+    await make('react');
+    const ok = await h.get('/tags?search=vue', 'anonymous').expect(200);
+    expect(ok.body.data.map((t: Tag) => t.slug)).toEqual(['vue']);
+    for (const qs of ['search=a&search=b', 'search[x]=1', `search=${'x'.repeat(101)}`, 'page=1']) {
+      await h.get(`/tags?${qs}`, 'anonymous').expect(400);
+    }
+  });
+
   it('游客 401、无角色用户 403；门户读标签列表照常', async () => {
     await h.post('/tags', 'anonymous', { name: 'a', slug: 'a' }).expect(401);
     await h.post('/tags', 'plain', { name: 'a', slug: 'a' }).expect(403);

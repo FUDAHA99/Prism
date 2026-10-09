@@ -10,9 +10,9 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
-import { ApiOperation, ApiQuery, ApiTags, ApiBearerAuth } from '@nestjs/swagger';
+import { ApiOperation, ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { AdvertisementService } from './advertisement.service';
-import { CreateAdvertisementDto, UpdateAdvertisementDto } from './dto/advertisement.dto';
+import { CreateAdvertisementDto, QueryAdvertisementDto, UpdateAdvertisementDto } from './dto/advertisement.dto';
 import { Access } from '../../common/authz/access.decorator';
 
 @ApiTags('广告管理')
@@ -24,9 +24,8 @@ export class AdvertisementController {
 
   @Get()
   @ApiOperation({ summary: '获取广告列表' })
-  @ApiQuery({ name: 'search', required: false })
-  async findAll(@Query('search') search?: string) {
-    return this.adService.findAll(search);
+  async findAll(@Query() query: QueryAdvertisementDto) {
+    return this.adService.findAll(query.search);
   }
 
   @Get(':id')

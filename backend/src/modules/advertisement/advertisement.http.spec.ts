@@ -130,6 +130,16 @@ describe('广告接口 HTTP', () => {
     }
   });
 
+  it('后台搜索：只认一个字符串，数组 / 对象 / 超长 → 400', async () => {
+    await make({ title: '首页横幅', code: 'banner' });
+    await make({ title: '侧栏', code: 'side' });
+    const ok = await h.get(`/advertisements?search=${encodeURIComponent('横幅')}`, 'admin').expect(200);
+    expect(ok.body.data.map((a: Advertisement) => a.title)).toEqual(['首页横幅']);
+    for (const qs of ['search=a&search=b', 'search[x]=1', `search=${'x'.repeat(101)}`]) {
+      await h.get(`/advertisements?${qs}`, 'admin').expect(400);
+    }
+  });
+
   it('仅 admin：editor 403、游客 401', async () => {
     await h.post('/advertisements', 'anonymous', form()).expect(401);
     await h.post('/advertisements', 'editor', form()).expect(403);

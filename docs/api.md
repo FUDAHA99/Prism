@@ -316,6 +316,8 @@
 ### 4.1 获取标签列表
 `GET /tags?search=关键词`
 
+`search` 可选，只接受一个字符串（≤ 100 字符）；重复参数、`search[x]=` 这类数组 / 对象写法与其他参数一律 `400`。
+
 ### 4.2 创建标签
 `POST /tags`  🔒 admin / editor
 ```json
@@ -341,6 +343,7 @@
 `GET /comments/public?contentId=uuid`  公开
 
 只返回**已发布且未删除**内容下 `approved` 的评论，按回复关系组成树；内容不存在、未发布或已删除时返回 `[]`。
+`contentId` 只接受一个 UUID（不区分大小写）；不传或为空串返回 `[]`；重复参数、`contentId[x]=` 这类数组 / 对象写法、不是 UUID 或带其他参数一律 `400`。
 每条只含 `id`、`contentId`、`parentId`、`guestName`、`body`、`status`、`createdAt`、`isRegistered`、`children`，
 不含邮箱、IP、用户 ID。
 
@@ -592,7 +595,7 @@
 
 🔒 全部需要 `admin` 角色
 
-`GET /advertisements?search=关键词` — 列表  
+`GET /advertisements?search=关键词` — 列表（`search` 只接受一个字符串，≤ 100 字符）  
 `POST /advertisements` — 创建  
 `PATCH /advertisements/:id` — 更新（字段同创建、都可省略）  
 `POST /advertisements/:id/toggle` — 切换启用状态  
@@ -996,6 +999,14 @@ javascript: / data: / vbscript: / file: 等其他协议不入库（影视同时�
 | 404 | 资源不存在 |
 | 409 | 数据冲突（如邮箱重复）|
 | 500 | 服务器内部错误 |
+
+---
+
+## 附：观看记录 `/watch-history`（可选登录，门户续播用）
+
+`POST /watch-history/report` — 上报进度（`contentType`、`contentId`、`episodeId`、`srcIdx`、`epIdx`、`progressSec`、`durationSec`、`guestId`）；`contentId` / `episodeId` 存为小写。
+`GET /watch-history?contentType=movie&contentId=uuid&guestId=xxx` — 某部作品的进度：`contentType` 必须是 movie / novel / comic，`contentId` 必填且是 UUID（不区分大小写），`guestId` 只接受一个字符串（≤ 64）；缺 `contentId` 或写成数组 / 对象一律 `400`（此前不带 `contentId` 会返回这个游客的第一条记录）。登录时按账号查，否则按 `guestId` 查。
+`GET /watch-history/recent?guestId=xxx&limit=10` — 最近观看，`limit` 为整数，缺省 10、夹到 1–50；`guestId` 规则同上。
 
 ---
 

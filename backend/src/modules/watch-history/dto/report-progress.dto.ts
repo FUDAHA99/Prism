@@ -8,7 +8,9 @@ import {
   MaxLength,
   Min,
 } from 'class-validator';
+import { Transform } from 'class-transformer';
 import type { WatchContentType } from '../entities/watch-history.entity';
+import { toLowerUuid } from '../../../common/utils/uuid-case';
 
 /**
  * 上报播放进度。
@@ -21,10 +23,13 @@ export class ReportProgressDto {
   @IsIn(['movie', 'novel', 'comic'])
   contentType: WatchContentType;
 
+  /** 存小写：GET /watch-history 按小写的 contentId 查（库里 TypeORM 生成的 ID 都是小写） */
+  @Transform(toLowerUuid)
   @IsUUID()
   contentId: string;
 
   @IsOptional()
+  @Transform(toLowerUuid)
   @IsUUID()
   episodeId?: string;
 

@@ -80,6 +80,8 @@ export class WatchHistoryService {
     userId?: string,
     guestId?: string,
   ): Promise<WatchHistory | null> {
+    // 条件里有 undefined 时 TypeORM 会直接忽略它，查到的就是这个用户 / 游客的第一条记录
+    if (typeof contentId !== 'string' || contentId === '') return null;
     if (userId) {
       return this.repo.findOne({ where: { userId, contentType, contentId } });
     }

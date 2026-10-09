@@ -17,12 +17,12 @@ import {
   ApiOperation,
   ApiResponse,
   ApiBearerAuth,
-  ApiQuery,
 } from '@nestjs/swagger';
 import { CommentService } from './comment.service';
 import { CreateCommentDto } from './dto/create-comment.dto';
 import { CommentBatchDto } from './dto/comment-batch.dto';
 import { QueryCommentDto } from './dto/query-comment.dto';
+import { QueryPublicCommentDto } from './dto/query-public-comment.dto';
 import { Access } from '../../common/authz/access.decorator';
 import { CurrentViewer, Viewer } from '../../common/authz/viewer';
 import { clientIp } from '../../common/utils/client-ip';
@@ -50,11 +50,10 @@ export class CommentController {
   @Get('public')
   @Access('public')
   @ApiOperation({ summary: '【公共】获取某文章已审核评论（前台用）' })
-  @ApiQuery({ name: 'contentId', required: true })
   @HttpCode(HttpStatus.OK)
-  async findPublicByContent(@Query('contentId') contentId: string) {
-    if (!contentId) return [];
-    return this.commentService.findApprovedByContent(contentId);
+  async findPublicByContent(@Query() query: QueryPublicCommentDto) {
+    if (!query.contentId) return [];
+    return this.commentService.findApprovedByContent(query.contentId);
   }
 
   @Get(':id')

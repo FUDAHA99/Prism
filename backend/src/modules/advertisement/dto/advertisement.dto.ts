@@ -116,3 +116,14 @@ export class UpdateAdvertisementDto extends AdvertisementOptionalFieldsDto {
   @MaxLength(100, { message: '广告位代码不能超过 100 个字符' })
   code?: string;
 }
+
+/** GET /advertisements（仅 admin，后台广告页搜索框）的查询参数：此前裸 @Query 字符串，数组 / 对象原样进 LIKE */
+export class QueryAdvertisementDto {
+  @ApiPropertyOptional({ description: '按标题或代码模糊搜索', maxLength: 100 })
+  @IsOptional()
+  // 取原值：全局隐式转换会把对象（?x[a]=1）转成字符串 "[object Object]" 放行，这里让非字符串都被 IsString 拒绝
+  @Transform(rawValue)
+  @IsString({ message: 'search 必须是字符串' })
+  @MaxLength(100)
+  search?: string;
+}
