@@ -23,6 +23,7 @@ import { clearChangePasswordFailures, revokeAllSessions } from '../auth/login-at
 import { ADMIN_ROLES } from '../../common/authz/access.decorator';
 import { userCacheKey } from './user-cache';
 import {
+  NICKNAME_CLEAR_CONFLICT_MESSAGE,
   NICKNAME_TAKEN_MESSAGE,
   USERNAME_TAKEN_AS_NICKNAME_MESSAGE,
   isDisplayNameTaken,
@@ -291,10 +292,16 @@ export class UserService {
     // 与库里的当前值比（不用上面 findOne 的 5 分钟缓存：缓存里的旧昵称会让没改的提交被当成改了）
     let nicknameChanged = false;
     if (updateUserDto.nickname !== undefined) {
-      const stored = await this.userRepository.findOne({ select: { id: true, nickname: true }, where: { id: user.id } });
+      const stored = await this.userRepository.findOne({
+        select: { id: true, username: true, nickname: true },
+        where: { id: user.id },
+      });
       nicknameChanged = isNicknameChange(stored?.nickname, updateUserDto.nickname);
-      if (nicknameChanged && typeof updateUserDto.nickname === 'string') {
-        await this.assertNameAvailable(updateUserDto.nickname, NICKNAME_TAKEN_MESSAGE, user.id);
+      if (nicknameChanged) {
+        // 清空时显示名回落为用户名（同一请求里改了用户名就是新用户名；否则取库里的当前值，同样不用缓存）
+        const username =
+          typeof updateUserDto.username === 'string' ? updateUserDto.username : stored?.username ?? user.username;
+        await this.assertNewDisplayNameAvailable(updateUserDto.nickname, username, user.id);
       }
     }
 
@@ -356,8 +363,8 @@ export class UserService {
 
     // 与后台编辑同一条判断：按规范化后的写法比，原样提交存量的非规范昵称不算改（不查重、不写库）
     const nicknameChanged = dto.nickname !== undefined && isNicknameChange(user.nickname, dto.nickname);
-    if (nicknameChanged && typeof dto.nickname === 'string') {
-      await this.assertNameAvailable(dto.nickname, NICKNAME_TAKEN_MESSAGE, user.id);
+    if (nicknameChanged) {
+      await this.assertNewDisplayNameAvailable(dto.nickname, user.username, user.id);
     }
 
     const patch: Partial<User> = {};
@@ -492,6 +499,22 @@ export class UserService {
     });
 
     return this.findOne(id);
+  }
+
+  /**
+   * 昵称改了之后的显示名查重（409）：改成新昵称时查新昵称；清空（null）时门户改显示用户名，查用户名 ——
+   * 清空同样是改显示名，此前只查字符串昵称，存量里「用户名 = 别人的昵称」的账号清空昵称就绕过了「一个名字只属于一个账号」
+   */
+  private async assertNewDisplayNameAvailable(
+    nickname: string | null | undefined,
+    username: string,
+    userId: string,
+  ): Promise<void> {
+    if (typeof nickname === 'string') {
+      await this.assertNameAvailable(nickname, NICKNAME_TAKEN_MESSAGE, userId);
+    } else {
+      await this.assertNameAvailable(username, NICKNAME_CLEAR_CONFLICT_MESSAGE, userId);
+    }
   }
 
   /** name 已被其他未删除账号用作用户名或昵称时 409（exceptUserId 为本人时自己的名字不算冲突） */

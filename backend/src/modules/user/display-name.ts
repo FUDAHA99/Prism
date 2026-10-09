@@ -72,6 +72,12 @@ export const NICKNAME_TAKEN_MESSAGE = '该昵称已被其他用户使用';
 export const USERNAME_TAKEN_AS_NICKNAME_MESSAGE = '该用户名已被其他用户用作昵称';
 
 /**
+ * 清空昵称时，回落显示的用户名已被其他账号用作昵称（或用户名）。清空也是改显示名：门户评论此后显示用户名，
+ * 不查的话，存量里「用户名 = 别人的昵称」的账号清空自己的昵称，就能以注册用户身份顶着别人的名字发评论
+ */
+export const NICKNAME_CLEAR_CONFLICT_MESSAGE = '清空昵称后会显示用户名，而该用户名已被其他用户用作昵称，请改用其他昵称';
+
+/**
  * DTO 里的昵称取请求体里的原始值：全局 ValidationPipe 开了 enableImplicitConversion，不这样做的话
  * 数字、对象会先被 String() 转成 '123'、'[object Object]' 再通过 IsString（与 rawValue 处理布尔同理）。
  */

@@ -2,7 +2,7 @@ import { Repository } from 'typeorm';
 import { UserController } from './user.controller';
 import { User } from './entities/user.entity';
 import { Role } from '../role/entities/role.entity';
-import { NICKNAME_TAKEN_MESSAGE, USERNAME_TAKEN_AS_NICKNAME_MESSAGE } from './display-name';
+import { NICKNAME_CLEAR_CONFLICT_MESSAGE, NICKNAME_TAKEN_MESSAGE, USERNAME_TAKEN_AS_NICKNAME_MESSAGE } from './display-name';
 import { AuthController } from '../auth/auth.controller';
 import { SiteSetting } from '../site-setting/entities/site-setting.entity';
 import { SiteSettingService } from '../site-setting/site-setting.service';
@@ -166,6 +166,36 @@ describe('显示名唯一：注册 / 后台新建 / 后台编辑', () => {
       await users.update(h.ids.plain, { nickname: 'plainx' });
       await h.patch(`/users/${h.ids.plain}`, 'admin', { username: 'plainx' }).expect(200);
       expect((await row(h.ids.plain)).username).toBe('plainx');
+    });
+
+    /**
+     * 1-F-3 复审 low：清空昵称也是改显示名 —— 门户评论此后显示用户名。此前只有提交字符串昵称才查重，
+     * 存量里「用户名 = 别人的昵称」的账号清空昵称，就能以注册用户身份顶着别人的名字发评论。
+     */
+    describe('清空昵称：回落显示的用户名也要查重', () => {
+      it('用户名已被其他账号用作昵称（存量数据）→ 409，null / 空串 / 纯空白 / 只有不可见字符都算清空，昵称不变', async () => {
+        await users.update(h.ids.editor, { nickname: 'plain' });
+        for (const nickname of [null, '', '   ', '​']) {
+          const res = await h.patch(`/users/${h.ids.plain}`, 'admin', { nickname, isActive: false }).expect(409);
+          expect(res.body.message).toBe(NICKNAME_CLEAR_CONFLICT_MESSAGE);
+        }
+        expect(await row(h.ids.plain)).toMatchObject({ nickname: 'plain-昵称', isActive: true });
+      });
+
+      it('同一请求把用户名改成不冲突的名字再清空 → 200（显示的是新用户名）', async () => {
+        await users.update(h.ids.editor, { nickname: 'plain' });
+        await h.patch(`/users/${h.ids.plain}`, 'admin', { username: 'plain_renamed', nickname: null }).expect(200);
+        expect(await row(h.ids.plain)).toMatchObject({ username: 'plain_renamed', nickname: null });
+      });
+
+      it('没有冲突 → 200 清空；本来就没有昵称时再提交空值不算改，存量冲突不挡住改启用状态', async () => {
+        await h.patch(`/users/${h.ids.plain}`, 'admin', { nickname: null }).expect(200);
+        expect((await row(h.ids.plain)).nickname).toBeNull();
+        await users.update(h.ids.editor, { nickname: 'plain' });
+        await h.patch(`/users/${h.ids.plain}`, 'admin', { nickname: '', isActive: false }).expect(200);
+        expect(await row(h.ids.plain)).toMatchObject({ nickname: null, isActive: false });
+        await users.update(h.ids.plain, { isActive: true });
+      });
     });
 
     /**

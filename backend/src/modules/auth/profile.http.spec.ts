@@ -4,7 +4,7 @@ import { AuthController } from './auth.controller';
 import { User } from '../user/entities/user.entity';
 import { UserService } from '../user/user.service';
 import { userCacheKey } from '../user/user-cache';
-import { NICKNAME_TAKEN_MESSAGE } from '../user/display-name';
+import { NICKNAME_CLEAR_CONFLICT_MESSAGE, NICKNAME_TAKEN_MESSAGE } from '../user/display-name';
 import { AuditLog } from '../audit/entities/audit-log.entity';
 import { SiteSetting } from '../site-setting/entities/site-setting.entity';
 import { SiteSettingService } from '../site-setting/site-setting.service';
@@ -179,6 +179,33 @@ describe('PATCH /auth/me（本人修改资料）', () => {
         expect(res.body.message).toBe(NICKNAME_TAKEN_MESSAGE);
       } finally {
         await users.update(h.ids.admin, { nickname: null } as Partial<User>);
+      }
+    });
+
+    /** 1-F-3 复审 low：清空昵称后门户显示用户名，清空也是改显示名 */
+    it('清空昵称时回落的用户名已被其他账号用作昵称 → 409（null / 空串 / 纯空白），昵称不变、不写审计；不冲突时照常清空', async () => {
+      // 存量数据：editor 的昵称就是 plain 的用户名（规则上线前写入的）
+      await users.update(h.ids.editor, { nickname: 'plain' });
+      try {
+        for (const nickname of [null, '', '   ']) {
+          const res = await patchMe('plain', { nickname }).expect(409);
+          expect(res.body.message).toBe(NICKNAME_CLEAR_CONFLICT_MESSAGE);
+        }
+        expect((await row(h.ids.plain)).nickname).toBe('plain-昵称');
+        expect(await audits.count()).toBe(0);
+        // 只改头像（不碰昵称）不受影响
+        await patchMe('plain', { avatarUrl: '/uploads/a.png' }).expect(200);
+      } finally {
+        await users.update(h.ids.editor, { nickname: 'editor-昵称' });
+      }
+      await patchMe('plain', { nickname: null }).expect(200);
+      expect((await row(h.ids.plain)).nickname).toBeNull();
+      // 已经没有昵称时再提交 null 不算改
+      await users.update(h.ids.editor, { nickname: 'plain' });
+      try {
+        await patchMe('plain', { nickname: null }).expect(200);
+      } finally {
+        await users.update(h.ids.editor, { nickname: 'editor-昵称' });
       }
     });
 
