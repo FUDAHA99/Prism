@@ -16,10 +16,7 @@
     "format": "prettier --write src/",
     "type-check": "tsc --noEmit",
     "test": "vitest",
-    "test:watch": "vitest watch",
-    "test:coverage": "vitest --coverage",
-    "test:e2e": "playwright test",
-    "test:e2e:ui": "playwright test --ui"
+    "test:watch": "vitest watch"
   },
   "dependencies": {
     "@ant-design/icons": "^5.2.0",
@@ -39,7 +36,6 @@
     "zustand": "^4.4.0"
   },
   "devDependencies": {
-    "@playwright/test": "^1.37.0",
     "@types/node": "^20.5.0",
     "@types/nprogress": "^0.2.1",
     "@types/react": "^18.2.15",
@@ -47,7 +43,6 @@
     "@typescript-eslint/eslint-plugin": "^6.0.0",
     "@typescript-eslint/parser": "^6.0.0",
     "@vitejs/plugin-react": "^4.0.3",
-    "@vitest/ui": "^0.34.0",
     "autoprefixer": "^10.4.14",
     "eslint": "^8.45.0",
     "eslint-config-prettier": "^9.0.0",
@@ -59,8 +54,6 @@
     "tailwindcss": "^3.3.3",
     "typescript": "^5.0.2",
     "vite": "^4.4.5",
-    "vite-plugin-compression": "^0.5.1",
-    "vite-plugin-pwa": "^0.16.0",
     "vitest": "^0.34.0"
   }
 }
