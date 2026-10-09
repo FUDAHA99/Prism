@@ -24,6 +24,8 @@ import {
 } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import dayjs from 'dayjs'
+import { dateRangePayload, toFormDateRange } from '../../utils/date-range'
+import type { OptionalDateRange } from '../../utils/date-range'
 import {
   getNotices,
   createNotice,
@@ -46,7 +48,7 @@ interface NoticeFormValues {
   content: string
   level: NoticeLevel
   isPinned: boolean
-  dateRange?: [dayjs.Dayjs, dayjs.Dayjs]
+  dateRange?: OptionalDateRange | null
 }
 
 const LEVEL_CONFIG: Record<NoticeLevel, { label: string; color: string; alertType: 'info' | 'success' | 'warning' | 'error' }> = {
@@ -126,36 +128,33 @@ export default function NoticePage() {
   const handleEdit = (notice: Notice) => {
     setModalMode('edit')
     setEditingNotice(notice)
+    form.resetFields()
     form.setFieldsValue({
       title: notice.title,
       content: notice.content,
       level: notice.level,
       isPinned: notice.isPinned,
-      dateRange:
-        notice.startDate && notice.endDate
-          ? [dayjs(notice.startDate), dayjs(notice.endDate)]
-          : undefined,
+      // 只有一端的有效期也原样回填（另一端留空），不再显示成「长期有效」
+      dateRange: toFormDateRange(notice.startDate, notice.endDate),
     })
     setModalVisible(true)
   }
 
-  const buildPayload = (values: NoticeFormValues): CreateNoticeData => ({
+  const buildPayload = (values: NoticeFormValues, original?: Notice | null): CreateNoticeData => ({
     title: values.title,
     content: values.content,
     level: values.level,
     isPinned: values.isPinned,
-    // 没选有效期时显式提交 null：后端据此清除已设的起止时间（undefined 在 JSON 里被丢掉，等于「不修改」）
-    startDate: values.dateRange?.[0]?.toISOString() ?? null,
-    endDate: values.dateRange?.[1]?.toISOString() ?? null,
+    // 清空的一端提交 null（后端据此清除）；编辑时有效期没改就不提交这两个字段（后端按「不修改」处理）
+    ...dateRangePayload(values.dateRange, original ?? undefined),
   })
 
   const handleSubmit = () => {
     form.validateFields().then((values) => {
-      const payload = buildPayload(values)
       if (modalMode === 'create') {
-        createMutation.mutate(payload)
+        createMutation.mutate(buildPayload(values))
       } else if (editingNotice) {
-        updateMutation.mutate({ id: editingNotice.id, dto: payload })
+        updateMutation.mutate({ id: editingNotice.id, dto: buildPayload(values, editingNotice) })
       }
     })
   }
@@ -327,8 +326,12 @@ export default function NoticePage() {
             <Switch checkedChildren="置顶" unCheckedChildren="不置顶" />
           </Form.Item>
 
-          <Form.Item name="dateRange" label="有效期（不填则长期有效）">
-            <RangePicker style={{ width: '100%' }} placeholder={['开始日期', '结束日期']} />
+          <Form.Item name="dateRange" label="有效期（不填则长期有效，可只填一端）">
+            <RangePicker
+              style={{ width: '100%' }}
+              placeholder={['开始日期', '结束日期']}
+              allowEmpty={[true, true]}
+            />
           </Form.Item>
         </Form>
       </Modal>

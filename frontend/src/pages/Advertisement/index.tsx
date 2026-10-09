@@ -25,6 +25,8 @@ import {
 } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import dayjs from 'dayjs'
+import { dateRangePayload, toFormDateRange } from '../../utils/date-range'
+import type { OptionalDateRange } from '../../utils/date-range'
 import {
   getAdvertisements,
   createAdvertisement,
@@ -50,7 +52,7 @@ interface AdFormValues {
   linkUrl?: string
   position?: string
   sortOrder?: number
-  dateRange?: [dayjs.Dayjs, dayjs.Dayjs]
+  dateRange?: OptionalDateRange | null
 }
 
 const AD_TYPE_LABELS: Record<AdType, string> = {
@@ -132,6 +134,7 @@ export default function AdvertisementPage() {
   const handleEdit = (ad: Advertisement) => {
     setModalMode('edit')
     setEditingAd(ad)
+    form.resetFields()
     form.setFieldsValue({
       title: ad.title,
       code: ad.code,
@@ -140,15 +143,13 @@ export default function AdvertisementPage() {
       linkUrl: ad.linkUrl,
       position: ad.position,
       sortOrder: ad.sortOrder,
-      dateRange:
-        ad.startDate && ad.endDate
-          ? [dayjs(ad.startDate), dayjs(ad.endDate)]
-          : undefined,
+      // 只有一端的有效期也原样回填（另一端留空），不再显示成「长期有效」
+      dateRange: toFormDateRange(ad.startDate, ad.endDate),
     })
     setModalVisible(true)
   }
 
-  const buildPayload = (values: AdFormValues): CreateAdData => ({
+  const buildPayload = (values: AdFormValues, original?: Advertisement | null): CreateAdData => ({
     title: values.title,
     code: values.code,
     type: values.type,
@@ -156,18 +157,16 @@ export default function AdvertisementPage() {
     linkUrl: values.linkUrl,
     position: values.position,
     sortOrder: values.sortOrder ?? 0,
-    // 没选有效期时显式提交 null：后端据此清除已设的起止时间（undefined 在 JSON 里被丢掉，等于「不修改」）
-    startDate: values.dateRange?.[0]?.toISOString() ?? null,
-    endDate: values.dateRange?.[1]?.toISOString() ?? null,
+    // 清空的一端提交 null（后端据此清除）；编辑时有效期没改就不提交这两个字段（后端按「不修改」处理）
+    ...dateRangePayload(values.dateRange, original ?? undefined),
   })
 
   const handleSubmit = () => {
     form.validateFields().then((values) => {
-      const payload = buildPayload(values)
       if (modalMode === 'create') {
-        createMutation.mutate(payload)
+        createMutation.mutate(buildPayload(values))
       } else if (editingAd) {
-        updateMutation.mutate({ id: editingAd.id, data: payload })
+        updateMutation.mutate({ id: editingAd.id, data: buildPayload(values, editingAd) })
       }
     })
   }
@@ -360,7 +359,11 @@ export default function AdvertisementPage() {
           </Form.Item>
 
           <Form.Item name="dateRange" label="有效期">
-            <RangePicker style={{ width: '100%' }} placeholder={['开始日期', '结束日期']} />
+            <RangePicker
+              style={{ width: '100%' }}
+              placeholder={['开始日期', '结束日期']}
+              allowEmpty={[true, true]}
+            />
           </Form.Item>
         </Form>
       </Modal>
