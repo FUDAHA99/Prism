@@ -93,7 +93,24 @@ async function request<T>(
  * fetchItem 里的 request 传 revalidate: 0，不再单独走 fetch 缓存。React cache 把同一次渲染里 generateMetadata
  * 与页面的两次调用合成一次。（fetchItem 里要用字面量路径调用 request：backend 的 route-access.spec 按这种写法扫描门户调用了哪些接口。）
  */
-function cachedItem<T>(name: string, revalidate: number, fetchItem: (key: string) => Promise<T>) {
+/**
+ * 键格式校验：不合格的直接当作不存在，不请求后端、也不写缓存。
+ * cachedItem 会把 404 记成 null 落盘（撤回发布的内容才能及时从门户消失），而 Next 14 从不清理
+ * .next/cache/fetch-cache —— 不校验的话，随便拼的地址每个都会留下缓存文件（1-F-2 复审 low）。
+ * slug 只放 URL 非保留字符、至多 200 个（兼容加校验之前写入的存量 slug）；章节 id 必须是 UUID。
+ * 剩余风险（合格格式的随机键仍会落盘）要靠按需失效方案解决，见 docs/api.md「附：门户缓存窗口」。
+ */
+const SLUG_KEY = /^[A-Za-z0-9._~-]{1,200}$/
+const UUID_KEY = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+export const isSlugKey = (key: string) => SLUG_KEY.test(key)
+export const isUuidKey = (key: string) => UUID_KEY.test(key)
+
+function cachedItem<T>(
+  name: string,
+  revalidate: number,
+  fetchItem: (key: string) => Promise<T>,
+  isValidKey: (key: string) => boolean,
+) {
   const load = unstable_cache(
     async (key: string): Promise<T | null> => {
       try {
@@ -107,6 +124,7 @@ function cachedItem<T>(name: string, revalidate: number, fetchItem: (key: string
     { revalidate },
   )
   return cache(async (key: string): Promise<T | null> => {
+    if (!isValidKey(key)) return null
     try {
       return await load(key)
     } catch {
@@ -136,6 +154,7 @@ export const getContentBySlug = cachedItem(
   'content-by-slug',
   REVALIDATE_LIST,
   (slug) => request<Content>(`/contents/slug/${encodeURIComponent(slug)}`, { revalidate: 0 }),
+  isSlugKey,
 )
 
 // ─── 分类 ──────────────────────────────
@@ -219,6 +238,7 @@ export const getMovieBySlug = cachedItem(
   'movie-by-slug',
   REVALIDATE_DETAIL,
   (slug) => request<Movie>(`/movies/slug/${encodeURIComponent(slug)}`, { revalidate: 0 }),
+  isSlugKey,
 )
 
 // ─── 小说 ──────────────────────────────
@@ -241,6 +261,7 @@ export const getNovelBySlug = cachedItem(
   'novel-by-slug',
   REVALIDATE_DETAIL,
   (slug) => request<Novel>(`/novels/slug/${encodeURIComponent(slug)}`, { revalidate: 0 }),
+  isSlugKey,
 )
 
 export async function getNovelChapters(
@@ -262,6 +283,7 @@ export const getNovelChapter = cachedItem(
   'novel-chapter',
   REVALIDATE_DETAIL,
   (chapterId) => request<NovelChapter>(`/novels/chapters/${encodeURIComponent(chapterId)}`, { revalidate: 0 }),
+  isUuidKey,
 )
 
 // ─── 漫画 ──────────────────────────────
@@ -284,6 +306,7 @@ export const getComicBySlug = cachedItem(
   'comic-by-slug',
   REVALIDATE_DETAIL,
   (slug) => request<Comic>(`/comics/slug/${encodeURIComponent(slug)}`, { revalidate: 0 }),
+  isSlugKey,
 )
 
 export async function getComicChapters(
@@ -304,6 +327,7 @@ export const getComicChapter = cachedItem(
   'comic-chapter',
   REVALIDATE_DETAIL,
   (chapterId) => request<ComicChapter>(`/comics/chapters/${encodeURIComponent(chapterId)}`, { revalidate: 0 }),
+  isUuidKey,
 )
 
 // ─── 站点配置 ──────────────────────────
