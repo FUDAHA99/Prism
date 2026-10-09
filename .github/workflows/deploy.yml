@@ -43,7 +43,8 @@ jobs:
         run: npm ci
 
       # backend: nest build / frontend: tsc && vite build / portal: next build
-      # 三者都含类型检查，构建通过即等价于 tsc 通过
+      # 三者都含类型检查。注意 backend 的 nest build 用 tsconfig.build.json，不编译 *.spec.ts 与 src/common/testing：
+      # 测试代码的类型检查由下面 Test 步骤的 ts-jest 负责，不要去掉 Test 步骤
       - name: Build
         working-directory: ${{ matrix.project }}
         run: npm run build
