@@ -85,6 +85,16 @@ function truncateChars(value: string, max: number): string {
 /** 游客昵称与注册用户重名时的提示（门户 CommentSection 原样显示后端的 message） */
 export const GUEST_NAME_TAKEN_MESSAGE = '这个昵称已被注册用户使用，请换一个昵称';
 
+/**
+ * 游客昵称规范化：NFKC（全角、兼容字符折叠成常规写法），去掉不可见的格式 / 可忽略字符，再 trim。
+ * utf8mb4_unicode_ci 并不忽略零宽字符、双向控制符、韩文填充符、盲文空格等，夹带它们的名字
+ * 显示起来与注册用户一模一样，却能通过「与注册用户重名」检查（1-F-2 复审 low）。存库的也是规范化后的值。
+ */
+const INVISIBLE_IN_NAMES = /[\p{Cf}\p{Default_Ignorable_Code_Point}ᅟᅠㅤﾠ⠀]/gu;
+export function normalizeGuestName(raw: string): string {
+  return raw.normalize('NFKC').replace(INVISIBLE_IN_NAMES, '').trim();
+}
+
 /** 公开视图：逐字段构造，不出 guestEmail / ipAddress / userId（userId 只用来算 isRegistered） */
 function toPublicComment(c: Comment): PublicComment {
   return {
@@ -289,7 +299,7 @@ export class CommentService {
    * 不在 JS 里用 ===（那样大小写、重音一变就绕过去了）。
    */
   private async guestNameOf(raw: string | null | undefined): Promise<string | undefined> {
-    const name = typeof raw === 'string' ? raw.trim() : '';
+    const name = typeof raw === 'string' ? normalizeGuestName(raw) : '';
     if (!name) return undefined;
     const taken = await this.userRepository
       .createQueryBuilder('user')

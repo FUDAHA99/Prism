@@ -1,5 +1,5 @@
 import { SelectQueryBuilder } from 'typeorm';
-import { CommentService, commentPolicyFrom } from './comment.service';
+import { CommentService, commentPolicyFrom, normalizeGuestName } from './comment.service';
 import { publishedDue } from '../../common/authz/publish-window';
 import { Comment } from './entities/comment.entity';
 
@@ -121,5 +121,29 @@ describe('CommentService.findAll（管理端分页参数）', () => {
     const r = await run({ page: 1e23, limit: 100 });
     expect(Number.isSafeInteger(r.skip)).toBe(true);
     expect(r.take).toBe(100);
+  });
+});
+
+describe('normalizeGuestName（游客昵称规范化，1-F-2 复审：不可见字符冒充注册用户）', () => {
+  it.each([
+    ['零宽空格', 'ad​min', 'admin'],
+    ['零宽连接符', 'ad‍min', 'admin'],
+    ['软连字符', 'ad­min', 'admin'],
+    ['双向控制符', '‮admin‬', 'admin'],
+    ['隔离控制符', '⁦admin⁩', 'admin'],
+    ['韩文填充符', 'adminㅤ', 'admin'],
+    ['盲文空格', 'admin⠀', 'admin'],
+    ['全角字母（NFKC 折叠）', 'ａｄｍｉｎ', 'admin'],
+    ['首尾空白', '  站长  ', '站长'],
+  ])('%s', (_label, raw, expected) => {
+    expect(normalizeGuestName(raw)).toBe(expected);
+  });
+
+  it('只剩不可见字符时视为未填', () => {
+    expect(normalizeGuestName('​⠀ㅤ ')).toBe('');
+  });
+
+  it('普通中英文昵称原样保留', () => {
+    expect(normalizeGuestName('路人甲 Tom')).toBe('路人甲 Tom');
   });
 });
