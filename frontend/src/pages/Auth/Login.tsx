@@ -3,12 +3,8 @@ import { Form, Input, Button, Card, Typography, message } from 'antd'
 import { LockOutlined, UserOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
-import { login, getProfile } from '../../api/auth'
 import { errorMessage } from '../../api/errors'
-import { useAuthStore } from '../../stores/authStore'
-import { NO_BACKOFFICE_ACCESS_MESSAGE, endSession } from '../../stores/session'
-import type { User } from '../../types'
-import { hasBackofficeAccess } from '../../utils/access'
+import { NO_BACKOFFICE_ACCESS_MESSAGE, signIn } from '../../stores/session'
 
 interface LoginFormValues {
   email: string
@@ -18,32 +14,17 @@ interface LoginFormValues {
 export default function Login() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
-  const setAuth = useAuthStore((s) => s.setAuth)
   const [loading, setLoading] = useState(false)
 
   const handleSubmit = async (values: LoginFormValues) => {
     setLoading(true)
     try {
-      const result = await login(values.email, values.password)
-      const tokens = result.tokens
-      // 先放 access token，取资料的请求才带得上
-      localStorage.setItem('access_token', tokens.accessToken)
-      let user: User
-      try {
-        user = await getProfile()
-      } catch (err) {
-        // 资料没取到：撤销这次登录，不留下「有 token、没登录态」的半截状态
-        endSession({ tokens, queryClient })
-        throw err
-      }
-      // 后台只对 admin / editor 开放（角色以 /auth/me 返回的库里当前值为准）。
-      // 没有后台角色的账号：立即注销这次登录签发的 token，不进入后台
-      if (!hasBackofficeAccess(user.roles)) {
-        endSession({ tokens, queryClient })
+      // 登录、取资料、核对后台角色（没有 admin / editor 时注销这次签发的 token）见 stores/session.ts
+      const result = await signIn(values.email, values.password, queryClient)
+      if (result.status === 'no-backoffice-access') {
         message.error(NO_BACKOFFICE_ACCESS_MESSAGE)
         return
       }
-      setAuth(user, tokens.accessToken, tokens.refreshToken)
       message.success('登录成功')
       navigate('/')
     } catch (err: unknown) {
