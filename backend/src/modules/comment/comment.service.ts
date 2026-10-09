@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Comment } from './entities/comment.entity';
@@ -7,6 +7,8 @@ import { QueryCommentDto } from './dto/query-comment.dto';
 import { Content, ContentStatus } from '../content/entities/content.entity';
 import { SiteSettingService } from '../site-setting/site-setting.service';
 import { Viewer } from '../../common/authz/viewer';
+import { publishedDue } from '../../common/authz/publish-window';
+import { Clock, SYSTEM_CLOCK } from '../../common/clock/clock';
 
 /** GET /comments/public 的出参：只含可公开字段 */
 export interface PublicComment {
@@ -102,6 +104,7 @@ export class CommentService {
     @InjectRepository(Content)
     private readonly contentRepository: Repository<Content>,
     private readonly siteSettingService: SiteSettingService,
+    @Optional() private readonly clock: Clock = SYSTEM_CLOCK,
   ) {}
 
   async findAll(query: QueryCommentDto): Promise<{
@@ -136,7 +139,7 @@ export class CommentService {
 
   /**
    * 公共接口：仅返回某篇已发布内容下已审核通过的评论（树形）。
-   * 内容不存在、未发布或已删除时返回空列表（与没有评论相同，不区分是哪种情况）：
+   * 内容不存在、未发布（含定时发布还没到点）或已删除时返回空列表（与没有评论相同，不区分是哪种情况）：
    * 此前只看 contentId，文章下线或删除后，它的评论仍能按 ID 匿名读到。
    *
    * 出参是显式白名单：select 保证 guestEmail / ipAddress 不出库；逐字段构造保证
@@ -188,7 +191,7 @@ export class CommentService {
   /**
    * 发评论（POST /comments）。身份、来源与审核状态全部由服务端决定：
    * - 评论关闭（enable_comment）→ 403；
-   * - 只能评论已发布且未删除的内容，否则 404（不存在与未发布同一条消息，不暴露草稿是否存在）；
+   * - 只能评论已发布、发布时间已到且未删除的内容，否则 404（不存在与未发布同一条消息，不暴露草稿是否存在）；
    *   回复必须指向同一内容下已公开的评论，否则 400；
    * - userId 取登录身份；登录用户的显示名取账号昵称（没有则用户名），请求体里的 guestName / guestEmail 忽略 ——
    *   登录用户不能借「注册用户」的身份顶着别的名字发言，账号邮箱也不复制进评论表；
@@ -271,11 +274,14 @@ export class CommentService {
     }
   }
 
-  /** 已发布且未删除（软删除由 @DeleteDateColumn 自动排除） */
+  /**
+   * 已发布、发布时间已到且未删除（软删除由 @DeleteDateColumn 自动排除）。与文章列表、slug 详情同一判定：
+   * 定时发布的文章到点之前，评论既读不到也发不了。
+   */
   private async isPublishedContent(contentId: string | undefined): Promise<boolean> {
     if (!contentId) return false;
     const count = await this.contentRepository.count({
-      where: { id: contentId, status: ContentStatus.PUBLISHED },
+      where: { id: contentId, status: ContentStatus.PUBLISHED, publishedAt: publishedDue(this.clock.now()) },
     });
     return count > 0;
   }

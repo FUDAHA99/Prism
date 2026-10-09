@@ -3,6 +3,7 @@ import {
   NotFoundException,
   ConflictException,
   ForbiddenException,
+  Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, SelectQueryBuilder } from 'typeorm';
@@ -11,6 +12,8 @@ import { Content, ContentStatus, ContentType } from './entities/content.entity';
 import { AuditService } from '../audit/audit.service';
 import { changedAuditFields } from '../audit/audit-summary';
 import { isStaff, Viewer } from '../../common/authz/viewer';
+import { publishedDueParams, publishedDueSql } from '../../common/authz/publish-window';
+import { Clock, SYSTEM_CLOCK, wholeSecond } from '../../common/clock/clock';
 import {
   CONTENT_LIST_DEFAULT_LIMIT,
   CONTENT_LIST_MAX_LIMIT,
@@ -136,7 +139,13 @@ export class ContentService {
     @InjectRepository(Content)
     private readonly contentRepository: Repository<Content>,
     private readonly auditService: AuditService,
+    @Optional() private readonly clock: Clock = SYSTEM_CLOCK,
   ) {}
+
+  /** 服务端替内容填的「发布时间 = 现在」：取整秒，见 wholeSecond */
+  private publishNow(): Date {
+    return wholeSecond(this.clock.now());
+  }
 
   /**
    * slug 是否已被占用 —— 包括已软删除的内容：库里的唯一索引也覆盖它们，
@@ -156,7 +165,7 @@ export class ContentService {
   /**
    * 新建内容（仅后台角色）。作者是当前登录用户（authorId 参数来自 req.user，请求体里没有这个字段）；
    * status 只能是 draft（默认）或 published，published 时 isPublished / publishedAt 一并写上，
-   * publishedAt 优先用编辑页「定时发布」提交的时间。
+   * publishedAt 优先用编辑页「定时发布」提交的时间 —— 晚于当前时间时，公开视图到点才可见（见 publish-window）。
    */
   async create(
     dto: CreateContentDto,
@@ -166,7 +175,7 @@ export class ContentService {
 
     const requestedAt = dto.publishedAt ? new Date(dto.publishedAt) : undefined;
     const state = dto.status === ContentStatus.PUBLISHED
-      ? publishedState(requestedAt ?? new Date())
+      ? publishedState(requestedAt ?? this.publishNow())
       : { status: ContentStatus.DRAFT, isPublished: false, publishedAt: requestedAt };
 
     const content = this.contentRepository.create({
@@ -206,8 +215,8 @@ export class ContentService {
    *
    * - 后台角色（admin / editor）：全量视图 —— 任意状态（含草稿）、可按 status / authorId 筛选、完整字段，
    *   每页最多 100；与此前行为一致。
-   * - 其他人（游客、无角色的登录用户）：服务端固定 status = published，忽略客户端传的 status 与 authorId，
-   *   每页最多 50（超出按 50 返回而不是报错），按 PublicContent 白名单出参。
+   * - 其他人（游客、无角色的登录用户）：服务端固定 status = published 且发布时间已到（定时发布的文章到点前不出现），
+   *   忽略客户端传的 status 与 authorId，每页最多 50（超出按 50 返回而不是报错），按 PublicContent 白名单出参。
    *   此前只靠门户自己补 status=published，?status=draft 就能匿名列出全部草稿正文。
    *
    * viewer 缺省按游客处理：漏传身份只会少看到数据，不会多看到。
@@ -237,6 +246,7 @@ export class ContentService {
     if (contentType) qb.andWhere('content.contentType = :contentType', { contentType });
     if (categoryId) qb.andWhere('content.categoryId = :categoryId', { categoryId });
     if (authorId) qb.andWhere('content.authorId = :authorId', { authorId });
+    if (!staff) qb.andWhere(publishedDueSql('content'), publishedDueParams(this.clock.now()));
 
     qb.orderBy('content.createdAt', 'DESC')
       .skip((page - 1) * limit)
@@ -260,13 +270,14 @@ export class ContentService {
   }
 
   /**
-   * GET /contents/slug/:slug（公开，门户文章详情页）：只认已发布且未删除的内容，按白名单出参。
-   * 草稿、待审、已归档与不存在一样返回 404（同一条消息），不泄露「这个 slug 有一篇未发布的内容」。
+   * GET /contents/slug/:slug（公开，门户文章详情页）：只认已发布、发布时间已到且未删除的内容，按白名单出参。
+   * 草稿、待审、已归档、定时发布还没到点的与不存在一样返回 404（同一条消息），不泄露「这个 slug 有一篇未发布的内容」。
    */
   async findPublishedBySlug(slug: string): Promise<PublicContent> {
     const content = await this.baseQuery()
       .andWhere('content.slug = :slug', { slug })
       .andWhere('content.status = :status', { status: ContentStatus.PUBLISHED })
+      .andWhere(publishedDueSql('content'), publishedDueParams(this.clock.now()))
       .getOne();
     if (!content) {
       throw new NotFoundException(`内容不存在: ${slug}`);
@@ -295,7 +306,7 @@ export class ContentService {
     const requestedAt = dto.publishedAt ? new Date(dto.publishedAt) : undefined;
     if (dto.status === ContentStatus.PUBLISHED) {
       // 编辑页「保存并发布」：与 POST /:id/publish 同样三列一起写；已有发布时间的（重新保存已发布文章）保留原值
-      Object.assign(patch, publishedState(requestedAt ?? content.publishedAt ?? new Date()));
+      Object.assign(patch, publishedState(requestedAt ?? content.publishedAt ?? this.publishNow()));
     } else if (requestedAt) {
       patch.publishedAt = requestedAt;
     }
@@ -329,7 +340,8 @@ export class ContentService {
       throw new ForbiddenException('只有编辑或管理员可以发布内容');
     }
 
-    await this.contentRepository.update(id, publishedState(new Date()));
+    // 「发布」按钮即立即发布：定时发布中的文章点了也马上可见
+    await this.contentRepository.update(id, publishedState(this.publishNow()));
 
     await this.auditService.log({
       userId: currentUserId,

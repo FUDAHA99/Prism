@@ -29,6 +29,7 @@ import { Category } from '../category/entities/category.entity';
 import { Comment } from '../comment/entities/comment.entity';
 import { HttpExceptionFilter } from '../../common/filters/http-exception.filter';
 import { globalValidationPipeOptions } from '../../common/pipes/global-validation';
+import { Clock } from '../../common/clock/clock';
 
 /**
  * 内容模块走真实 HTTP：真实 ContentController / ContentService、Access 守卫链（严格可选登录、JwtStrategy、
@@ -107,6 +108,17 @@ describe('内容模块 HTTP', () => {
     deletedPublished: '',
   };
 
+  /** 注入 ContentService 的时钟：缺省走真实时间，定时发布的用例把它拨到指定时刻（afterEach 复位） */
+  const clock = {
+    fixed: null as Date | null,
+    now(): Date {
+      return this.fixed ? new Date(this.fixed) : new Date();
+    },
+  };
+  const setNow = (iso: string, deltaMs = 0) => {
+    clock.fixed = new Date(new Date(iso).getTime() + deltaMs);
+  };
+
   const http = () => request(app.getHttpServer());
 
   /** 与 AuthService.generateTokens 同形状的 access token */
@@ -182,6 +194,7 @@ describe('内容模块 HTTP', () => {
           }),
         },
         { provide: CACHE_MANAGER, useValue: new JsonCache() },
+        { provide: Clock, useValue: clock },
       ],
     }).compile();
 
@@ -237,6 +250,10 @@ describe('内容模块 HTTP', () => {
 
   afterAll(async () => {
     await app?.close();
+  });
+
+  afterEach(() => {
+    clock.fixed = null;
   });
 
   const PUBLISHED_SLUGS = [slugs.published, slugs.publishedNoAuthor].sort();
@@ -428,6 +445,74 @@ describe('内容模块 HTTP', () => {
     });
   });
 
+  describe('定时发布（status = published、publishedAt 在未来）', () => {
+    const DUE = '2026-11-11T11:11:11.000Z';
+    let scheduledId = '';
+
+    beforeAll(async () => {
+      scheduledId = (
+        await contents.save({
+          title: '定时文章',
+          slug: 'scheduled-article',
+          body: '定时文章的正文',
+          status: ContentStatus.PUBLISHED,
+          isPublished: true,
+          publishedAt: new Date(DUE),
+          authorId: ids.admin,
+          categoryId,
+        })
+      ).id;
+    });
+
+    afterAll(async () => {
+      await contents.delete(scheduledId);
+    });
+
+    it.each<Who>(['anonymous', 'plain'])('%s：到点之前列表、分类筛选、slug 详情都看不到', async (who) => {
+      setNow(DUE, -1000);
+      const list = await get('/contents?limit=50', who).expect(200);
+      expect(slugsOf(list.body.data)).not.toContain('scheduled-article');
+      expect(list.body.meta.total).toBe(PUBLISHED_SLUGS.length);
+      expect(JSON.stringify(list.body)).not.toContain('定时文章');
+      const byCategory = await get(`/contents?categoryId=${categoryId}&status=published`, who).expect(200);
+      expect(slugsOf(byCategory.body.data)).toEqual([slugs.published]);
+      const res = await get('/contents/slug/scheduled-article', who).expect(404);
+      // 与不存在的 slug 同一条消息
+      const missing = await get('/contents/slug/no-such-article', who).expect(404);
+      expect(res.body.message.replace('scheduled-article', '')).toBe(missing.body.message.replace('no-such-article', ''));
+      expect((await contents.findOneByOrFail({ id: scheduledId })).viewCount).toBe(0);
+    });
+
+    it.each<Who>(['anonymous', 'plain'])('%s：到点那一刻起可见（publishedAt <= 现在），阅读数照常累加', async (who) => {
+      setNow(DUE);
+      expect(slugsOf((await get('/contents?limit=50', who).expect(200)).body.data)).toContain('scheduled-article');
+      const res = await get('/contents/slug/scheduled-article', who).expect(200);
+      expect(res.body).toMatchObject({ title: '定时文章', publishedAt: DUE });
+      setNow(DUE, 24 * 3600 * 1000);
+      await get('/contents/slug/scheduled-article', who).expect(200);
+    });
+
+    it.each<Who>(['editor', 'admin'])('%s：后台视图不受影响，到点前也能在列表里看到（状态 published）', async (who) => {
+      setNow(DUE, -1000);
+      const res = await get('/contents?limit=100', who).expect(200);
+      expect(res.body.data.find((r: Content) => r.slug === 'scheduled-article')).toMatchObject({
+        status: 'published',
+        publishedAt: DUE,
+      });
+      await get(`/contents/${scheduledId}`, who).expect(200);
+    });
+
+    it('后台列表的「发布」按钮（POST /:id/publish）即立即发布：发布时间改为现在，游客马上可见', async () => {
+      setNow(DUE, -3600 * 1000);
+      await get('/contents/slug/scheduled-article', 'anonymous').expect(404);
+      await post(`/contents/${scheduledId}/publish`, 'editor', {}).expect(201);
+      expect((await contents.findOneByOrFail({ id: scheduledId })).publishedAt!.toISOString()).toBe(
+        new Date(new Date(DUE).getTime() - 3600 * 1000).toISOString(),
+      );
+      await get('/contents/slug/scheduled-article', 'anonymous').expect(200);
+    });
+  });
+
   describe('GET /contents/:id（后台编辑页）', () => {
     it.each<Who>(['editor', 'admin'])('%s 能读草稿的完整字段，且不累加阅读数', async (who) => {
       const viewCountOf = async (id: string) => (await contents.findOneByOrFail({ id })).viewCount;
@@ -501,10 +586,30 @@ describe('内容模块 HTTP', () => {
         featuredImageUrl: '/uploads/cover.png',
       });
       expect(row!.publishedAt!.toISOString()).toBe(SCHEDULED_AT);
-      // 游客立刻能在列表里看到
+      // 定时发布：到点之前游客在列表与详情里都看不到（此前立刻公开），到点后自动可见
+      setNow(SCHEDULED_AT, -1000);
+      expect(slugsOf((await get('/contents?limit=50', 'anonymous').expect(200)).body.data)).not.toContain(
+        'write-publish-now',
+      );
+      await get('/contents/slug/write-publish-now', 'anonymous').expect(404);
+      setNow(SCHEDULED_AT);
       expect(slugsOf((await get('/contents?limit=50', 'anonymous').expect(200)).body.data)).toContain(
         'write-publish-now',
       );
+      await get('/contents/slug/write-publish-now', 'anonymous').expect(200);
+    });
+
+    it('「立即发布」不带定时：发布时间取服务端当前时间（整秒），游客立刻能看到', async () => {
+      setNow('2026-10-09T03:04:05.678Z');
+      const payload = formPayload({ title: '马上', slug: 'write-publish-immediately', body: '正文' }, true);
+      await post('/contents', 'admin', payload).expect(201);
+      const row = await rowBySlug('write-publish-immediately');
+      // 向下取整到秒：MySQL DATETIME 对毫秒四舍五入，.678 会存成下一秒，刚发布的半秒里会被判成「还没到点」
+      expect(row!.publishedAt!.toISOString()).toBe('2026-10-09T03:04:05.000Z');
+      expect(slugsOf((await get('/contents?limit=50', 'anonymous').expect(200)).body.data)).toContain(
+        'write-publish-immediately',
+      );
+      await get('/contents/slug/write-publish-immediately', 'anonymous').expect(200);
     });
 
     it('editor「保存草稿」（只填必填项）：201，作者是 editor，草稿不对游客可见', async () => {
@@ -573,6 +678,9 @@ describe('内容模块 HTTP', () => {
       const row = await rowBySlug('write-save-and-publish');
       expect(row).toMatchObject({ status: ContentStatus.PUBLISHED, isPublished: true });
       expect(row!.publishedAt!.toISOString()).toBe(SCHEDULED_AT);
+      setNow(SCHEDULED_AT, -1000);
+      await get('/contents/slug/write-save-and-publish', 'anonymous').expect(404);
+      setNow(SCHEDULED_AT, 1000);
       await get('/contents/slug/write-save-and-publish', 'anonymous').expect(200);
     });
 

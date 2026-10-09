@@ -2,6 +2,7 @@ import {
   Injectable,
   NotFoundException,
   ConflictException,
+  Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, IsNull } from 'typeorm';
@@ -11,6 +12,8 @@ import { ComicChapter } from './entities/comic-chapter.entity';
 import { AuditService } from '../audit/audit.service';
 import { changedAuditFields } from '../audit/audit-summary';
 import { isStaff, Viewer } from '../../common/authz/viewer';
+import { publishedDue, publishedDueParams, publishedDueSql } from '../../common/authz/publish-window';
+import { Clock, SYSTEM_CLOCK, wholeSecond } from '../../common/clock/clock';
 import {
   COMIC_CHAPTER_DEFAULT_LIMIT,
   COMIC_CHAPTER_MAX_LIMIT,
@@ -173,7 +176,13 @@ export class ComicService {
     @InjectRepository(ComicChapter)
     private readonly chapterRepo: Repository<ComicChapter>,
     private readonly auditService: AuditService,
+    @Optional() private readonly clock: Clock = SYSTEM_CLOCK,
   ) {}
+
+  /** 服务端替漫画填的「发布时间 = 现在」：取整秒，见 wholeSecond */
+  private publishNow(): Date {
+    return wholeSecond(this.clock.now());
+  }
 
   /**
    * slug 是否已被占用 —— 包括已软删除的漫画：库里的唯一索引也覆盖它们，
@@ -202,7 +211,7 @@ export class ComicService {
     const entity = this.comicRepo.create({
       ...(pickFields(dto, COMIC_EDITABLE_FIELDS) as Partial<Comic>),
       status: published ? ComicStatus.PUBLISHED : ComicStatus.DRAFT,
-      publishedAt: published ? (requestedAt ?? new Date()) : requestedAt,
+      publishedAt: published ? (requestedAt ?? this.publishNow()) : requestedAt,
     });
     const saved = await this.comicRepo.save(entity);
 
@@ -223,8 +232,8 @@ export class ComicService {
    *
    * - 后台角色（admin / editor）：全量视图 —— 任意状态（含草稿、归档）、可按 status 筛选、完整字段，每页最多 100；
    *   与此前行为一致。
-   * - 其他人（游客、无角色的登录用户）：服务端固定 status = published，忽略客户端传的 status，
-   *   每页最多 50（超出按 50 返回而不是报错），按 PublicComic 白名单出参。
+   * - 其他人（游客、无角色的登录用户）：服务端固定 status = published 且发布时间已到（publishedAt 在未来的到点才出现），
+   *   忽略客户端传的 status，每页最多 50（超出按 50 返回而不是报错），按 PublicComic 白名单出参。
    *   此前只靠门户自己补 status=published，?status=draft 就能匿名列出全部草稿，再拿草稿 id 读章节图片。
    *
    * viewer 缺省按游客处理：漏传身份只会少看到数据，不会多看到。
@@ -256,6 +265,7 @@ export class ComicService {
     // MySQL 按 0 比较，筛出来的恰好是反的
     if (typeof isFeatured === 'boolean') qb.andWhere('c.isFeatured = :isFeatured', { isFeatured });
     if (typeof isVip === 'boolean') qb.andWhere('c.isVip = :isVip', { isVip });
+    if (!staff) qb.andWhere(publishedDueSql('c'), publishedDueParams(this.clock.now()));
 
     qb.orderBy('c.createdAt', 'DESC')
       .skip((page - 1) * limit)
@@ -276,12 +286,12 @@ export class ComicService {
   }
 
   /**
-   * GET /comics/slug/:slug（公开，门户详情页与阅读页）：只认已发布且未删除的漫画，按 PublicComic 白名单出参。
+   * GET /comics/slug/:slug（公开，门户详情页与阅读页）：只认已发布、发布时间已到且未删除的漫画，按 PublicComic 白名单出参。
    * 草稿、归档与不存在一样返回 404（同一条消息）—— 此前草稿漫画的详情与采集字段都能匿名读到。
    */
   async findPublishedBySlug(slug: string): Promise<PublicComic> {
     const comic = await this.comicRepo.findOne({
-      where: { slug, status: ComicStatus.PUBLISHED, deletedAt: IsNull() },
+      where: { slug, status: ComicStatus.PUBLISHED, deletedAt: IsNull(), publishedAt: publishedDue(this.clock.now()) },
     });
     if (!comic) throw new NotFoundException(`漫画不存在: ${slug}`);
     return toPublicComic(comic);
@@ -305,7 +315,7 @@ export class ComicService {
     const requestedAt = dto.publishedAt ? new Date(dto.publishedAt) : undefined;
     if (dto.status === ComicStatus.PUBLISHED) {
       patch.status = ComicStatus.PUBLISHED;
-      patch.publishedAt = requestedAt ?? existing.publishedAt ?? new Date();
+      patch.publishedAt = requestedAt ?? existing.publishedAt ?? this.publishNow();
     } else if (requestedAt) {
       patch.publishedAt = requestedAt;
     }
@@ -332,7 +342,7 @@ export class ComicService {
     const comic = await this.findOne(id);
     await this.comicRepo.update(id, {
       status: ComicStatus.PUBLISHED,
-      publishedAt: comic.publishedAt ?? new Date(),
+      publishedAt: comic.publishedAt ?? this.publishNow(),
     });
     await this.auditService.log({
       userId,
@@ -383,7 +393,7 @@ export class ComicService {
    * GET /comics/:id/chapters（后台章节管理与门户目录共用，Access('optional')）。
    *
    * - 后台角色：全部章节、完整字段（含 pageUrls —— 编辑弹窗直接用列表里的 pageUrls），可按 published 筛选；与此前一致。
-   * - 其他人：只有「已发布章节 + 所属漫画已发布且未删除」，published 参数被忽略，按 PublicComicChapter 白名单出参，
+   * - 其他人：只有「已发布章节 + 所属漫画已发布（发布时间已到）且未删除」，published 参数被忽略，按 PublicComicChapter 白名单出参，
    *   不带 pageUrls（只查轻量列）。此前目录默认连未发布章节一起返回、不看漫画状态，而且每一章都带完整的页面图地址：
    *   一次请求就能导出整部漫画（含未发布章节）的全部图片，单章接口加了发布检查也会被它绕过。
    *
@@ -407,8 +417,9 @@ export class ComicService {
       }
     } else {
       qb.select(PUBLIC_CHAPTER_LIST_COLUMNS.map((col) => `c.${col}`))
-        .innerJoin('c.comic', 'm', 'm.status = :comicStatus AND m.deletedAt IS NULL', {
+        .innerJoin('c.comic', 'm', `m.status = :comicStatus AND m.deletedAt IS NULL AND ${publishedDueSql('m')}`, {
           comicStatus: ComicStatus.PUBLISHED,
+          ...publishedDueParams(this.clock.now()),
         })
         .andWhere('c.isPublished = :p', { p: true });
     }
@@ -435,14 +446,15 @@ export class ComicService {
   }
 
   /**
-   * GET /comics/chapters/:chapterId（公开，门户阅读页；后台不调用这条）：章节已发布、所属漫画已发布且未删除，
+   * GET /comics/chapters/:chapterId（公开，门户阅读页；后台不调用这条）：章节已发布、所属漫画已发布（发布时间已到）且未删除，
    * 否则与不存在一样 404（同一条消息）。此前不看任何状态，未发布章节、草稿漫画与已删除漫画的页面图都能按章节 id 读到。
    */
   async findPublishedChapter(chapterId: string): Promise<PublicComicChapter> {
     const ch = await this.chapterRepo
       .createQueryBuilder('c')
-      .innerJoin('c.comic', 'm', 'm.status = :comicStatus AND m.deletedAt IS NULL', {
+      .innerJoin('c.comic', 'm', `m.status = :comicStatus AND m.deletedAt IS NULL AND ${publishedDueSql('m')}`, {
         comicStatus: ComicStatus.PUBLISHED,
+        ...publishedDueParams(this.clock.now()),
       })
       .where('c.id = :id', { id: chapterId })
       .andWhere('c.isPublished = :p', { p: true })

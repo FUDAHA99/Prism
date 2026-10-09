@@ -8,6 +8,7 @@ import { Content, ContentStatus } from '../content/entities/content.entity';
 import { SiteSetting } from '../site-setting/entities/site-setting.entity';
 import { SiteSettingService } from '../site-setting/site-setting.service';
 import { createHttpHarness, HttpHarness, Who } from '../../common/testing/http-harness';
+import { Clock } from '../../common/clock/clock';
 
 /**
  * 评论接口走真实 HTTP（真实守卫链、全局 ValidationPipe、trust proxy = 1、内存 SQLite）。
@@ -28,7 +29,15 @@ describe('评论接口 HTTP', () => {
   let h: HttpHarness;
   let comments: Repository<Comment>;
   let settings: Repository<SiteSetting>;
-  const contentIds = { published: '', other: '', draft: '', deleted: '' };
+  const contentIds = { published: '', other: '', draft: '', deleted: '', scheduled: '' };
+  /** 定时发布文章的发布时间；时钟缺省走真实时间，相关用例拨到它前后（afterEach 复位） */
+  const DUE = new Date('2026-11-11T11:11:11.000Z');
+  const clock = {
+    fixed: null as Date | null,
+    now(): Date {
+      return this.fixed ? new Date(this.fixed) : new Date();
+    },
+  };
 
   /** 门户 CommentSection 提交的请求体（原样） */
   const portalPayload = (extra: Record<string, unknown> = {}) => ({
@@ -46,7 +55,7 @@ describe('评论接口 HTTP', () => {
   beforeAll(async () => {
     h = await createHttpHarness({
       controllers: [CommentController],
-      providers: [CommentService, SiteSettingService],
+      providers: [CommentService, SiteSettingService, { provide: Clock, useValue: clock }],
       entities: [SiteSetting],
     });
     comments = h.ds.getRepository(Comment);
@@ -59,10 +68,16 @@ describe('评论接口 HTTP', () => {
     contentIds.draft = await make('draft', ContentStatus.DRAFT);
     contentIds.deleted = await make('deleted', ContentStatus.PUBLISHED);
     await contents.softDelete(contentIds.deleted);
+    contentIds.scheduled = await make('scheduled', ContentStatus.PUBLISHED);
+    await contents.update(contentIds.scheduled, { publishedAt: DUE });
   });
 
   afterAll(async () => {
     await h?.close();
+  });
+
+  afterEach(() => {
+    clock.fixed = null;
   });
 
   beforeEach(async () => {
@@ -270,6 +285,27 @@ describe('评论接口 HTTP', () => {
       await comments.save({ contentId: contentIds[key], body: 'hidden', status: 'approved' });
       const res = await h.get(`/comments/public?contentId=${contentIds[key]}`, 'anonymous').expect(200);
       expect(res.body.data).toEqual([]);
+    });
+  });
+
+  describe('定时发布的文章（publishedAt 在未来）：到点之前与未发布一样', () => {
+    it('到点前：评论读不到、发不了（404，与未发布同一条消息）；到点后照常', async () => {
+      await comments.save({ contentId: contentIds.scheduled, body: 'early', status: 'approved' });
+      await setSetting('comment_audit', 'false');
+
+      clock.fixed = new Date(DUE.getTime() - 1000);
+      expect((await h.get(`/comments/public?contentId=${contentIds.scheduled}`, 'anonymous').expect(200)).body.data).toEqual(
+        [],
+      );
+      const early = await h.post('/comments', 'anonymous', portalPayload({ contentId: contentIds.scheduled })).expect(404);
+      const draft = await h.post('/comments', 'anonymous', portalPayload({ contentId: contentIds.draft })).expect(404);
+      expect(early.body.message).toBe(draft.body.message);
+      expect(await comments.countBy({ contentId: contentIds.scheduled })).toBe(1);
+
+      clock.fixed = DUE;
+      await h.post('/comments', 'anonymous', portalPayload({ contentId: contentIds.scheduled, body: 'on time' })).expect(201);
+      const res = await h.get(`/comments/public?contentId=${contentIds.scheduled}`, 'anonymous').expect(200);
+      expect(res.body.data.map((c: PublicComment) => c.body)).toEqual(['early', 'on time']);
     });
   });
 

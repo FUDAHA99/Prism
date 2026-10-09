@@ -32,6 +32,7 @@ import { Category } from '../category/entities/category.entity';
 import { Comment } from '../comment/entities/comment.entity';
 import { HttpExceptionFilter } from '../../common/filters/http-exception.filter';
 import { globalValidationPipeOptions } from '../../common/pipes/global-validation';
+import { Clock } from '../../common/clock/clock';
 
 /**
  * 影视模块走真实 HTTP：真实 MovieController / MovieService、Access 守卫链（严格可选登录、JwtStrategy、
@@ -132,6 +133,17 @@ describe('影视模块 HTTP', () => {
   };
   /** 每部片的播放地址：草稿 / 归档 / 已删除的不能被游客读到 */
   const episodeUrl = (slug: string, n: number) => `https://cdn.example.com/${slug}/ep${n}.m3u8`;
+
+  /** 注入服务的时钟：缺省走真实时间，定时发布的用例把它拨到指定时刻（afterEach 复位） */
+  const clock = {
+    fixed: null as Date | null,
+    now(): Date {
+      return this.fixed ? new Date(this.fixed) : new Date();
+    },
+  };
+  const setNow = (at: Date, deltaMs = 0) => {
+    clock.fixed = new Date(at.getTime() + deltaMs);
+  };
 
   const http = () => request(app.getHttpServer());
 
@@ -243,6 +255,7 @@ describe('影视模块 HTTP', () => {
           }),
         },
         { provide: CACHE_MANAGER, useValue: new JsonCache() },
+        { provide: Clock, useValue: clock },
       ],
     }).compile();
 
@@ -296,6 +309,10 @@ describe('影视模块 HTTP', () => {
 
   afterAll(async () => {
     await app?.close();
+  });
+
+  afterEach(() => {
+    clock.fixed = null;
   });
 
   const PUBLISHED_SLUGS = [slugs.published, slugs.featured].sort();
@@ -518,6 +535,48 @@ describe('影视模块 HTTP', () => {
 
     it('公开接口不解析 token：带着管理员 token 也读不到草稿（后台从不调用这条）', async () => {
       await get(`/movies/slug/${slugs.draft}`, 'admin').expect(404);
+    });
+  });
+
+  describe('定时发布（status = published、publishedAt 在未来）', () => {
+    const DUE = new Date('2026-11-11T11:11:11.000Z');
+    const SCHEDULED = 'scheduled-movie';
+    let scheduledId = '';
+
+    beforeAll(async () => {
+      scheduledId = await seedMovie(SCHEDULED, MovieStatus.PUBLISHED, { publishedAt: DUE, intro: '定时影视简介' });
+    });
+
+    afterAll(async () => {
+      await movies.delete(scheduledId);
+    });
+
+    it.each<Who>(['anonymous', 'plain'])('%s：到点之前列表与 slug 详情都看不到，播放地址不外泄', async (who) => {
+      setNow(DUE, -1000);
+      const list = await get('/movies?limit=50', who).expect(200);
+      expect(slugsOf(list.body.data)).toEqual(PUBLISHED_SLUGS);
+      expect(list.body.meta.total).toBe(PUBLISHED_SLUGS.length);
+      const res = await get(`/movies/slug/${SCHEDULED}`, who).expect(404);
+      expect(res.body.message).toBe(`影视不存在: ${SCHEDULED}`);
+      expect(JSON.stringify(res.body)).not.toContain('cdn.example.com');
+      expect(await viewCountOf(scheduledId)).toBe(0);
+    });
+
+    it.each<Who>(['anonymous', 'plain'])('%s：到点那一刻起可见（含线路与剧集）', async (who) => {
+      setNow(DUE);
+      expect(slugsOf((await get('/movies?limit=50', who).expect(200)).body.data)).toContain(SCHEDULED);
+      const res = await get(`/movies/slug/${SCHEDULED}`, who).expect(200);
+      expect(res.body.sources[0].episodes.map((e: { url: string }) => e.url)).toEqual([
+        episodeUrl(SCHEDULED, 1),
+        episodeUrl(SCHEDULED, 2),
+      ]);
+    });
+
+    it.each<Who>(['editor', 'admin'])('%s：后台视图不受影响，到点前也在列表里、能读编辑页', async (who) => {
+      setNow(DUE, -1000);
+      const res = await get('/movies?limit=100', who).expect(200);
+      expect(res.body.data.find((r: Movie) => r.slug === SCHEDULED)).toMatchObject({ status: 'published' });
+      await get(`/movies/${scheduledId}`, who).expect(200);
     });
   });
 

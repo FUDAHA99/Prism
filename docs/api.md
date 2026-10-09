@@ -179,6 +179,11 @@
 **公开视图**（游客列表与 slug 详情）：只含 `id`、`title`、`slug`、`contentType`、`categoryId`、`featuredImageUrl`、`excerpt`、`body`、`metaTitle`、`metaDescription`、`viewCount`、`publishedAt`、`createdAt`、`updatedAt`、`author`（`{ username, nickname, avatarUrl }`，无作者时为 `null`）、`category`（`{ id, name, slug }` 或 `null`）；
 不含 `authorId`、`author.id`、`status`、`isPublished`。
 
+**定时发布**：游客只看到 `status = published` 且 `publishedAt` 为空或不晚于当前时间的内容。后台「定时发布」（`publishedAt` 在未来）
+在到点之前对列表、slug 详情（404）、评论的读写（`GET /comments/public` 返回空、`POST /comments` 404）都不可见，到点后自动可见，
+不需要定时任务改状态；后台角色的视图不受影响。列表里的「发布」按钮（2.6）即立即发布，会把发布时间改为当前时间。
+服务端替内容填「发布时间 = 现在」时取整秒（MySQL `DATETIME` 对毫秒四舍五入，不取整会让刚发布的内容有半秒「还没到点」）。
+
 ---
 
 ### 2.2 获取内容详情
@@ -671,6 +676,8 @@
 **公开视图**（游客列表与 slug 详情）：只含 `id`、`title`、`originalTitle`、`slug`、`movieType`、`categoryId`、`subType`、`year`、`region`、`language`、`director`、`actors`、`intro`、`posterUrl`、`trailerUrl`、`duration`、`totalEpisodes`、`currentEpisode`、`isFinished`、`score`（DECIMAL，MySQL 下是字符串）、`isFeatured`、`isVip`、`metaTitle`、`metaKeywords`、`metaDescription`、`viewCount`、`likeCount`、`publishedAt`、`createdAt`、`updatedAt`；
 slug 详情另有 `sources`（`{ id, movieId, name, kind, player, sortOrder, episodes }`，`episodes` 为 `{ id, sourceId, title, episodeNumber, url, durationSec, sortOrder }`）。
 不含 `status`、`collectSource`、`collectExternalId`、`posterBroken`、`titleCleaned`、`aliases`。
+与内容相同，`publishedAt` 晚于当前时间的影视到点之前对游客不可见（列表与 slug 详情）；采集入库的发布时间不晚于入库时刻
+（上游的上映日期 / 不带时区的更新时间可能落在未来，入库时截到当前时间）。
 
 ### 15.2 获取影视详情
 `GET /movies/:id`  🔒 后台角色（admin / editor）
@@ -800,6 +807,7 @@ slug 详情另有 `sources`（`{ id, movieId, name, kind, player, sortOrder, epi
 
 **公开视图**（游客列表与 slug 详情）：只含 `id`、`title`、`slug`、`author`、`categoryId`、`subType`、`coverUrl`、`intro`、`wordCount`、`chapterCount`、`serialStatus`、`isFeatured`、`isVip`、`score`（DECIMAL，MySQL 下是字符串）、`viewCount`、`favoriteCount`、`metaTitle`、`metaKeywords`、`metaDescription`、`lastChapterAt`、`publishedAt`、`createdAt`、`updatedAt`；
 不含 `status`、`collectSource`、`collectExternalId`。
+`publishedAt` 晚于当前时间的小说到点之前对游客不可见：列表、slug 详情、章节目录（空）与单章（404）都一样（漫画同理）。
 
 ### 16.2 获取小说详情
 `GET /novels/:id`  🔒 后台角色（admin / editor）

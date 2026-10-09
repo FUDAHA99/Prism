@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 
@@ -20,7 +20,7 @@ import {
   parsePlayData,
   toIntOrNull,
   toFloatOrNull,
-  toDateOrNull,
+  collectedPublishedAt,
   buildCollectSlug,
   MacCmsItem,
 } from './maccms-client';
@@ -32,6 +32,7 @@ import {
   isValidImageUrl,
 } from './collect-cleaner';
 import { PosterCheckerService } from './poster-checker.service';
+import { Clock, SYSTEM_CLOCK, wholeSecond } from '../../common/clock/clock';
 
 import { Movie, MovieStatus, MovieType } from '../movie/entities/movie.entity';
 import { MovieSource, MovieSourceKind } from '../movie/entities/movie-source.entity';
@@ -75,7 +76,13 @@ export class CollectExecutorService {
     private readonly dataSource: DataSource,
     private readonly sourceService: CollectSourceService,
     private readonly posterChecker: PosterCheckerService,
+    @Optional() private readonly clock: Clock = SYSTEM_CLOCK,
   ) {}
+
+  /** 入库条目的发布时间：上游给的时间，但不晚于现在（见 collectedPublishedAt） */
+  private publishedAtOf(it: MacCmsItem): Date | undefined {
+    return collectedPublishedAt(it.vod_pubdate || it.vod_time, wholeSecond(this.clock.now())) ?? undefined;
+  }
 
   /**
    * 执行采集主入口（异步，立即返回 logId，后台跑）
@@ -284,7 +291,7 @@ export class CollectExecutorService {
       status: MovieStatus.PUBLISHED,
       collectSource: source.id,
       collectExternalId: externalId,
-      publishedAt: toDateOrNull(it.vod_pubdate || it.vod_time) ?? undefined,
+      publishedAt: this.publishedAtOf(it),
       titleCleaned: true,
       // 封面格式校验：格式不合法直接标异常，合法的交给异步 HEAD 检测
       posterBroken: isValidImageUrl(posterUrl) ? null : (posterUrl ? true : null),
@@ -376,7 +383,7 @@ export class CollectExecutorService {
       status: NovelStatus.PUBLISHED,
       collectSource: source.id,
       collectExternalId: externalId,
-      publishedAt: toDateOrNull(it.vod_pubdate || it.vod_time) ?? undefined,
+      publishedAt: this.publishedAtOf(it),
     } as any;
 
     if (novel) Object.assign(novel, data);
@@ -410,7 +417,7 @@ export class CollectExecutorService {
       status: ComicStatus.PUBLISHED,
       collectSource: source.id,
       collectExternalId: externalId,
-      publishedAt: toDateOrNull(it.vod_pubdate || it.vod_time) ?? undefined,
+      publishedAt: this.publishedAtOf(it),
     } as any;
 
     if (comic) Object.assign(comic, data);

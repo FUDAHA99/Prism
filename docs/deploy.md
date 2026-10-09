@@ -291,6 +291,24 @@ SQL
 
 没有输出就不用处理。有输出时，和账号本人确认一个只含 ASCII 的新邮箱（国际化域名可以改用 `xn--` 开头的 punycode 写法），升级后在管理后台「用户管理 → 编辑」里改掉（升级前改也可以：`UPDATE users SET email = '新邮箱' WHERE id = '上面查出的 id';`），再通知本人用新邮箱登录。管理员自己的账号也在列表里时，必须在升级前用这条 SQL 改掉，否则升级后登不上后台。已软删除的账号不用管。
 
+**⑤ 定时发布开始生效：发布时间在未来的已发布内容，到点之前门户上看不到。** 此前后台「定时发布」只是记下时间，文章立刻公开；
+现在文章、影视、小说、漫画的公开列表 / 详情 / 章节 / 评论都要求 `publishedAt` 为空或不晚于当前时间。采集入库的条目从本版本起
+发布时间不晚于入库时刻，但升级前采集的数据里可能有上游给的未来时间（上映日期、不带时区的北京时间被当成 UTC 解析后晚 8 小时），
+这些条目会在到点之前从门户消失，再次采集到同一条目时自动纠正。升级后可以先列出来看看（只读，可重复执行）：
+
+```bash
+docker exec -i prism-mysql sh -c 'exec mysql --default-character-set=utf8mb4 -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' <<'SQL'
+SELECT 'contents' AS t, id, title, publishedAt FROM contents WHERE status = 'published' AND deletedAt IS NULL AND publishedAt > NOW()
+UNION ALL SELECT 'movies', id, title, publishedAt FROM movies WHERE status = 'published' AND deletedAt IS NULL AND publishedAt > NOW()
+UNION ALL SELECT 'novels', id, title, publishedAt FROM novels WHERE status = 'published' AND deletedAt IS NULL AND publishedAt > NOW()
+UNION ALL SELECT 'comics', id, title, publishedAt FROM comics WHERE status = 'published' AND deletedAt IS NULL AND publishedAt > NOW();
+SQL
+```
+
+文章是后台有意定时的，保持不动；采集来的影视 / 小说 / 漫画（`collectSource` 不为空）如果希望立即恢复显示，可以把发布时间改成现在，
+例如 `UPDATE movies SET publishedAt = NOW() WHERE collectSource IS NOT NULL AND status = 'published' AND publishedAt > NOW();`
+（小说、漫画把表名换成 `novels` / `comics`）。
+
 ---
 
 ## 6. 数据备份

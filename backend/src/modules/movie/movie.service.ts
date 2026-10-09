@@ -2,6 +2,7 @@ import {
   Injectable,
   NotFoundException,
   ConflictException,
+  Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, IsNull, SelectQueryBuilder } from 'typeorm';
@@ -15,6 +16,8 @@ import { MovieEpisode } from './entities/movie-episode.entity';
 import { AuditService } from '../audit/audit.service';
 import { changedAuditFields } from '../audit/audit-summary';
 import { isStaff, Viewer } from '../../common/authz/viewer';
+import { publishedDueParams, publishedDueSql } from '../../common/authz/publish-window';
+import { Clock, SYSTEM_CLOCK, wholeSecond } from '../../common/clock/clock';
 import {
   MOVIE_LIST_DEFAULT_LIMIT,
   MOVIE_LIST_MAX_LIMIT,
@@ -224,7 +227,13 @@ export class MovieService {
     @InjectRepository(MovieEpisode)
     private readonly episodeRepo: Repository<MovieEpisode>,
     private readonly auditService: AuditService,
+    @Optional() private readonly clock: Clock = SYSTEM_CLOCK,
   ) {}
+
+  /** 服务端替影视填的「发布时间 = 现在」：取整秒，见 wholeSecond */
+  private publishNow(): Date {
+    return wholeSecond(this.clock.now());
+  }
 
   /**
    * slug 是否已被占用 —— 包括已软删除的影视：库里的唯一索引也覆盖它们，
@@ -292,7 +301,7 @@ export class MovieService {
       ...(pickMovieFields(dto) as Partial<Movie>),
       movieType: dto.movieType ?? MovieType.MOVIE,
       status: published ? MovieStatus.PUBLISHED : MovieStatus.DRAFT,
-      publishedAt: published ? (requestedAt ?? new Date()) : requestedAt,
+      publishedAt: published ? (requestedAt ?? this.publishNow()) : requestedAt,
     });
     const saved = await this.movieRepo.save(movie);
 
@@ -318,7 +327,8 @@ export class MovieService {
    *
    * - 后台角色（admin / editor）：全量视图 —— 任意状态（含草稿、归档）、可按 status / posterBroken 筛选、
    *   完整字段，每页最多 100；与此前行为一致。
-   * - 其他人（游客、无角色的登录用户）：服务端固定 status = published，忽略客户端传的 status 与 posterBroken，
+   * - 其他人（游客、无角色的登录用户）：服务端固定 status = published 且发布时间已到（publishedAt 在未来的到点才出现），
+   *   忽略客户端传的 status 与 posterBroken，
    *   每页最多 50（超出按 50 返回而不是报错），按 PublicMovie 白名单出参。
    *   此前只靠门户自己补 status=published，?status=draft 就能匿名列出全部草稿与归档。
    *
@@ -357,6 +367,7 @@ export class MovieService {
     // MySQL 按 0 比较，筛出来的恰好是反的
     if (typeof isFeatured === 'boolean') qb.andWhere('m.isFeatured = :isFeatured', { isFeatured });
     if (typeof isVip === 'boolean') qb.andWhere('m.isVip = :isVip', { isVip });
+    if (!staff) qb.andWhere(publishedDueSql('m'), publishedDueParams(this.clock.now()));
     if (posterBroken === null) {
       qb.andWhere('m.posterBroken IS NULL');
     } else if (typeof posterBroken === 'boolean') {
@@ -391,7 +402,7 @@ export class MovieService {
   }
 
   /**
-   * GET /movies/slug/:slug（公开，门户详情页与播放页）：只认已发布且未删除的影视，按 PublicMovie 白名单出参，
+   * GET /movies/slug/:slug（公开，门户详情页与播放页）：只认已发布、发布时间已到且未删除的影视，按 PublicMovie 白名单出参，
    * 线路与剧集照常带上（剧集 url 是播放器要用的）。草稿、归档与不存在一样返回 404（同一条消息）——
    * 此前草稿 / 归档片的全部线路与播放地址都能匿名读到。
    */
@@ -399,6 +410,7 @@ export class MovieService {
     const movie = await this.detailQuery()
       .andWhere('m.slug = :slug', { slug })
       .andWhere('m.status = :status', { status: MovieStatus.PUBLISHED })
+      .andWhere(publishedDueSql('m'), publishedDueParams(this.clock.now()))
       .getOne();
     if (!movie) throw new NotFoundException(`影视不存在: ${slug}`);
     return toPublicMovie(movie);
@@ -426,7 +438,7 @@ export class MovieService {
     const requestedAt = dto.publishedAt ? new Date(dto.publishedAt) : undefined;
     if (dto.status === MovieStatus.PUBLISHED) {
       patch.status = MovieStatus.PUBLISHED;
-      patch.publishedAt = requestedAt ?? movie.publishedAt ?? new Date();
+      patch.publishedAt = requestedAt ?? movie.publishedAt ?? this.publishNow();
     } else if (requestedAt) {
       patch.publishedAt = requestedAt;
     }
@@ -458,7 +470,7 @@ export class MovieService {
     if (!movie) throw new NotFoundException(`影视不存在: ${id}`);
     await this.movieRepo.update(id, {
       status: MovieStatus.PUBLISHED,
-      publishedAt: movie.publishedAt ?? new Date(),
+      publishedAt: movie.publishedAt ?? this.publishNow(),
     });
     await this.auditService.log({
       userId,

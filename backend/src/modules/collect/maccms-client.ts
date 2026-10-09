@@ -276,6 +276,17 @@ export function toDateOrNull(v: any): Date | null {
 }
 
 /**
+ * 采集条目的发布时间：取上游的 vod_pubdate（上映日期，可能在未来）或 vod_time（资源站的更新时间，多是不带时区的
+ * 北京时间，后端容器按 UTC 解析会比真实时间晚 8 小时），但不晚于入库时刻 now。
+ * 采集入库即发布（status = published）；发布时间若在未来，公开视图会把它当成定时发布、到点前一直隐藏。
+ */
+export function collectedPublishedAt(v: any, now: Date): Date | null {
+  const d = toDateOrNull(v);
+  if (!d) return null;
+  return d.getTime() > now.getTime() ? now : d;
+}
+
+/**
  * 生成稳定的 slug：source-id-外站vodId（避免不同源撞 slug）
  */
 export function buildCollectSlug(sourcePrefix: string, vodId: any): string {

@@ -1,5 +1,6 @@
 import { SelectQueryBuilder } from 'typeorm';
 import { CommentService, commentPolicyFrom } from './comment.service';
+import { publishedDue } from '../../common/authz/publish-window';
 import { Comment } from './entities/comment.entity';
 
 function row(p: Partial<Comment>): Comment {
@@ -20,7 +21,8 @@ describe('CommentService.findApprovedByContent（公共接口出参白名单）'
   const repo = { find: jest.fn().mockResolvedValue(rows) };
   // 被评论的内容已发布：count 命中 1 行
   const contents = { count: jest.fn().mockResolvedValue(1) };
-  const svc = new CommentService(repo as any, contents as any, {} as any);
+  const NOW = new Date('2026-10-09T08:00:00.000Z');
+  const svc = new CommentService(repo as any, contents as any, {} as any, { now: () => NOW });
 
   it('查询只 select 白名单列，不取 guestEmail / ipAddress', async () => {
     await svc.findApprovedByContent('c1');
@@ -41,10 +43,13 @@ describe('CommentService.findApprovedByContent（公共接口出参白名单）'
     );
   });
 
-  it('只看已发布内容：查内容时带 status=published', async () => {
+  it('只看已发布、发布时间已到的内容：查内容时带 status=published 与 publishedAt 条件', async () => {
     contents.count.mockClear();
     await svc.findApprovedByContent('c1');
-    expect(contents.count).toHaveBeenCalledWith({ where: { id: 'c1', status: 'published' } });
+    // 定时发布：发布时间为空或不晚于现在（时钟注入，条件与列表 / slug 详情相同）
+    expect(contents.count).toHaveBeenCalledWith({
+      where: { id: 'c1', status: 'published', publishedAt: publishedDue(NOW) },
+    });
   });
 
   it('内容不存在 / 未发布 / 已删除：返回空列表，不再查评论', async () => {

@@ -2,6 +2,7 @@ import {
   Injectable,
   NotFoundException,
   ConflictException,
+  Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, IsNull } from 'typeorm';
@@ -11,6 +12,8 @@ import { NovelChapter } from './entities/novel-chapter.entity';
 import { AuditService } from '../audit/audit.service';
 import { changedAuditFields } from '../audit/audit-summary';
 import { isStaff, Viewer } from '../../common/authz/viewer';
+import { publishedDue, publishedDueParams, publishedDueSql } from '../../common/authz/publish-window';
+import { Clock, SYSTEM_CLOCK, wholeSecond } from '../../common/clock/clock';
 import {
   NOVEL_CHAPTER_DEFAULT_LIMIT,
   NOVEL_CHAPTER_MAX_LIMIT,
@@ -175,7 +178,13 @@ export class NovelService {
     @InjectRepository(NovelChapter)
     private readonly chapterRepo: Repository<NovelChapter>,
     private readonly auditService: AuditService,
+    @Optional() private readonly clock: Clock = SYSTEM_CLOCK,
   ) {}
+
+  /** 服务端替小说填的「发布时间 = 现在」：取整秒，见 wholeSecond */
+  private publishNow(): Date {
+    return wholeSecond(this.clock.now());
+  }
 
   /**
    * slug 是否已被占用 —— 包括已软删除的小说：库里的唯一索引也覆盖它们，
@@ -204,7 +213,7 @@ export class NovelService {
     const entity = this.novelRepo.create({
       ...(pickFields(dto, NOVEL_EDITABLE_FIELDS) as Partial<Novel>),
       status: published ? NovelStatus.PUBLISHED : NovelStatus.DRAFT,
-      publishedAt: published ? (requestedAt ?? new Date()) : requestedAt,
+      publishedAt: published ? (requestedAt ?? this.publishNow()) : requestedAt,
     });
     const saved = await this.novelRepo.save(entity);
 
@@ -225,8 +234,8 @@ export class NovelService {
    *
    * - 后台角色（admin / editor）：全量视图 —— 任意状态（含草稿、归档）、可按 status 筛选、完整字段，每页最多 100；
    *   与此前行为一致。
-   * - 其他人（游客、无角色的登录用户）：服务端固定 status = published，忽略客户端传的 status，
-   *   每页最多 50（超出按 50 返回而不是报错），按 PublicNovel 白名单出参。
+   * - 其他人（游客、无角色的登录用户）：服务端固定 status = published 且发布时间已到（publishedAt 在未来的到点才出现），
+   *   忽略客户端传的 status，每页最多 50（超出按 50 返回而不是报错），按 PublicNovel 白名单出参。
    *   此前只靠门户自己补 status=published，?status=draft 就能匿名列出全部草稿，再拿草稿 id 读章节正文。
    *
    * viewer 缺省按游客处理：漏传身份只会少看到数据，不会多看到。
@@ -258,6 +267,7 @@ export class NovelService {
     // MySQL 按 0 比较，筛出来的恰好是反的
     if (typeof isFeatured === 'boolean') qb.andWhere('n.isFeatured = :isFeatured', { isFeatured });
     if (typeof isVip === 'boolean') qb.andWhere('n.isVip = :isVip', { isVip });
+    if (!staff) qb.andWhere(publishedDueSql('n'), publishedDueParams(this.clock.now()));
 
     qb.orderBy('n.createdAt', 'DESC')
       .skip((page - 1) * limit)
@@ -278,12 +288,12 @@ export class NovelService {
   }
 
   /**
-   * GET /novels/slug/:slug（公开，门户详情页与阅读页）：只认已发布且未删除的小说，按 PublicNovel 白名单出参。
+   * GET /novels/slug/:slug（公开，门户详情页与阅读页）：只认已发布、发布时间已到且未删除的小说，按 PublicNovel 白名单出参。
    * 草稿、归档与不存在一样返回 404（同一条消息）—— 此前草稿书的详情与采集字段都能匿名读到。
    */
   async findPublishedBySlug(slug: string): Promise<PublicNovel> {
     const novel = await this.novelRepo.findOne({
-      where: { slug, status: NovelStatus.PUBLISHED, deletedAt: IsNull() },
+      where: { slug, status: NovelStatus.PUBLISHED, deletedAt: IsNull(), publishedAt: publishedDue(this.clock.now()) },
     });
     if (!novel) throw new NotFoundException(`小说不存在: ${slug}`);
     return toPublicNovel(novel);
@@ -307,7 +317,7 @@ export class NovelService {
     const requestedAt = dto.publishedAt ? new Date(dto.publishedAt) : undefined;
     if (dto.status === NovelStatus.PUBLISHED) {
       patch.status = NovelStatus.PUBLISHED;
-      patch.publishedAt = requestedAt ?? existing.publishedAt ?? new Date();
+      patch.publishedAt = requestedAt ?? existing.publishedAt ?? this.publishNow();
     } else if (requestedAt) {
       patch.publishedAt = requestedAt;
     }
@@ -334,7 +344,7 @@ export class NovelService {
     const novel = await this.findOne(id);
     await this.novelRepo.update(id, {
       status: NovelStatus.PUBLISHED,
-      publishedAt: novel.publishedAt ?? new Date(),
+      publishedAt: novel.publishedAt ?? this.publishNow(),
     });
     await this.auditService.log({
       userId,
@@ -387,7 +397,7 @@ export class NovelService {
    * 两种视图都不读正文：此前先把整页章节的 longtext 正文全部读进内存，再逐行置成 undefined。
    * - 后台角色：除正文外的全部列（含未发布章节与 collectExternalId），可按 published 筛选 —— 与此前一致；
    *   后台编辑章节时另经 GET /novels/chapters/:chapterId 取全文。
-   * - 其他人：只有「已发布章节 + 所属小说已发布且未删除」，published 参数被忽略，按 PublicNovelChapter 白名单出参。
+   * - 其他人：只有「已发布章节 + 所属小说已发布（发布时间已到）且未删除」，published 参数被忽略，按 PublicNovelChapter 白名单出参。
    *   此前目录默认连未发布章节一起返回、不看小说状态，草稿书与已删除书的章节都能列出来。
    *
    * 小说不存在、未发布或已删除时，游客得到空目录（与不存在的小说 id 一样），不区分是哪种情况。
@@ -411,8 +421,9 @@ export class NovelService {
       }
     } else {
       qb.select(PUBLIC_CHAPTER_LIST_COLUMNS.map((col) => `c.${col}`))
-        .innerJoin('c.novel', 'n', 'n.status = :novelStatus AND n.deletedAt IS NULL', {
+        .innerJoin('c.novel', 'n', `n.status = :novelStatus AND n.deletedAt IS NULL AND ${publishedDueSql('n')}`, {
           novelStatus: NovelStatus.PUBLISHED,
+          ...publishedDueParams(this.clock.now()),
         })
         .andWhere('c.isPublished = :p', { p: true });
     }
@@ -446,14 +457,15 @@ export class NovelService {
   }
 
   /**
-   * 游客读章节全文（门户阅读页）：章节已发布、所属小说已发布且未删除，否则与不存在一样 404（同一条消息）。
+   * 游客读章节全文（门户阅读页）：章节已发布、所属小说已发布（发布时间已到）且未删除，否则与不存在一样 404（同一条消息）。
    * 此前不看任何状态，未发布章节、草稿书与已删除书的正文都能按章节 id 读到。
    */
   async findPublishedChapter(chapterId: string): Promise<PublicNovelChapter> {
     const ch = await this.chapterRepo
       .createQueryBuilder('c')
-      .innerJoin('c.novel', 'n', 'n.status = :novelStatus AND n.deletedAt IS NULL', {
+      .innerJoin('c.novel', 'n', `n.status = :novelStatus AND n.deletedAt IS NULL AND ${publishedDueSql('n')}`, {
         novelStatus: NovelStatus.PUBLISHED,
+        ...publishedDueParams(this.clock.now()),
       })
       .where('c.id = :id', { id: chapterId })
       .andWhere('c.isPublished = :p', { p: true })

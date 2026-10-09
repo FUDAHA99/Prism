@@ -31,6 +31,7 @@ import { Category } from '../category/entities/category.entity';
 import { Comment } from '../comment/entities/comment.entity';
 import { HttpExceptionFilter } from '../../common/filters/http-exception.filter';
 import { globalValidationPipeOptions } from '../../common/pipes/global-validation';
+import { Clock } from '../../common/clock/clock';
 
 /**
  * 漫画模块走真实 HTTP：真实 ComicController / ComicService、Access 守卫链（严格可选登录、JwtStrategy、RolesGuard）、
@@ -147,6 +148,17 @@ describe('漫画模块 HTTP', () => {
   /** 每一章的页面图地址：未发布章节、未发布 / 已删除漫画的不能被游客拿到 */
   const pagesOf = (key: ComicKey, n: number) => [1, 2, 3].map((p) => `/uploads/${key}-ch${n}-p${p}.jpg`);
 
+  /** 注入服务的时钟：缺省走真实时间，定时发布的用例把它拨到指定时刻（afterEach 复位） */
+  const clock = {
+    fixed: null as Date | null,
+    now(): Date {
+      return this.fixed ? new Date(this.fixed) : new Date();
+    },
+  };
+  const setNow = (at: Date, deltaMs = 0) => {
+    clock.fixed = new Date(at.getTime() + deltaMs);
+  };
+
   const http = () => request(app.getHttpServer());
 
   /** 与 AuthService.generateTokens 同形状的 access token */
@@ -250,6 +262,7 @@ describe('漫画模块 HTTP', () => {
           }),
         },
         { provide: CACHE_MANAGER, useValue: new JsonCache() },
+        { provide: Clock, useValue: clock },
       ],
     }).compile();
 
@@ -294,6 +307,10 @@ describe('漫画模块 HTTP', () => {
 
   afterAll(async () => {
     await app?.close();
+  });
+
+  afterEach(() => {
+    clock.fixed = null;
   });
 
   const PUBLISHED_SLUGS = [slugs.published, slugs.featured].sort();
@@ -468,6 +485,65 @@ describe('漫画模块 HTTP', () => {
 
     it('公开接口不解析 token：带着管理员 token 也读不到草稿（后台从不调用这条）', async () => {
       await get(`/comics/slug/${slugs.draft}`, 'admin').expect(404);
+    });
+  });
+
+  describe('定时发布（status = published、publishedAt 在未来）', () => {
+    const DUE = new Date('2026-11-11T11:11:11.000Z');
+    const SCHEDULED = 'scheduled-comic';
+    let scheduledId = '';
+    let chapterId = '';
+
+    beforeAll(async () => {
+      scheduledId = (
+        await comics.save({ title: '定时漫画', slug: SCHEDULED, status: ComicStatus.PUBLISHED, publishedAt: DUE } as Partial<Comic>)
+      ).id;
+      chapterId = (
+        await chapters.save({
+          comicId: scheduledId,
+          chapterNumber: 1,
+          title: '第1话',
+          pageUrls: ['https://img.example.com/scheduled/1.jpg'], pageCount: 1,
+          isPublished: true,
+        } as Partial<ComicChapter>)
+      ).id;
+    });
+
+    afterAll(async () => {
+      await chapters.delete(chapterId);
+      await comics.delete(scheduledId);
+    });
+
+    it.each<Who>(['anonymous', 'plain'])('%s：到点之前列表、slug 详情、目录、单章都看不到', async (who) => {
+      setNow(DUE, -1000);
+      const list = await get('/comics?limit=50', who).expect(200);
+      expect(slugsOf(list.body.data)).toEqual(PUBLISHED_SLUGS);
+      expect(list.body.meta.total).toBe(PUBLISHED_SLUGS.length);
+      await get(`/comics/slug/${SCHEDULED}`, who).expect(404);
+      const toc = await get(`/comics/${scheduledId}/chapters`, who).expect(200);
+      expect(toc.body).toEqual({ data: [], meta: { total: 0, page: 1, limit: expect.any(Number), totalPages: 0 } });
+      const one = await get(`/comics/chapters/${chapterId}`, who).expect(404);
+      expect(JSON.stringify(one.body)).not.toContain('img.example.com/scheduled');
+      expect(await chapterViewCountOf(chapterId)).toBe(0);
+    });
+
+    it.each<Who>(['anonymous', 'plain'])('%s：到点那一刻起全部可见', async (who) => {
+      setNow(DUE);
+      expect(slugsOf((await get('/comics?limit=50', who).expect(200)).body.data)).toContain(SCHEDULED);
+      await get(`/comics/slug/${SCHEDULED}`, who).expect(200);
+      const toc = await get(`/comics/${scheduledId}/chapters`, who).expect(200);
+      expect(toc.body.data.map((c: { id: string }) => c.id)).toEqual([chapterId]);
+      const one = await get(`/comics/chapters/${chapterId}`, who).expect(200);
+      expect(JSON.stringify(one.body)).toContain('img.example.com/scheduled');
+    });
+
+    it.each<Who>(['editor', 'admin'])('%s：后台视图不受影响，到点前列表、编辑页、目录照常', async (who) => {
+      setNow(DUE, -1000);
+      const res = await get('/comics?limit=100', who).expect(200);
+      expect(res.body.data.find((r: Comic) => r.slug === SCHEDULED)).toMatchObject({ status: 'published' });
+      await get(`/comics/${scheduledId}`, who).expect(200);
+      const toc = await get(`/comics/${scheduledId}/chapters`, who).expect(200);
+      expect(toc.body.data.map((c: { id: string }) => c.id)).toEqual([chapterId]);
     });
   });
 
