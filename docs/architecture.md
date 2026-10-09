@@ -136,18 +136,19 @@ Token 过期
   → 清除 localStorage
 ```
 
-### 3.2 RBAC 权限控制
+### 3.2 RBAC 权限控制（全局默认拒绝）
 
 ```typescript
 @Get()
-@Roles('admin')                    // 需要 admin 角色
-@UseGuards(AuthGuard('jwt'), RolesGuard)
+@Access('admin')                   // public | optional | authenticated | staff | admin
 async findAll() { ... }
 ```
 
-权限检查链：
-1. `AuthGuard('jwt')` 验证 Token，注入 `req.user`
-2. `RolesGuard` 检查 `req.user.roles` 是否包含所需角色
+`Access(level)` 只声明访问级别（元数据），由 AppModule 注册的全局守卫统一执行，路由上不再挂 `@UseGuards`：
+1. `ThrottlerBehindProxyGuard` 先限流（未登录 / 无权限的请求也计数）
+2. `AccessGuard` 按级别鉴权：需要身份时跑一次 passport（JwtStrategy 验签、过期、黑名单、吊销，从库里加载角色）写入 `req.user`；
+   `staff` 要求 admin / editor，`admin` 只要 admin；未登录 401，角色不够 403「权限不足」
+3. **没声明级别的路由按仅管理员处理**（默认拒绝），并记装配错误日志；`route-access.spec.ts` 逐条路由比对访问矩阵
 
 ---
 

@@ -43,6 +43,7 @@ import { Content } from '../content/entities/content.entity';
 import { Category } from '../category/entities/category.entity';
 import { Comment } from '../comment/entities/comment.entity';
 import { Access } from '../../common/authz/access.decorator';
+import { AccessGuard } from '../../common/authz/access.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { HttpExceptionFilter } from '../../common/filters/http-exception.filter';
 import { globalValidationPipeOptions } from '../../common/pipes/global-validation';
@@ -125,7 +126,8 @@ interface Harness {
 
 /**
  * throttle=true 时与 AppModule 一样注册 ThrottlerModule（全局 100 次/分钟）+ 全局 ThrottlerBehindProxyGuard；
- * 默认不挂限流，免得干扰认证断言。两种都与 main.ts 一样 trust proxy = 1。
+ * 默认不挂限流，免得干扰认证断言。全局 AccessGuard 总是注册，且与 AppModule 一样排在限流守卫之后。
+ * 两种都与 main.ts 一样 trust proxy = 1。
  */
 async function createHarness({ throttle = false } = {}): Promise<Harness> {
   const cache = new MemoryCache();
@@ -177,6 +179,8 @@ async function createHarness({ throttle = false } = {}): Promise<Harness> {
       { provide: ConfigService, useValue: config },
       { provide: CACHE_MANAGER, useValue: cache },
       ...(throttle ? [{ provide: APP_GUARD, useClass: ThrottlerBehindProxyGuard }] : []),
+      // 与 AppModule 相同的顺序：先限流、再鉴权（Access() 只写元数据，访问级别由全局 AccessGuard 执行）
+      { provide: APP_GUARD, useClass: AccessGuard },
     ],
   }).compile();
 
@@ -1299,6 +1303,15 @@ describe('限流：只由全局 ThrottlerBehindProxyGuard 执行，额度按毫�
       ...Array(5).fill(401),
       429,
     ]);
+  });
+
+  it('被 AccessGuard 拒绝的请求也计入全局额度：匿名刷 admin 接口第 101 次 429，而不是永远 401', async () => {
+    const statuses: number[] = [];
+    for (let i = 0; i < 101; i += 1) {
+      const req = h.http().get('/probe/admin').set('X-Forwarded-For', '203.0.113.23');
+      statuses.push((await req).status);
+    }
+    expect(statuses).toEqual([...Array(100).fill(401), 429]);
   });
 
   it('没有代理头的内网直连（portal SSR）不限流', async () => {

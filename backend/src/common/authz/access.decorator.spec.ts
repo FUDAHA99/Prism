@@ -1,39 +1,45 @@
 import 'reflect-metadata';
 import { GUARDS_METADATA } from '@nestjs/common/constants';
-import { AuthGuard } from '@nestjs/passport';
 import {
   Access,
   ACCESS_LEVEL_KEY,
   ACCESS_LEVELS,
   AccessLevel,
   ADMIN_ROLES,
+  ROLES_FOR_LEVEL,
   STAFF_ROLES,
 } from './access.decorator';
-import { JwtOptionalGuard } from '../guards/jwt-optional.guard';
-import { RolesGuard } from '../../modules/role/guards/roles.guard';
-import { ROLES_KEY } from '../../modules/role/decorators/roles.decorator';
 
 /**
- * Access(level) 必须把每个级别翻译成唯一确定的守卫链 + 角色元数据。
- * 全量路由的逐条比对在 route-access.spec.ts，这里只锁定翻译规则本身。
+ * Access(level) 只声明访问级别：写入 ACCESS_LEVEL_KEY 元数据，不挂任何守卫、不写角色元数据。
+ * 执行在全局 AccessGuard（access.guard.ts）；全量路由的逐条比对与裁决在 route-access.spec.ts。
  */
 
-const EXPECTED: Record<AccessLevel, { guards: unknown[] | undefined; roles: string[] | undefined }> = {
-  public: { guards: undefined, roles: undefined },
-  optional: { guards: [JwtOptionalGuard], roles: undefined },
-  authenticated: { guards: [AuthGuard('jwt')], roles: undefined },
-  staff: { guards: [AuthGuard('jwt'), RolesGuard], roles: ['admin', 'editor'] },
-  admin: { guards: [AuthGuard('jwt'), RolesGuard], roles: ['admin'] },
-};
+/** 已删除的 Roles 装饰器写入的元数据键：Access 不应再写它 */
+const LEGACY_ROLES_KEY = 'roles';
 
 describe('Access 装饰器', () => {
   it('覆盖全部五个级别', () => {
-    expect([...ACCESS_LEVELS].sort()).toEqual(Object.keys(EXPECTED).sort());
+    expect([...ACCESS_LEVELS].sort()).toEqual(['admin', 'authenticated', 'optional', 'public', 'staff']);
   });
 
-  it('staff 是 admin + editor，admin 只有 admin', () => {
+  it('staff 是 admin + editor，admin 只有 admin；其余级别不做角色判断', () => {
     expect([...STAFF_ROLES]).toEqual(['admin', 'editor']);
     expect([...ADMIN_ROLES]).toEqual(['admin']);
+    expect(ROLES_FOR_LEVEL).toEqual({
+      public: undefined,
+      optional: undefined,
+      authenticated: undefined,
+      staff: ['admin', 'editor'],
+      admin: ['admin'],
+    });
+  });
+
+  it('角色表不可改：AccessGuard 读的就是这几个数组，改动会影响所有路由', () => {
+    expect(Object.isFrozen(STAFF_ROLES)).toBe(true);
+    expect(Object.isFrozen(ADMIN_ROLES)).toBe(true);
+    expect(Object.isFrozen(ROLES_FOR_LEVEL)).toBe(true);
+    expect(() => (STAFF_ROLES as string[]).push('user')).toThrow(TypeError);
   });
 
   describe.each(ACCESS_LEVELS)('方法级 Access(%s)', (level) => {
@@ -47,9 +53,11 @@ describe('Access 装饰器', () => {
       expect(Reflect.getMetadata(ACCESS_LEVEL_KEY, handler)).toBe(level);
     });
 
-    it('守卫链与角色符合该级别（AuthGuard 在 RolesGuard 之前）', () => {
-      expect(Reflect.getMetadata(GUARDS_METADATA, handler)).toEqual(EXPECTED[level].guards);
-      expect(Reflect.getMetadata(ROLES_KEY, handler)).toEqual(EXPECTED[level].roles);
+    it('只写元数据：不挂守卫（全局 AccessGuard 执行），不写角色元数据', () => {
+      expect(Reflect.getMetadata(GUARDS_METADATA, handler)).toBeUndefined();
+      expect(Reflect.getMetadata(LEGACY_ROLES_KEY, handler)).toBeUndefined();
+      // design:* 是 TypeScript emitDecoratorMetadata 自动加的类型信息
+      expect(Reflect.getMetadataKeys(handler).filter((k) => !String(k).startsWith('design:'))).toEqual([ACCESS_LEVEL_KEY]);
     });
 
     it('不污染类本身', () => {
@@ -58,26 +66,18 @@ describe('Access 装饰器', () => {
     });
   });
 
-  it('可以挂在类上（整组 handler 同级时使用）', () => {
+  it('可以挂在类上（整组 handler 同级时使用），同样只写元数据', () => {
     @Access('admin')
     class AdminOnly {
       handler() {}
     }
     expect(Reflect.getMetadata(ACCESS_LEVEL_KEY, AdminOnly)).toBe('admin');
-    expect(Reflect.getMetadata(GUARDS_METADATA, AdminOnly)).toEqual([AuthGuard('jwt'), RolesGuard]);
-    expect(Reflect.getMetadata(ROLES_KEY, AdminOnly)).toEqual(['admin']);
+    expect(Reflect.getMetadata(GUARDS_METADATA, AdminOnly)).toBeUndefined();
+    expect(Reflect.getMetadata(LEGACY_ROLES_KEY, AdminOnly)).toBeUndefined();
   });
 
-  it('角色元数据是独立副本，改动它不会影响其他路由', () => {
-    class A {
-      @Access('staff')
-      h() {}
-    }
-    (Reflect.getMetadata(ROLES_KEY, A.prototype.h) as string[]).push('user');
-    expect([...STAFF_ROLES]).toEqual(['admin', 'editor']);
-  });
-
-  it('未知级别在声明期直接报错，而不是运行期放行', () => {
+  it('未知级别在声明期直接报错，而不是运行期按未声明处理', () => {
     expect(() => Access('everyone' as AccessLevel)).toThrow('未知的访问级别');
+    expect(() => Access(undefined as unknown as AccessLevel)).toThrow('未知的访问级别');
   });
 });

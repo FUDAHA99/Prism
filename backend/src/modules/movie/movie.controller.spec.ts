@@ -1,5 +1,6 @@
 import 'reflect-metadata';
 import { BadRequestException, ValidationPipe } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { JwtModule, JwtService } from '@nestjs/jwt';
@@ -31,12 +32,13 @@ import { Content } from '../content/entities/content.entity';
 import { Category } from '../category/entities/category.entity';
 import { Comment } from '../comment/entities/comment.entity';
 import { HttpExceptionFilter } from '../../common/filters/http-exception.filter';
+import { AccessGuard } from '../../common/authz/access.guard';
 import { globalValidationPipeOptions } from '../../common/pipes/global-validation';
 import { Clock } from '../../common/clock/clock';
 
 /**
- * 影视模块走真实 HTTP：真实 MovieController / MovieService、Access 守卫链（严格可选登录、JwtStrategy、
- * RolesGuard）、全局 ValidationPipe 与异常过滤器，数据落在内存 SQLite。token 直接用测试密钥签发
+ * 影视模块走真实 HTTP：真实 MovieController / MovieService、全局 AccessGuard（严格可选登录、JwtStrategy、
+ * 角色）、全局 ValidationPipe 与异常过滤器，数据落在内存 SQLite。token 直接用测试密钥签发
  * （与 AuthService 同形状），JwtStrategy 照常验签并从库里加载用户与角色 —— 不跑 bcrypt。
  *
  * 读接口（批次 1-F-2）：GET /movies 由后台与门户共用 —— 后台角色看全量，其余人（游客、无角色的登录用户）
@@ -241,6 +243,8 @@ describe('影视模块 HTTP', () => {
       controllers: [MovieController],
       providers: [
         MovieService,
+        // 与 AppModule 相同：Access() 只写元数据，访问级别由全局 AccessGuard 执行
+        { provide: APP_GUARD, useClass: AccessGuard },
         AuthService,
         JwtStrategy,
         UserService,

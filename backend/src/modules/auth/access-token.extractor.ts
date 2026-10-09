@@ -29,7 +29,7 @@ export function extractAccessToken(request: unknown): string | null {
 /**
  * 请求是否出示了凭据：带了非空白的 Authorization 头，不管写法对不对、scheme 是什么。
  *
- * 严格可选登录（Access('optional')，见 JwtOptionalGuard）按它分流：没出示 → 匿名；出示了 → 必须是
+ * 严格可选登录（Access('optional')，见 common/authz/access.guard.ts）按它分流：没出示 → 匿名；出示了 → 必须是
  * extractAccessToken 认得、JwtStrategy 验得过的 access token，否则 401。所以 "Bearer"、"Bearer  <tok>"、
  * "Basic xxx"、"Bearer null" 都算出示了凭据（客户端带错了头应当暴露出来，而不是悄悄降级成游客）。
  * 只有空白值不算：它不携带任何凭据，有的客户端没 token 时就发 `Authorization: `。

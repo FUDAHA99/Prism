@@ -1,5 +1,6 @@
 import 'reflect-metadata';
 import { Controller, Get, Logger, Post, Req, ValidationPipe } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { JwtModule, JwtService } from '@nestjs/jwt';
@@ -30,19 +31,22 @@ import { Comment } from '../../modules/comment/entities/comment.entity';
 import { WatchHistory } from '../../modules/watch-history/entities/watch-history.entity';
 import { WatchHistoryController } from '../../modules/watch-history/watch-history.controller';
 import { WatchHistoryService } from '../../modules/watch-history/watch-history.service';
-import { Access } from '../authz/access.decorator';
-import { CurrentViewer, isAdmin, isStaff, Viewer } from '../authz/viewer';
+import { Access } from './access.decorator';
+import { AccessGuard } from './access.guard';
+import { CurrentViewer, isAdmin, isStaff, Viewer } from './viewer';
+import { CurrentUser } from '../decorators/current-user.decorator';
 import { HttpExceptionFilter } from '../filters/http-exception.filter';
 import { globalValidationPipeOptions } from '../pipes/global-validation';
 
 /**
- * 严格可选登录（Access('optional') → JwtOptionalGuard）走真实 HTTP：真实 AuthController / AuthService /
+ * 全局 AccessGuard 走真实 HTTP：与 AppModule 一样以 APP_GUARD 注册，真实 AuthController / AuthService /
  * JwtStrategy / Passport、全局 ValidationPipe 与异常过滤器，用户与角色落在内存 SQLite，缓存是按 JSON 存取的 Map。
  *
- * 语义：没带 Authorization 头 → 匿名（req.user 为 undefined，不跑 passport）；带了 → 与 Access('authenticated')
- * 完全同一套校验（验签、过期、jti 黑名单、改密吊销、禁用、角色取自库），任何一项不过都 401，
- * 不再像此前那样把无效 token 静默降级成游客 —— 那样 token 过期的管理员在共用的内容列表里只会看到
- * 「草稿消失了」，而不是被后台带回登录页。
+ * 重点是严格可选登录（Access('optional')）：没带 Authorization 头 → 匿名（req.user 为 undefined，不跑 passport）；
+ * 带了 → 与 Access('authenticated') 完全同一套校验（验签、过期、jti 黑名单、改密吊销、禁用、角色取自库），
+ * 任何一项不过都 401，不再像更早的时候那样把无效 token 静默降级成游客 —— 那样 token 过期的管理员在共用的
+ * 内容列表里只会看到「草稿消失了」，而不是被后台带回登录页。
+ * 另外覆盖 staff / admin 的 401 / 403、未声明级别的路由默认拒绝，以及每个请求只跑一次 JwtStrategy。
  */
 
 const ACCESS_SECRET = 'optional-spec-access-secret-0123456789abcdef';
@@ -103,6 +107,24 @@ class ProbeController {
   publicViewer(@CurrentViewer() viewer: Viewer) {
     return describeViewer(viewer);
   }
+
+  @Get('staff')
+  @Access('staff')
+  staff(@CurrentUser() user: Viewer) {
+    return describeViewer(user);
+  }
+
+  @Get('admin')
+  @Access('admin')
+  admin(@CurrentUser() user: Viewer) {
+    return describeViewer(user);
+  }
+
+  /** 装配错误：忘了声明访问级别。全局 AccessGuard 按仅管理员处理（翻转前没有任何守卫，匿名可达） */
+  @Get('undeclared')
+  undeclared(@Req() req: { user?: Viewer }) {
+    return describeViewer(req.user);
+  }
 }
 
 /** 类级声明（与 WatchHistoryController 相同写法），CurrentViewer 要读到类上的级别 */
@@ -118,7 +140,7 @@ class ClassLevelProbeController {
 // 每个用户一次低成本 bcrypt（cost 4）+ 一次登录比对；CI 机器比本地慢，留足余量
 jest.setTimeout(60_000);
 
-describe('严格可选登录 Access(optional)', () => {
+describe('全局 AccessGuard（真实 HTTP）：严格可选登录、staff / admin、默认拒绝', () => {
   let app: NestExpressApplication;
   let ds: DataSource;
   let cache: JsonCache;
@@ -185,6 +207,8 @@ describe('严格可选登录 Access(optional)', () => {
       ],
       controllers: [AuthController, ProbeController, ClassLevelProbeController, WatchHistoryController],
       providers: [
+        // 与 AppModule 相同：访问级别由全局 AccessGuard 执行（Access() 只写元数据）
+        { provide: APP_GUARD, useClass: AccessGuard },
         AuthService,
         JwtStrategy,
         UserService,
@@ -368,6 +392,71 @@ describe('严格可选登录 Access(optional)', () => {
       expect(res.body.message).toBe('用户不存在或已被禁用');
       await ds.getRepository(User).update(id, { isActive: true });
       expect((await withAuth(http().get('/probe/optional'), bearer(accessToken)).expect(200)).body.admin).toBe(true);
+    });
+  });
+
+  describe('staff / admin：没带或无效凭据 401，角色不够 403「权限不足」', () => {
+    it.each([
+      ['匿名', 401, 401, null],
+      ['无角色用户', 403, 403, 'plain'],
+      ['editor', 200, 403, 'editor'],
+      ['admin', 200, 200, 'admin'],
+    ] as const)('%s → staff %s / admin %s', async (_label, staffStatus, adminStatus, name) => {
+      const header = name ? bearer((await login(name)).accessToken) : undefined;
+      const get = (path: string) => (header ? withAuth(http().get(path), header) : http().get(path));
+      const staff = await get('/probe/staff');
+      const admin = await get('/probe/admin');
+      expect({ staff: staff.status, admin: admin.status }).toEqual({ staff: staffStatus, admin: adminStatus });
+      for (const res of [staff, admin]) {
+        if (res.status === 403) expect(res.body.message).toBe('权限不足');
+        if (res.status === 200) expect(res.body.id).toBe(ids[name as 'editor' | 'admin']);
+      }
+    });
+
+    it('无效 token 在 staff / admin 上同样 401（不会先报 403 暴露路由需要的角色）', async () => {
+      const expired = craftAccess(ids.admin, {
+        iat: Math.floor(Date.now() / 1000) - 7200,
+        exp: Math.floor(Date.now() / 1000) - 60,
+      });
+      await withAuth(http().get('/probe/staff'), bearer(expired)).expect(401);
+      await withAuth(http().get('/probe/admin'), 'Bearer null').expect(401);
+    });
+  });
+
+  describe('没声明访问级别的路由：默认拒绝，按仅管理员处理', () => {
+    it('匿名 / 无效 token 401，无角色与 editor 403，admin 放行；装配错误只记一次', async () => {
+      const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+      expect((await http().get('/probe/undeclared')).status).toBe(401);
+      expect((await withAuth(http().get('/probe/undeclared'), 'Bearer x.y.z')).status).toBe(401);
+      for (const name of ['plain', 'editor'] as const) {
+        const res = await withAuth(http().get('/probe/undeclared'), bearer((await login(name)).accessToken));
+        expect(res.status).toBe(403);
+        expect(res.body.message).toBe('权限不足');
+      }
+      const admin = await withAuth(http().get('/probe/undeclared'), bearer((await login('admin')).accessToken)).expect(200);
+      expect(admin.body).toMatchObject({ id: ids.admin, admin: true });
+
+      const wiring = logged.mock.calls.map(([m]) => String(m)).filter((m) => m.includes('ProbeController.undeclared'));
+      expect(wiring).toHaveLength(1);
+      expect(wiring[0]).toContain('没有声明访问级别');
+    });
+  });
+
+  describe('每个请求最多跑一次 JwtStrategy（鉴权只在全局 AccessGuard，路由上没有第二个 AuthGuard）', () => {
+    it.each([
+      ['public 带有效 token', 0, '/probe/public', true],
+      ['optional 没带头', 0, '/probe/optional', false],
+      ['optional 带有效 token', 1, '/probe/optional', true],
+      ['类级 optional 带有效 token', 1, '/probe-class', true],
+      ['authenticated', 1, '/probe/authenticated', true],
+      ['admin 路由、editor 角色不够（403 之前也只跑一次）', 1, '/probe/admin', true],
+      ['staff', 1, '/probe/staff', true],
+    ] as const)('%s → %s 次', async (_label, runs, path, withToken) => {
+      const { accessToken } = await login('editor');
+      const validate = jest.spyOn(strategy, 'validate');
+      const req = http().get(path);
+      await (withToken ? withAuth(req, bearer(accessToken)) : req);
+      expect(validate).toHaveBeenCalledTimes(runs);
     });
   });
 

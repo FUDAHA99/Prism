@@ -23,7 +23,7 @@ const RECENT_MAX_LIMIT = 50;
  *
  * 此前它们各自手工 base64 解 Authorization 头取 payload.sub 当 userId，
  * 不验签、不校验 exp、不查黑名单 —— 构造 `Bearer x.<自制payload>.y`
- * 即可读写任意用户的观看记录。现改用 Access('optional')（JwtOptionalGuard）走 Passport，
+ * 即可读写任意用户的观看记录。现改用 Access('optional')（由全局 AccessGuard 执行）走 Passport，
  * 由 JwtStrategy 统一完成验签、过期、禁用状态与黑名单检查；
  * 没带 Authorization 头时 req.user 为 undefined，按游客（guestId）处理；
  * 带了但无效（过期 / 注销 / 伪造）一律 401 —— 门户读的是同源 admin 后台留在 localStorage 的

@@ -1,5 +1,6 @@
 import 'reflect-metadata';
 import { Controller, Get, ValidationPipe } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
@@ -31,11 +32,12 @@ import { Comment } from '../comment/entities/comment.entity';
 import { Access } from '../../common/authz/access.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { HttpExceptionFilter } from '../../common/filters/http-exception.filter';
+import { AccessGuard } from '../../common/authz/access.guard';
 import { globalValidationPipeOptions } from '../../common/pipes/global-validation';
 
 /**
  * 角色分配端到端（批次 1-F-1），走真实 HTTP：真实 User / Role / Auth 控制器与服务、JwtStrategy、
- * Access 守卫链、全局 ValidationPipe；数据落在内存 SQLite，缓存是按 JSON 存取的 Map（与 Redis 一样）。
+ * 全局 AccessGuard、全局 ValidationPipe；数据落在内存 SQLite，缓存是按 JSON 存取的 Map（与 Redis 一样）。
  *
  * 「立即生效」的含义：改角色之后，同一个 access token 的下一个请求就必须按新角色鉴权。JwtStrategy 每个请求
  * 直接从库里取角色（UserService.findAuthIdentity），不读也不写 user:<id> 缓存，缓存回填竞态因此不影响鉴权。
@@ -127,6 +129,8 @@ describe('角色分配：MySQL 安全 SQL、前后端路由一致、改角色立
       ],
       controllers: [AuthController, UserController, RoleController, ProbeController],
       providers: [
+        // 与 AppModule 相同：Access() 只写元数据，访问级别由全局 AccessGuard 执行
+        { provide: APP_GUARD, useClass: AccessGuard },
         AuthService,
         JwtStrategy,
         UserService,

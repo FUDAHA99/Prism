@@ -7,13 +7,17 @@ import { AuthUser } from '../../modules/auth/interfaces/auth.interface';
  *
  * - 匿名（没带 Authorization 头）是 undefined；
  * - 带了有效 token 是 JwtStrategy 从库里加载的用户，roles 以库为准（不是 token 里的快照）；
- * - 带了无效 token 根本到不了 handler（JwtOptionalGuard 直接 401），所以这里不会出现「token 无效的用户」。
+ * - 带了无效 token 根本到不了 handler（AccessGuard 直接 401），所以这里不会出现「token 无效的用户」。
  */
 export type Viewer = AuthUser | undefined;
 
-function hasAnyRole(viewer: unknown, required: readonly string[]): boolean {
+/**
+ * 角色判定的唯一实现：AccessGuard 的 staff / admin 级别与下面的 isStaff / isAdmin 共用，保证「守卫放行」与
+ * 「handler 给全量视图」永远是同一个判断。roles 必须是数组且按角色名精确包含任一所需角色（字符串 'admin,editor'
+ * 不会被当成子串命中）；其余一律按无权处理。
+ */
+export function hasAnyRole(viewer: unknown, required: readonly string[]): boolean {
   const roles: unknown = (viewer as { roles?: unknown } | null | undefined)?.roles;
-  // 与 RolesGuard 同样的判定：roles 必须是数组且包含任一所需角色；其余一律按无权处理
   return Array.isArray(roles) && required.some((role) => roles.includes(role));
 }
 
@@ -29,7 +33,7 @@ const LEVELS_WITH_IDENTITY: readonly AccessLevel[] = ['optional', 'authenticated
 /**
  * handler 参数装饰器：`@CurrentViewer() viewer: Viewer`。与 CurrentUser 不同，匿名时得到 undefined 而不是报错。
  *
- * 挂在 Access('public') 的路由上是装配错误：public 不跑任何守卫，staff 带着 token 来也只会被当成匿名，
+ * 挂在 Access('public') 的路由上是装配错误：public 不解析 token，staff 带着 token 来也只会被当成匿名，
  * 全量视图永远出不来，而且不会有任何报错。这里直接抛错（500），让测试第一次请求就发现，
  * 而不是上线后才发现后台看不到草稿。
  */

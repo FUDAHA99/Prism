@@ -1,5 +1,6 @@
 import 'reflect-metadata';
 import { Provider, Type, ValidationPipe } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { JwtModule, JwtService } from '@nestjs/jwt';
@@ -24,13 +25,14 @@ import { MediaFile } from '../../modules/media/entities/media-file.entity';
 import { Content } from '../../modules/content/entities/content.entity';
 import { Category } from '../../modules/category/entities/category.entity';
 import { Comment } from '../../modules/comment/entities/comment.entity';
+import { AccessGuard } from '../authz/access.guard';
 import { HttpExceptionFilter } from '../filters/http-exception.filter';
 import { TransformInterceptor } from '../interceptors/transform.interceptor';
 import { globalValidationPipeOptions } from '../pipes/global-validation';
 
 /**
  * 测试用的真实 HTTP 应用（仅供 *.spec.ts 使用，不参与运行时）：
- * 被测 controller / service + 真实的 Access 守卫链（严格可选登录、JwtStrategy、RolesGuard）+ 与 main.ts 相同的
+ * 被测 controller / service + 与 AppModule 相同的全局 AccessGuard（严格可选登录、JwtStrategy、角色）+ 与 main.ts 相同的
  * 全局 ValidationPipe、异常过滤器、响应包装（{ success, data }）与 trust proxy，数据落在内存 SQLite。
  *
  * token 用测试密钥直接签发（与 AuthService 同形状），JwtStrategy 照常验签并从库里加载用户与角色 —— 不跑 bcrypt。
@@ -105,6 +107,8 @@ export async function createHttpHarness(options: HarnessOptions): Promise<HttpHa
     controllers: options.controllers,
     providers: [
       ...options.providers,
+      // 与 AppModule 相同：Access() 只写元数据，访问级别由全局 AccessGuard 执行
+      { provide: APP_GUARD, useClass: AccessGuard },
       AuthService,
       JwtStrategy,
       UserService,

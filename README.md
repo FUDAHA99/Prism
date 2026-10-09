@@ -125,7 +125,7 @@ bash scripts/deploy.sh
 ## 🔒 安全特性
 
 - JWT Access + Refresh Token 双 Token 机制
-- RBAC 角色权限（`@Roles` 装饰器 + `RolesGuard`）
+- RBAC 角色权限：全局默认拒绝，每个路由用 `Access(level)` 声明访问级别，由全局 `AccessGuard` 执行
 - bcrypt 密码哈希（salt rounds = 12）
 - NestJS ValidationPipe（whitelist 模式，拒绝多余字段）
 - CORS 白名单 + Rate Limit 限流

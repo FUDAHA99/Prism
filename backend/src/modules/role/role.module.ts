@@ -4,7 +4,6 @@ import { ConfigModule } from '@nestjs/config';
 
 import { RoleService } from './role.service';
 import { RoleController } from './role.controller';
-import { RolesGuard } from './guards/roles.guard';
 import { Role } from './entities/role.entity';
 import { Permission } from './entities/permission.entity';
 
@@ -17,7 +16,7 @@ import { AuditModule } from '../audit/audit.module';
     AuditModule,
   ],
   controllers: [RoleController],
-  providers: [RoleService, RolesGuard],
-  exports: [RoleService, RolesGuard, TypeOrmModule],
+  providers: [RoleService],
+  exports: [RoleService, TypeOrmModule],
 })
 export class RoleModule {}

@@ -2,9 +2,9 @@ import { isAdmin, isStaff } from './viewer';
 import { presentsCredentials } from '../../modules/auth/access-token.extractor';
 
 /**
- * 可选登录路由靠 isStaff / isAdmin 在全量视图与公开视图之间选择，判定必须与 RolesGuard 一致：
+ * 可选登录路由靠 isStaff / isAdmin 在全量视图与公开视图之间选择，判定必须与 AccessGuard 一致（两者共用 hasAnyRole）：
  * roles 必须是数组、按角色名精确匹配；其余一律按无权（公开视图）处理。
- * 实际请求里 req.user 的形成（以及无效 token 直接 401）见 common/guards/jwt-optional.guard.spec.ts。
+ * 实际请求里 req.user 的形成（以及无效 token 直接 401）见 common/authz/access.guard.http.spec.ts。
  */
 describe('viewer：isStaff / isAdmin', () => {
   it.each<[string, unknown, boolean, boolean]>([

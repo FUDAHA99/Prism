@@ -1,7 +1,7 @@
 import 'reflect-metadata';
 import * as fs from 'fs';
 import * as path from 'path';
-import { Controller, ExecutionContext, ForbiddenException, Get, Logger, RequestMethod } from '@nestjs/common';
+import { Controller, Get, Logger, RequestMethod, SetMetadata } from '@nestjs/common';
 import {
   CONTROLLER_WATERMARK,
   GUARDS_METADATA,
@@ -9,35 +9,40 @@ import {
   MODULE_METADATA,
   PATH_METADATA,
 } from '@nestjs/common/constants';
-import { MetadataScanner, Reflector } from '@nestjs/core';
+import { APP_GUARD, MetadataScanner } from '@nestjs/core';
 import { PathsExplorer } from '@nestjs/core/router/paths-explorer';
-import { AuthGuard } from '@nestjs/passport';
-import { Access, ACCESS_LEVEL_KEY, ACCESS_LEVELS, AccessLevel, ROLES_FOR_LEVEL } from './access.decorator';
+import { Access, ACCESS_LEVEL_KEY, ACCESS_LEVELS, AccessLevel } from './access.decorator';
+import { AccessGuard, UNDECLARED_ACCESS_LEVEL } from './access.guard';
 import { API_GLOBAL_PREFIX } from '../api-prefix';
-import { JwtOptionalGuard } from '../guards/jwt-optional.guard';
-import { RolesGuard } from '../../modules/role/guards/roles.guard';
-import { ROLES_KEY } from '../../modules/role/decorators/roles.decorator';
+import { ThrottlerBehindProxyGuard } from '../guards/throttler-behind-proxy.guard';
+import { createAccessProbe, Decision, ProbeUser } from '../testing/access-probe';
 import { AppModule } from '../../app.module';
 
 /**
  * 全路由访问矩阵回归测试（批次 1-F）。
  *
  * 清点时 143 条路由里 29 条完全无守卫、85 条只校验登录不校验角色 —— 靠人记得挂守卫不可靠。
+ * 1-F-1 先逐路由挂守卫并建立这份矩阵；1-F-3 翻转为全局默认拒绝：Access() 只写元数据，
+ * 由 AppModule 注册的全局 AccessGuard 统一执行，未声明级别的路由按仅管理员处理。
+ *
  * 这里从代码本身枚举全部路由，与下面声明式的 MATRIX 逐条比对：
- *   (a) 路由集合与 MATRIX 完全相等：新增接口必须先在这里登记级别，删掉的接口必须同步删除；
- *   (b) 每个 handler 都用 Access(...) 声明了访问级别，未声明即失败；
- *   (c) 守卫链与角色元数据和级别精确对应（AuthGuard 在 RolesGuard 之前）；
- *   (d) 用真实 RolesGuard + Reflector 对匿名 / 无效 token / 无角色 / user / editor / admin 逐一裁决；
+ *   (a) 路由集合与 MATRIX 完全相等，且每个路由都用 Access(...) 声明了与 MATRIX 一致的级别；
+ *   (b) 真实 AccessGuard（真实 Reflector + 真实 passport / JwtStrategy，见 common/testing/access-probe.ts）
+ *       对匿名 / 各种无效 token / 无角色 / user / editor / admin 的裁决，与 EXPECTED_DECISIONS 逐格相同；
+ *       放行时 req.user 的写法与 passport 的调用次数也与翻转前一致；
+ *   (c) 没有 Access 元数据（或级别未知）的路由被拒绝：按仅管理员处理并记装配错误；
+ *   (d) 路由上不再挂任何守卫（鉴权只在全局 AccessGuard，passport 每个请求最多跑一次），
+ *       AppModule 先注册限流守卫、再注册 AccessGuard；
  *   (e) portal 实际调用的接口都必须是 public / optional（portal 没有登录界面）；少数带同源 admin token 的
  *       调用（PORTAL_TOKEN_CALLS）必须在 401 时以游客身份重试；
- *   (f) admin SPA 调用的每个接口都能解析到已注册路由（防止删接口误伤后台）。
+ *   (f) admin SPA 调用的每个接口都能解析到已注册路由，且 admin 可访问（防止删接口误伤后台）。
  *
  * MATRIX 的来源是 docs/access-matrix.md 的 target 列，翻译规则：
  * public / public-filtered → 'public'（过滤在 service 里按已发布 / 字段白名单做，不解析 token）；
- * optional-auth → 'optional'（严格可选登录，见 JwtOptionalGuard）；staff:admin,editor → 'staff'；remove → 已删除。
+ * optional-auth → 'optional'（严格可选登录）；staff:admin,editor → 'staff'；remove → 已删除。
  *
- * 1-F-3 把 Access() 改为只写元数据、由全局 AccessGuard 执行时，(c)(d) 的守卫链部分随实现调整，
- * MATRIX 本身不变 —— 它就是翻转前后语义等价的依据。
+ * 语义等价的依据：MATRIX 与 EXPECTED_DECISIONS 两张表在翻转前后一字未改。翻转前它们约束的是每个路由上的守卫链
+ * （AuthGuard('jwt') / JwtOptionalGuard / RolesGuard + @Roles），翻转后约束的是同一组身份在真实 AccessGuard 上的裁决。
  */
 
 // ───────────────────────── 目标访问矩阵 ─────────────────────────
@@ -260,11 +265,14 @@ interface RouteInfo {
   methodLevel: AccessLevel | undefined;
   classLevel: AccessLevel | undefined;
   level: AccessLevel | undefined;
-  /** 生效的守卫链（类级在前、方法级在后，与 Nest 执行顺序一致），已去掉限流守卫 */
+  /** 路由自身挂的守卫（类级在前、方法级在后，与 Nest 执行顺序一致）。默认拒绝之后必须为空 */
   guards: unknown[];
-  /** 与 RolesGuard 相同的取法：方法级覆盖类级 */
-  roles: string[] | undefined;
+  /** 旧写法 @Roles(...) 的元数据（键 'roles'，方法级覆盖类级）。已没有任何守卫读它，出现即说明有人以为它还生效 */
+  legacyRoles: unknown;
 }
+
+/** 已删除的 Roles 装饰器写入的元数据键 */
+const LEGACY_ROLES_KEY = 'roles';
 
 const SRC_ROOT = path.resolve(__dirname, '../..');
 const REPO_ROOT = path.resolve(SRC_ROOT, '../..');
@@ -293,10 +301,16 @@ function controllersOnDisk(): AnyClass[] {
   return files.flatMap((f) => Object.values(require(f) as Record<string, unknown>).filter(isController));
 }
 
-/** 从 AppModule 递归收集实际注册的 controller（按模块导入顺序，即 Nest 的路由注册顺序） */
-function controllersInAppModule(): AnyClass[] {
+interface ModuleInfo {
+  moduleClass: Function;
+  controllers: AnyClass[];
+  providers: unknown[];
+}
+
+/** 从 AppModule 递归收集实际导入的模块（深度优先，与 Nest 扫描模块的顺序一致），含动态模块带来的 controller / provider */
+function modulesInAppModule(): ModuleInfo[] {
   const seen = new Set<unknown>();
-  const result: AnyClass[] = [];
+  const result: ModuleInfo[] = [];
   const visit = (entry: any) => {
     if (entry && typeof entry === 'object' && typeof entry.forwardRef === 'function') entry = entry.forwardRef();
     if (!entry || seen.has(entry)) return;
@@ -304,11 +318,17 @@ function controllersInAppModule(): AnyClass[] {
     const moduleClass = isDynamic ? entry.module : entry;
     if (typeof moduleClass !== 'function') return; // 异步动态模块（Promise）来自第三方库，不含本项目 controller
     seen.add(entry);
-    const controllers = [
-      ...(Reflect.getMetadata(MODULE_METADATA.CONTROLLERS, moduleClass) ?? []),
-      ...(isDynamic ? entry.controllers ?? [] : []),
-    ];
-    for (const c of controllers) if (!result.includes(c)) result.push(c);
+    result.push({
+      moduleClass,
+      controllers: [
+        ...(Reflect.getMetadata(MODULE_METADATA.CONTROLLERS, moduleClass) ?? []),
+        ...(isDynamic ? entry.controllers ?? [] : []),
+      ],
+      providers: [
+        ...(Reflect.getMetadata(MODULE_METADATA.PROVIDERS, moduleClass) ?? []),
+        ...(isDynamic ? entry.providers ?? [] : []),
+      ],
+    });
     const imports = [
       ...(Reflect.getMetadata(MODULE_METADATA.IMPORTS, moduleClass) ?? []),
       ...(isDynamic ? entry.imports ?? [] : []),
@@ -319,13 +339,22 @@ function controllersInAppModule(): AnyClass[] {
   return result;
 }
 
+/** AppModule 实际注册的 controller（按模块导入顺序，即 Nest 的路由注册顺序） */
+function controllersInAppModule(): AnyClass[] {
+  const result: AnyClass[] = [];
+  for (const { controllers } of modulesInAppModule()) {
+    for (const c of controllers) if (!result.includes(c)) result.push(c);
+  }
+  return result;
+}
+
 const METADATA_SCANNER = new MetadataScanner();
 
 function routesOf(controller: AnyClass): RouteInfo[] {
   const proto = controller.prototype;
   const classLevel = Reflect.getMetadata(ACCESS_LEVEL_KEY, controller) as AccessLevel | undefined;
   const classGuards: unknown[] = Reflect.getMetadata(GUARDS_METADATA, controller) ?? [];
-  const classRoles: string[] | undefined = Reflect.getMetadata(ROLES_KEY, controller);
+  const classRoles: unknown = Reflect.getMetadata(LEGACY_ROLES_KEY, controller);
   const controllerPaths = toArray<string>(Reflect.getMetadata(PATH_METADATA, controller), '/');
 
   // 与 Nest 的 PathsExplorer 完全相同：MetadataScanner 沿原型链收集方法名（子类在前、同名只取一次），
@@ -338,7 +367,7 @@ function routesOf(controller: AnyClass): RouteInfo[] {
       const method = RequestMethod[Reflect.getMetadata(METHOD_METADATA, handler) as RequestMethod];
       const methodLevel = Reflect.getMetadata(ACCESS_LEVEL_KEY, handler) as AccessLevel | undefined;
       const methodGuards: unknown[] = Reflect.getMetadata(GUARDS_METADATA, handler) ?? [];
-      const methodRoles: string[] | undefined = Reflect.getMetadata(ROLES_KEY, handler);
+      const methodRoles: unknown = Reflect.getMetadata(LEGACY_ROLES_KEY, handler);
       const handlerPaths = toArray<string>(Reflect.getMetadata(PATH_METADATA, handler), '/');
 
       return controllerPaths.flatMap((cp) =>
@@ -354,16 +383,17 @@ function routesOf(controller: AnyClass): RouteInfo[] {
             methodLevel,
             classLevel,
             level: methodLevel ?? classLevel,
-            // 限流只由全局 ThrottlerBehindProxyGuard 执行（额度用 @Throttle 覆盖）。路由上若再挂 ThrottlerGuard，
-            // 同一请求会按两套配置、两份存储重复计数 —— 不排除它，守卫链比对会直接失败
+            // 鉴权只由全局 AccessGuard 执行、限流只由全局 ThrottlerBehindProxyGuard 执行（额度用 @Throttle 覆盖）。
+            // 路由上再挂 AuthGuard 会让 passport 同一请求跑两遍；再挂 ThrottlerGuard 会按两套配置重复计数
             guards: [...classGuards, ...methodGuards],
-            roles: methodRoles ?? classRoles,
+            legacyRoles: methodRoles ?? classRoles,
           };
         }),
       );
     });
 }
 
+const APP_MODULES = modulesInAppModule();
 const APP_CONTROLLERS = controllersInAppModule();
 const DISK_CONTROLLERS = controllersOnDisk();
 const ROUTES: RouteInfo[] = APP_CONTROLLERS.flatMap(routesOf);
@@ -416,20 +446,30 @@ class InheritProbeController extends InheritProbeBase {
   }
 }
 
-// ───────────────────────── 守卫裁决模拟 ─────────────────────────
+// 装配错误探针：忘了声明级别、或绕过 Access() 写了未知级别。只用于 (c)，不注册进任何模块
+@Controller('wiring-probe')
+class WiringProbeController {
+  @Get('undeclared')
+  undeclared() {
+    return { secret: 'admin-only data' };
+  }
 
-const EXPECTED_GUARDS: Record<AccessLevel, unknown[]> = {
-  public: [],
-  optional: [JwtOptionalGuard],
-  authenticated: [AuthGuard('jwt')],
-  staff: [AuthGuard('jwt'), RolesGuard],
-  admin: [AuthGuard('jwt'), RolesGuard],
-};
+  @Get('unknown-level')
+  @SetMetadata(ACCESS_LEVEL_KEY, 'everyone')
+  unknownLevel() {
+    return { secret: 'admin-only data' };
+  }
+}
 
-/** 带了 Authorization 头、但 token 无效（伪造 / 过期 / 已注销 / 签发于改密之前 / 用户已禁用） */
+// ───────────────────────── 真实 AccessGuard 裁决 ─────────────────────────
+
+/** 带了 Authorization 头、但 token 无效：逐一裁决 probe.invalidHeaders() 里的每种写法（伪造 / 过期 / 已注销 / 吊销 / 禁用……） */
 const INVALID_TOKEN = Symbol('带了无效 token');
 
-const PRINCIPALS: ReadonlyArray<[string, unknown]> = [
+type Principal = ProbeUser | undefined | typeof INVALID_TOKEN;
+
+// 用户经真实 JwtStrategy 加载（token 里的 roles 快照一律写成 admin，不被采信），roles 以这里为准
+const PRINCIPALS: ReadonlyArray<[string, Principal]> = [
   ['匿名', undefined],
   ['无效 token', INVALID_TOKEN],
   ['roles 未定义', { id: 'u-1' }],
@@ -438,8 +478,6 @@ const PRINCIPALS: ReadonlyArray<[string, unknown]> = [
   ["roles ['editor']", { id: 'u-4', roles: ['editor'] }],
   ["roles ['admin']", { id: 'u-5', roles: ['admin'] }],
 ];
-
-type Decision = 'allow' | 401 | 403;
 
 // optional 是严格可选登录：没带头 = 匿名放行；带了无效 token 与 authenticated 一样 401（不静默降级为匿名）。
 // public 不解析 token，带什么头都一样放行。
@@ -452,39 +490,37 @@ const EXPECTED_DECISIONS: Record<AccessLevel, Decision[]> = {
   admin:         [401, 401, 403, 403, 403, 403, 'allow'],
 };
 
-const contextFor = (route: RouteInfo, user: unknown) =>
-  ({
-    getType: () => 'http',
-    getHandler: () => route.handler,
-    getClass: () => route.controller,
-    switchToHttp: () => ({ getRequest: () => ({ user }) }),
-  }) as unknown as ExecutionContext;
+const probe = createAccessProbe();
+let INVALID_HEADERS: Array<[string, string]> = [];
+
+type Verdict = Decision | Record<string, Decision>;
 
 /**
- * 按守卫链顺序裁决。AuthGuard('jwt') 由 passport 校验 token，单测里以「有无 req.user」
- * 近似（有效 token ⇔ 有 user）；JwtOptionalGuard 没带头放行、带了无效 token 401（严格可选登录）；
- * RolesGuard 用真实实现 + 真实 Reflector 读路由上的真实元数据。两个 JWT 守卫对真实请求的行为
- * （验签、过期、黑名单、吊销、禁用、角色取自库）由 common/guards/jwt-optional.guard.spec.ts 走 HTTP 覆盖。
+ * 真实 AccessGuard 对某个身份的裁决。无效 token 的每种写法必须得到同一个裁决，否则把各写法的裁决原样返回，
+ * 与期望值比较时就会显示是哪一种写法与众不同。
  */
-function decide(route: RouteInfo, user: unknown): Decision {
-  for (const guard of route.guards) {
-    if (guard === AuthGuard('jwt')) {
-      if (!user || user === INVALID_TOKEN) return 401;
-    } else if (guard === JwtOptionalGuard) {
-      if (user === INVALID_TOKEN) return 401;
-    } else if (guard === RolesGuard) {
-      try {
-        new RolesGuard(new Reflector()).canActivate(contextFor(route, user));
-      } catch (err) {
-        if (err instanceof ForbiddenException) return 403;
-        throw err;
-      }
-    } else {
-      throw new Error(`${describeRoute(route)} 挂了未知守卫 ${(guard as any)?.name ?? guard}`);
+async function decide(route: { controller: AnyClass; handler: Function }, principal: Principal): Promise<Verdict> {
+  if (principal === INVALID_TOKEN) {
+    const perHeader: Record<string, Decision> = {};
+    for (const [label, header] of INVALID_HEADERS) {
+      perHeader[label] = (await probe.decide(route.controller, route.handler, header)).decision;
     }
+    const distinct = [...new Set(Object.values(perHeader))];
+    return distinct.length === 1 ? distinct[0] : perHeader;
   }
-  return 'allow';
+  const header = principal === undefined ? undefined : probe.bearer(principal);
+  return (await probe.decide(route.controller, route.handler, header)).decision;
 }
+
+/** 各身份的裁决表（标签 → 裁决），与 EXPECTED_DECISIONS 对应列逐格比较 */
+async function decisionTable(route: { controller: AnyClass; handler: Function }): Promise<Record<string, Verdict>> {
+  const table: Record<string, Verdict> = {};
+  for (const [label, principal] of PRINCIPALS) table[label] = await decide(route, principal);
+  return table;
+}
+
+const expectedTable = (level: AccessLevel): Record<string, Verdict> =>
+  Object.fromEntries(PRINCIPALS.map(([label], i) => [label, EXPECTED_DECISIONS[level][i]]));
 
 // ───────────────────────── 前端调用点扫描 ─────────────────────────
 
@@ -579,12 +615,16 @@ const callKey = (c: ApiCall) => `${c.method} ${c.path}`;
 
 // ───────────────────────── 测试 ─────────────────────────
 
+// 每个路由十几次 passport 验签（含 bcrypt 之外的全部真实校验），CI 机器比本地慢，留足余量
+jest.setTimeout(30_000);
+
 describe('路由访问矩阵', () => {
   let loggerError: jest.SpyInstance;
 
-  beforeAll(() => {
-    // RolesGuard 在无角色元数据时会记录装配错误；这里会刻意触发，静音
+  beforeAll(async () => {
+    // AccessGuard 对未声明级别的路由记装配错误；(c) 会刻意触发并断言，这里静音
     loggerError = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    INVALID_HEADERS = await probe.invalidHeaders();
   });
 
   afterAll(() => {
@@ -629,7 +669,7 @@ describe('路由访问矩阵', () => {
       );
     });
 
-    it('继承自基类的 @Get 会被枚举出来，并被 (a)(b) 两项检查同时抓到', () => {
+    it('继承自基类的 @Get 会被枚举出来、被 (a) 抓到，且在运行时按未声明处理（仅管理员）', async () => {
       const routes = routesOf(InheritProbeController);
       // 只看原型自身（此前的写法）根本看不到 dump；Nest 却会注册它
       expect(Object.getOwnPropertyNames(InheritProbeController.prototype)).not.toContain('dump');
@@ -643,7 +683,7 @@ describe('路由访问矩阵', () => {
       expect(routes.map((r) => r.handlerName)).not.toContain('shadowed');
       expect(routeSignatures(InheritProbeController)).toEqual(nestRouteSignatures(InheritProbeController));
 
-      // (a) 的判定：不在 MATRIX 里 → 未登记；(b) 的判定：没有 Access → 未声明级别
+      // (a) 的判定：不在 MATRIX 里 → 未登记；没有 Access → 未声明级别
       expect(routes.filter((r) => !(r.key in MATRIX)).map((r) => r.key)).toEqual([
         'GET /api/v1/inherit-probe',
         'GET /api/v1/inherit-probe/dump',
@@ -651,10 +691,11 @@ describe('路由访问矩阵', () => {
       expect(routes.filter((r) => r.level === undefined).map(describeRoute)).toEqual([
         'GET /api/v1/inherit-probe/dump (InheritProbeController.dump)',
       ]);
-      // 继承来的 handler 的守卫链也照实读出（这里没有任何守卫 → 匿名可达）
+      // 继承来的 handler 路由上没有任何守卫；翻转前这意味着匿名可达，现在由全局 AccessGuard 按仅管理员处理
       const dump = routes.find((r) => r.handlerName === 'dump')!;
       expect(dump.guards).toEqual([]);
       expect(dump.handler).toBe(InheritProbeBase.prototype.dump);
+      expect(await decisionTable(dump)).toEqual(expectedTable('admin'));
     });
 
     it('MATRIX 的每个级别都是已知级别', () => {
@@ -663,7 +704,7 @@ describe('路由访问矩阵', () => {
     });
   });
 
-  describe('(b) 访问级别声明', () => {
+  describe('(a) 访问级别声明', () => {
     it('每个 handler 都用 Access(...) 声明了访问级别（未声明即失败）', () => {
       expect(ROUTES.filter((r) => r.level === undefined).map(describeRoute)).toEqual([]);
     });
@@ -675,42 +716,122 @@ describe('路由访问矩阵', () => {
     });
   });
 
+  describe('(c) 未声明访问级别的路由默认拒绝', () => {
+    const undeclared = { controller: WiringProbeController, handler: WiringProbeController.prototype.undeclared };
+    const unknownLevel = { controller: WiringProbeController, handler: WiringProbeController.prototype.unknownLevel };
+    const wiringErrors = () => loggerError.mock.calls.map(([message]) => String(message));
+
+    it('未声明时按 admin 级别处理：匿名 / 无效 token 401，非管理员 403，只有 admin 放行', async () => {
+      expect(UNDECLARED_ACCESS_LEVEL).toBe('admin');
+      expect(Reflect.getMetadata(ACCESS_LEVEL_KEY, undeclared.handler)).toBeUndefined();
+      expect(Reflect.getMetadata(ACCESS_LEVEL_KEY, WiringProbeController)).toBeUndefined();
+      expect(await decisionTable(undeclared)).toEqual(expectedTable('admin'));
+    });
+
+    it('元数据里是未知级别（绕过 Access() 写入）同样按 admin 处理，而不是放行', async () => {
+      expect(Reflect.getMetadata(ACCESS_LEVEL_KEY, unknownLevel.handler)).toBe('everyone');
+      expect(await decisionTable(unknownLevel)).toEqual(expectedTable('admin'));
+    });
+
+    it('记一条装配错误日志（指明 controller.handler），同一个 handler 只记一次', async () => {
+      const mentions = (name: string) => wiringErrors().filter((m) => m.includes(`WiringProbeController.${name}`));
+      // 不依赖前面用例的执行顺序：自己各请求两次（守卫实例是共享的，前面已请求过也一样只记一次）
+      for (const route of [undeclared, unknownLevel, undeclared, unknownLevel]) {
+        await probe.decide(route.controller, route.handler, probe.bearer({ id: 'u-4', roles: ['editor'] }));
+      }
+      expect(mentions('undeclared')).toHaveLength(1);
+      expect(mentions('undeclared')[0]).toContain('没有声明访问级别');
+      expect(mentions('undeclared')[0]).toContain('按仅管理员处理');
+      expect(mentions('unknownLevel')).toHaveLength(1);
+      expect(mentions('unknownLevel')[0]).toContain('声明了未知的访问级别 "everyone"');
+    });
+
+    it('已注册的路由一个都没有触发装配错误', async () => {
+      const admin = probe.bearer({ id: 'u-5', roles: ['admin'] });
+      for (const route of [...ROUTES, undeclared]) await probe.decide(route.controller, route.handler, admin);
+      const routeNames = ROUTES.map((r) => `${r.controller.name}.${r.handlerName}`);
+      expect(routeNames.length).toBe(Object.keys(MATRIX).length);
+      expect(wiringErrors().filter((m) => routeNames.some((name) => m.includes(`${name} `)))).toEqual([]);
+      // 对照：探针 handler 确实会被这条规则抓到（防止匹配写法失效后断言变空）
+      expect(wiringErrors().some((m) => m.includes('WiringProbeController.undeclared '))).toBe(true);
+    });
+  });
+
+  describe('(d) 守卫装配', () => {
+    it('AppModule 依次注册 ThrottlerBehindProxyGuard、AccessGuard 为全局守卫（先限流、再鉴权）', () => {
+      const appGuards = (providers: unknown[]) =>
+        providers
+          .filter((p): p is { provide: unknown; useClass: unknown } => !!p && typeof p === 'object' && (p as any).provide === APP_GUARD)
+          .map((p) => p.useClass);
+      // Nest 按扫描顺序（AppModule 最先）依次执行 APP_GUARD；两个都只在 AppModule 注册，顺序就只取决于这里。
+      // 以 useValue / useExisting 注册的守卫在这里映射为 undefined，同样会让断言失败
+      expect(appGuards(Reflect.getMetadata(MODULE_METADATA.PROVIDERS, AppModule) ?? [])).toEqual([
+        ThrottlerBehindProxyGuard,
+        AccessGuard,
+      ]);
+      expect(
+        APP_MODULES.filter((m) => m.moduleClass !== AppModule)
+          .filter((m) => appGuards(m.providers).length > 0)
+          .map((m) => m.moduleClass.name),
+      ).toEqual([]);
+    });
+  });
+
   describe.each(ROUTES.map((r) => [describeRoute(r), r] as const))('%s', (_name, route) => {
-    it('访问级别与 MATRIX 一致', () => {
+    it('(a) 访问级别与 MATRIX 一致', () => {
       expect(route.level).toBe(MATRIX[route.key]);
     });
 
-    it('(c) 守卫链与角色元数据精确对应该级别', () => {
-      const level = MATRIX[route.key];
-      expect(route.guards).toEqual(EXPECTED_GUARDS[level]);
-      const roles = ROLES_FOR_LEVEL[level];
-      expect(route.roles).toEqual(roles === undefined ? undefined : [...roles]);
+    it('(d) 路由上没有任何守卫，也没有遗留的 @Roles 元数据（鉴权只在全局 AccessGuard）', () => {
+      expect(route.guards).toEqual([]);
+      expect(route.legacyRoles).toBeUndefined();
     });
 
-    it('(d) 真实 RolesGuard 对各类身份的裁决符合该级别', () => {
-      const level = MATRIX[route.key];
-      const actual = PRINCIPALS.map(([, user]) => decide(route, user));
-      expect(Object.fromEntries(PRINCIPALS.map(([label], i) => [label, actual[i]]))).toEqual(
-        Object.fromEntries(PRINCIPALS.map(([label], i) => [label, EXPECTED_DECISIONS[level][i]])),
-      );
+    it('(b) 真实 AccessGuard 对各类身份的裁决符合该级别', async () => {
+      expect(await decisionTable(route)).toEqual(expectedTable(MATRIX[route.key]));
     });
 
-    if (ROLES_FOR_LEVEL[MATRIX[route.key]] === undefined) {
-      it('不做角色判断的路由上，RolesGuard 若被误挂也会 fail-closed（连 admin 都拒绝）', () => {
-        expect(() =>
-          new RolesGuard(new Reflector()).canActivate(contextFor(route, { id: 'a', roles: ['admin'] })),
-        ).toThrow(ForbiddenException);
-      });
-    }
+    it('(b) 放行后 req.user 与翻转前相同，passport 每个请求最多跑一次', async () => {
+      const level = MATRIX[route.key];
+      const observed: Record<string, unknown> = {};
+      const expected: Record<string, unknown> = {};
+      for (const [label, principal] of PRINCIPALS) {
+        const headers: Array<[string, string | undefined]> =
+          principal === INVALID_TOKEN
+            ? INVALID_HEADERS.map(([l, h]) => [`${label}:${l}`, h])
+            : [[label, principal === undefined ? undefined : probe.bearer(principal)]];
+        for (const [name, header] of headers) {
+          const outcome = await probe.decide(route.controller, route.handler, header);
+          observed[name] = {
+            strategyRuns: outcome.strategyRuns,
+            userWritten: outcome.userWritten,
+            user: outcome.user
+              ? { id: (outcome.user as ProbeUser).id, roles: (outcome.user as ProbeUser).roles }
+              : outcome.user,
+          };
+          const user = principal && principal !== INVALID_TOKEN ? principal : undefined;
+          const parsesToken = level !== 'public' && !(level === 'optional' && header === undefined);
+          expected[name] = {
+            // public 不解析 token；optional 没带凭据不跑 passport；其余每个请求恰好一次
+            strategyRuns: parsesToken ? 1 : 0,
+            // public 不碰 req.user；optional 没带凭据显式写 undefined；其余由 passport 写入（验不过时不写；
+            // 验过了但角色不够时已写入，随后 403 —— 与翻转前 AuthGuard 在前、RolesGuard 在后一致）
+            userWritten: level === 'public' ? false : parsesToken ? user !== undefined : true,
+            user: parsesToken && user ? { id: user.id, roles: user.roles } : undefined,
+          };
+        }
+      }
+      expect(observed).toEqual(expected);
+    });
   });
 
   describe('(e) portal 依赖的接口必须匿名可达', () => {
     const portalRoot = path.join(REPO_ROOT, 'portal');
 
-    it.each(PORTAL_PATHS)('%s 是 public 或 optional', (key) => {
+    it.each(PORTAL_PATHS)('%s 是 public 或 optional', async (key) => {
       expect(ROUTE_BY_KEY.has(key)).toBe(true);
       expect(['public', 'optional']).toContain(MATRIX[key]);
-      expect(decide(ROUTE_BY_KEY.get(key)!, undefined)).toBe('allow');
+      expect(await decide(ROUTE_BY_KEY.get(key)!, undefined)).toBe('allow');
     });
 
     it('PORTAL_PATHS 与 portal 源码里的调用点完全一致', () => {
@@ -748,18 +869,22 @@ describe('路由访问矩阵', () => {
   describe('(f) admin SPA 的调用都能解析到已注册路由', () => {
     const apiDir = path.join(REPO_ROOT, 'frontend', 'src', 'api');
 
-    it('frontend/src/api 下每个 apiClient 调用都命中路由，且 admin 角色可访问', () => {
+    it('frontend/src/api 下每个 apiClient 调用都命中路由，且 admin 角色可访问', async () => {
       expect(fs.existsSync(apiDir)).toBe(true);
       const calls = scanAdminCalls(apiDir);
       expect(calls.length).toBeGreaterThan(80); // 防止扫描规则失效后测试变空
 
-      const problems = calls.flatMap((c) => {
-        if (KNOWN_UNRESOLVED_ADMIN_CALLS.includes(callKey(c))) return [];
+      const problems: string[] = [];
+      for (const c of calls) {
+        if (KNOWN_UNRESOLVED_ADMIN_CALLS.includes(callKey(c))) continue;
         const route = resolveCall(c);
-        if (!route) return [`${callKey(c)} 解析不到后端路由  ← ${c.file}`];
-        const verdict = decide(route, { id: 'admin', roles: ['admin'] });
-        return verdict === 'allow' ? [] : [`${callKey(c)} → ${route.key} 对 admin 返回 ${verdict}`];
-      });
+        if (!route) {
+          problems.push(`${callKey(c)} 解析不到后端路由  ← ${c.file}`);
+          continue;
+        }
+        const verdict = await decide(route, { id: 'admin', roles: ['admin'] });
+        if (verdict !== 'allow') problems.push(`${callKey(c)} → ${route.key} 对 admin 返回 ${JSON.stringify(verdict)}`);
+      }
       expect(problems).toEqual([]);
     });
 

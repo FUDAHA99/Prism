@@ -17,7 +17,7 @@ import { unlessUndefined } from '../../movie/dto/movie-dto.helpers';
 /**
  * 角色名：小写字母开头，只含小写字母、数字、下划线、连字符，2–50 个字符（列宽 varchar(50)）。
  *
- * RolesGuard 按角色「名字」逐字比较，而 roles.name 的排序规则（utf8mb4_unicode_ci）把大小写、全角、带重音的写法
+ * AccessGuard 按角色「名字」逐字比较，而 roles.name 的排序规则（utf8mb4_unicode_ci）把大小写、全角、带重音的写法
  * 判为同一个名字：此前可以建出「Admin」「ａdmin」「аdmin」（西里尔字母）这类看起来就是管理员、实际什么权限都
  * 没有的角色，管理员给人分配时以为给了 admin。限定成 ASCII 小写标识符后，名字所见即所得。
  */

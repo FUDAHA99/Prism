@@ -29,7 +29,7 @@ const USER_ROLES_TABLE = 'user_roles';
 /**
  * 系统角色：访问矩阵里 Access('admin' | 'staff') 引用的角色名。
  *
- * RolesGuard 按角色「名字」放行，所以把 admin 改名或删掉，所有 admin 路由立刻对全员拒绝，
+ * AccessGuard 按角色「名字」放行，所以把 admin 改名或删掉，所有 admin 路由立刻对全员拒绝，
  * 管理员把自己锁在外面；editor 同理。这里按名字判定而不只看 isSystem 列：seed 之前在后台手工建的
  * editor 没有 isSystem，而此前 PATCH /roles/:id 也能把 isSystem 改成 false 再删。
  */

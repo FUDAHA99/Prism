@@ -1,7 +1,7 @@
 import 'reflect-metadata';
-import { BadRequestException, ExecutionContext, Logger, ValidationPipe } from '@nestjs/common';
+import { BadRequestException, ExecutionContext, Injectable, Logger, ValidationPipe } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
-import { AuthGuard } from '@nestjs/passport';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import * as request from 'supertest';
@@ -14,14 +14,25 @@ import { AuditService } from '../audit/audit.service';
 import { RunCollectDto } from './dto/run-collect.dto';
 import { HttpExceptionFilter } from '../../common/filters/http-exception.filter';
 import { globalValidationPipeOptions } from '../../common/pipes/global-validation';
+import { AccessGuard } from '../../common/authz/access.guard';
 
 /**
- * 采集接口走真实 HTTP：真实 CollectController / CollectSourceService / 全局 ValidationPipe / RolesGuard，
- * 只把 JWT 解析换成「已登录的 admin」，仓库与执行器用 mock。
+ * 采集接口走真实 HTTP：真实 CollectController / CollectSourceService / 全局 ValidationPipe / 全局 AccessGuard
+ * （按路由声明的级别与角色裁决），只把 JWT 解析换成「已登录的 admin」，仓库与执行器用 mock。
  * 验证 class DTO 真正接到了路由上，以及「测试连接 / 探查分类」对内网地址的拦截与文案。
  */
 
 const ADMIN_USER = { id: 'admin-id', email: 'admin@cms.com', roles: ['admin'] };
+
+/** 真实的级别 / 角色判定，只把 passport 认证换成「每个请求都是已登录的 admin」 */
+@Injectable()
+class AdminSessionAccessGuard extends AccessGuard {
+  protected async authenticate(context: ExecutionContext): Promise<unknown> {
+    context.switchToHttp().getRequest().user = ADMIN_USER;
+    return ADMIN_USER;
+  }
+}
+
 const BLOCKED = '请求采集接口失败：目标地址指向内网、本机或保留地址，已拦截';
 const SOURCE_ID = 'a1b2c3d4-0000-4000-8000-000000000001';
 
@@ -66,16 +77,9 @@ describe('CollectController（HTTP）', () => {
         { provide: getRepositoryToken(CollectSource), useValue: sourceRepo },
         { provide: getRepositoryToken(CollectCategoryMapping), useValue: mappingRepo },
         { provide: AuditService, useValue: { log: jest.fn() } },
+        { provide: APP_GUARD, useClass: AdminSessionAccessGuard },
       ],
-    })
-      .overrideGuard(AuthGuard('jwt'))
-      .useValue({
-        canActivate: (ctx: ExecutionContext) => {
-          ctx.switchToHttp().getRequest().user = ADMIN_USER;
-          return true;
-        },
-      })
-      .compile();
+    }).compile();
     app = moduleRef.createNestApplication<NestExpressApplication>();
     app.useGlobalPipes(new ValidationPipe(globalValidationPipeOptions()));
     app.useGlobalFilters(new HttpExceptionFilter());

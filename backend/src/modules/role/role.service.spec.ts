@@ -192,7 +192,7 @@ describe('RoleService', () => {
       ['isSystem 的自定义角色', R_CUSTOM_SYSTEM],
     ])('改名 %s → 400，不落库', async (_label, target) => {
       await expect(service.update(target.id, { name: 'renamed' })).rejects.toBeInstanceOf(BadRequestException);
-      // 大小写不同也是改名：RolesGuard 按名字大小写敏感匹配
+      // 大小写不同也是改名：AccessGuard 按名字大小写敏感匹配
       await expect(service.update(target.id, { name: target.name.toUpperCase() })).rejects.toBeInstanceOf(
         BadRequestException,
       );

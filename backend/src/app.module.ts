@@ -4,6 +4,7 @@ import { ThrottlerModule } from '@nestjs/throttler';
 import { ScheduleModule } from '@nestjs/schedule';
 import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerBehindProxyGuard } from './common/guards/throttler-behind-proxy.guard';
+import { AccessGuard } from './common/authz/access.guard';
 
 // 配置导入
 import configuration from './config/configuration';
@@ -85,10 +86,18 @@ import { RedisModule } from './shared/redis/redis.module';
     CollectModule,
     WatchHistoryModule,
   ],
+  // 全局守卫按这里的注册顺序执行（两者都只在这里注册，别的模块不要再注册 APP_GUARD，否则顺序取决于模块扫描顺序）：
+  // 1. 先限流：未登录 / 无权限的请求也要计数，否则匿名刷受保护接口永远只拿 401、不会被限流；
+  // 2. 再鉴权：默认拒绝。每个路由用 Access(level) 声明访问级别，未声明的按仅管理员处理（common/authz/access.guard.ts）。
+  // route-access.spec.ts 断言这个顺序，并逐条路由验证 AccessGuard 的裁决与访问矩阵一致。
   providers: [
     {
       provide: APP_GUARD,
       useClass: ThrottlerBehindProxyGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: AccessGuard,
     },
   ],
 })

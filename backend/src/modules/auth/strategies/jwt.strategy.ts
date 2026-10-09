@@ -46,7 +46,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         throw new UnauthorizedException('Token已失效，请重新登录');
       }
 
-      // 启用状态与角色每个请求直接从库里取（一条 SQL，不经 user:<id> 缓存）：RolesGuard 只认这里的 roles，
+      // 启用状态与角色每个请求直接从库里取（一条 SQL，不经 user:<id> 缓存）：AccessGuard 只认这里的 roles，
       // 降权 / 禁用 / 删除提交之后的下一个请求就按新状态鉴权，不会被缓存回填的旧值放行
       const user = await this.authService.validateUserFromPayload(payload);
       if (!user) {

@@ -183,16 +183,18 @@ async findAll() {
 }
 ```
 
-**Guard 使用规范**：
+**访问控制规范**（全局默认拒绝，见 `backend/src/common/authz/`）：
 
 ```typescript
-// ✅ 正确：使用 passport 的 AuthGuard
-import { AuthGuard } from '@nestjs/passport';
-@UseGuards(AuthGuard('jwt'))
+// ✅ 正确：每个路由用 Access 声明访问级别，由全局 AccessGuard 执行
+import { Access } from '../../common/authz/access.decorator';
+@Access('staff')   // public | optional | authenticated | staff | admin
 
-// ❌ 错误：JwtAuthGuard 不存在
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+// ❌ 错误：路由上再挂守卫（passport 会跑两遍；route-access.spec.ts 会失败）
+@UseGuards(AuthGuard('jwt'))
 ```
+
+没声明级别的路由按仅管理员处理；新增路由还要在 `route-access.spec.ts` 的 MATRIX 里登记级别。
 
 **关系查询时避免暴露敏感字段**：
 
@@ -271,8 +273,8 @@ export class FriendLinkService {
 @ApiTags('友情链接')
 @Controller('friend-links')
 export class FriendLinkController {
-  @Get() async findAll() { return this.service.findAll(); }
-  @Post() @UseGuards(AuthGuard('jwt')) async create(@Body() dto) { return this.service.create(dto); }
+  @Get() @Access('public') async findAll() { return this.service.findAll(); }
+  @Post() @Access('admin') async create(@Body() dto) { return this.service.create(dto); }
 }
 ```
 
