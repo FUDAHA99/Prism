@@ -260,6 +260,47 @@ next 14 在生产但已有缓解）；backend 生产镜像 635MB → 约 403MB�
 **本批不做**：NestJS 11、Next 16 / React 19、vite 6 + vitest 4、react-router 7（登记例外）、tailwind 4、Node 22（建议作为下一个独立 PR，
 Node 20 已停止维护）、`@nestjs/swagger` 去留（87 个文件在用装饰器但从未挂载文档，需单独决策）、任何 `npm audit fix` / 全量 `npm update`。
 
+### 批次 2 / 3A —— 已完成 ✅（2026-10-09，16 个提交 `f7c7bbb`..）
+
+| | 基线 | 完成后 |
+|---|---|---|
+| npm audit 全量（三端合计，受影响包数） | 177 | **91** |
+| npm audit 生产依赖 | 39 | **14** |
+| critical | 10 | **3**（vitest、tinypool 在前端开发依赖，待 vite 6；next 14 在生产，已有缓解） |
+| backend 生产镜像 | 635 MB | **399 MB**（−37%） |
+| backend 镜像内 node_modules | 356 MB | 168 MB |
+| frontend 构建期 node_modules | 551 MB / 1535 个 | 306 MB / 535 个 |
+| frontend / portal 镜像 | 98.0 / 224.7 MB | 基本不变 |
+
+- **backend**：lock 中 4 条 npmmirror 地址改回官方源；删 prisma、aws-sdk、`@aws-sdk/client-s3`、csurf、pg、uuid、passport-local、
+  `@nestjs/mapped-types`、`@nestjs/schedule`；声明 dotenv；删无人消费的 `database.config` 与从未跑通的 SQLite 分支，`DB_TYPE`
+  拼错时启动即失败；**锁定 better-sqlite3 12.9.0 后**做范围内升级（typeorm 0.3.31 含 SQL 注入修复、mysql2、proxy-addr 等）；bcrypt 5 → 6。
+- **frontend**：先显式声明 `tslib`，再删 Storybook、react-query v3、13 个零引用依赖、未接入的 devDependencies 与坏脚本、
+  不起作用的 tailwind 与 react-hot-toast；axios 1.20、echarts 6.1、react-router 6.30.6、postcss 8.5.29。
+- **portal**：postcss 8.5.29 并以 `overrides` 统一 next 内嵌的版本；构建期 browserslist 链刷新。
+- **CI**：新增独立的依赖审计 workflow（`.github/workflows/audit.yml` + `scripts/audit-gate.mjs` + `.github/audit-allowlist.json`）：
+  lock 只许官方源；生产依赖出现**未登记**的公告或登记**过期**即失败，开发依赖只提示；每周一定时跑。例外清单到期 2027-01-09，
+  届时定时任务会按设计变红，需要重新评估。README 新增「依赖安装与安全审计」。
+
+**验证**：每个触及 backend 运行时依赖的提交都在一次性容器里实际构建了生产镜像（无 gyp 错误、bcrypt 加载 musl 预编译、
+better-sqlite3 可用）；bcrypt 跨版本冒烟（bcrypt 5 写的哈希在 6 下登录、6 写的哈希回滚到 5 也能登录，真实 MySQL）；
+typeorm 升级后 `DB_SYNC=true` 启动 0 条 DDL；隔离 Docker 端到端（旧版站点原地升级 + 全新安装两条路径、路由矩阵、后台全页面重放、
+门户冒烟）；**新旧两版后台 10 个页面截图逐像素比对**，除仪表盘实时数字外 0 像素差异（去掉 tailwind 不影响界面）。
+
+**例外登记**（`.github/audit-allowlist.json`，均需在升级对应大版本时消除）：
+- backend 生产 15 条：都要 Nest 11（`@nestjs/core` SseStream 的那条当前不可达 —— 后端没有 SSE 端点，新增时必须重评）。
+- frontend 2 条：react-router `GHSA-wrjc` / `GHSA-337j`，只有 v7 能修；导航目标均为静态、纯 CSR。**一旦出现从查询参数或后端数据读取跳转目标的逻辑，必须迁到 v7。**
+- portal 23 条：next 14，需 Next 16；`GHSA-p293` 只影响 Windows 主机，`GHSA-2xp9` 已由关闭图片优化器 + nginx 屏蔽缓解。
+
+**已知 / 后续**：
+- `better-sqlite3` 锁在 12.9.0 由 `build-packaging.spec.ts` 守着（镜像仍是 node:20 时改回 `^` 会让 CI 变红）；升 Node 22 后解除。
+- **后台 Markdown 预览会渲染原始 HTML 且未净化**（存量问题）：editor 写入的 HTML 在管理员的同源页面执行，token 在 localStorage —— 可能被用来从 editor 提权到 admin，**列为下一步优先项**。
+- **上传的文件从未写入磁盘**（存量问题，媒体功能实际不可用）：列为下一步优先项。
+- 开发依赖里的 js-yaml 因去重回落到 4.1.0（只影响本地 eslint 读配置）；例外清单暂不记录登记时的严重级别（公告被上调时不会提醒）；后台 favicon 404。
+
+**Node 22**（第七节 #4）：Node 20 已于 2026-04-30 停止维护；三端已在 `node:22-alpine` 上实测通过，作为下一个独立 PR，
+完成后才能解除 better-sqlite3 锁定、升 vitest 4 / vite 6。
+
 **其他已记录、未排期**：JSON 请求体 100kb 上限导致超长章节无法保存（413）；`prism_nginx_logs` 卷里只有指向
 stdout 的符号链接，实际不持久化日志；helmet 与 nginx 安全头重复、nginx 的 Referrer-Policy 覆盖了 helmet 的
 `no-referrer`；漫画章节上传无并发上限且页序按完成顺序；上传字节不落盘（媒体功能不可用）；frontend 的

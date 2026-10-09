@@ -72,7 +72,7 @@ prism-cms/
 
 ### 方式一：本地开发
 
-**前置条件**：Node.js 18+、Docker（用于 MySQL + Redis）
+**前置条件**：Node.js 20.x、Docker（用于 MySQL + Redis）
 
 ```bash
 # 1. 启动数据库
@@ -147,6 +147,10 @@ npm i <包名>@<版本> --registry=https://registry.npmjs.org
 - 新装或升级的包会把 `https://registry.npmmirror.com/...` 写进 `package-lock.json` 的 `resolved`，之后 CI 和 Docker 构建都会去镜像站下载。
 
 `npm audit` 走 npmmirror 则会直接报错退出（镜像站没有实现审计接口），不会显示「没有漏洞」。
+
+**刷新传递依赖时留冷却期**：`npm update <包名>` 这类刷新会把刚发布几天的版本锁进 lock（批次 2/3A 刷新时就有发布当天的
+运行时依赖进来）。做非安全修复目的的刷新时加 `--before=<7 天前的日期>`，并在提交前跑 `npm audit signatures --registry=https://registry.npmjs.org`
+校验签名与来源证明。
 
 **查漏洞用审计门禁脚本** `scripts/audit-gate.mjs`。它零依赖，只读 lockfile，不需要先装依赖：
 

@@ -10,7 +10,7 @@
 
 | 工具 | 最低版本 | 安装方式 |
 |------|----------|----------|
-| Node.js | 18.x | https://nodejs.org |
+| Node.js | 20.x（与 Dockerfile、CI 一致；better-sqlite3 12.9.0 的预编译包从 Node 20 起） | https://nodejs.org |
 | npm | 9.x | 随 Node.js 附带 |
 | Git | 2.x | https://git-scm.com |
 
@@ -22,7 +22,7 @@
 cd backend
 
 # 安装依赖
-npm install
+npm install --registry=https://registry.npmjs.org   # 必须走官方源，见 README「依赖安装与安全审计」
 
 # 配置环境变量
 cp .env.example .env
@@ -39,7 +39,7 @@ npm run build
 npm run start:prod
 ```
 
-后端启动后可访问 Swagger 文档：`http://localhost:3001/api/docs`
+后端没有挂载 Swagger 文档页（代码里有 `@ApiTags` 等装饰器，但从未调用 `SwaggerModule.setup`，`/api/docs` 不存在）；接口说明见 `docs/api.md`。
 
 ### 1.3 前端启动
 
@@ -47,7 +47,7 @@ npm run start:prod
 cd frontend
 
 # 安装依赖
-npm install
+npm install --registry=https://registry.npmjs.org
 
 # 开发模式启动（HMR + Vite Proxy）
 npm run dev
