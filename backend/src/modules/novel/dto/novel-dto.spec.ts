@@ -194,8 +194,6 @@ describe('CreateNovelDto / UpdateNovelDto', () => {
       ['metaDescription', 'x'.repeat(501)],
       // TEXT 列按字节：21846 个汉字 = 65538 字节
       ['intro', '汉'.repeat(21846)],
-      ['score', 10.1],
-      ['score', -1],
       ['score', 'abc'],
       ['serialStatus', 'done'],
       ['isFeatured', 'false'],
@@ -221,9 +219,18 @@ describe('CreateNovelDto / UpdateNovelDto', () => {
       'cover.jpg',
       'https://img.example.com/a b.jpg',
       `https://img.example.com/${'x'.repeat(1000)}.jpg`,
-    ])('封面 %s → 400', async (coverUrl) => {
+    ])('新建封面 %s → 400；编辑 DTO 只校验类型与长度（改动时由 service 按同一规则拒绝）', async (coverUrl) => {
       await rejects(createDto({ ...createMinimal, coverUrl }));
-      await rejects(updateDto({ coverUrl }));
+      if (coverUrl.length > 1000) await rejects(updateDto({ coverUrl }));
+      else await expect(updateDto({ coverUrl })).resolves.toMatchObject({ coverUrl });
+    });
+
+    it('评分：新建限 0–10；编辑只校验是数字（采集来的 99.9 原样回传要能保存）', async () => {
+      for (const score of [10.1, -1]) {
+        await rejects(createDto({ ...createMinimal, score }));
+        await expect(updateDto({ score })).resolves.toMatchObject({ score });
+      }
+      await expect(updateDto({ score: '99.9' })).resolves.toMatchObject({ score: 99.9 });
     });
 
     it.each(['', '/uploads/a.jpg', 'https://img.example.com/a.jpg', 'http://img.example.com/a.jpg'])('封面 %p 可以', async (coverUrl) => {

@@ -291,9 +291,15 @@ describe('CreateMovieDto / UpdateMovieDto', () => {
       await rejects(updateDto({ [key]: value }));
     });
 
+    it('评分：新建限 0–10；编辑只校验是数字（采集来的 99.9 原样回传要能保存，改过的值由 service 限 0–10）', async () => {
+      for (const score of [10.1, -0.1]) {
+        expect(await rejects(createDto({ ...createMinimal, score }))).toContain('score');
+        await expect(updateDto({ score })).resolves.toMatchObject({ score });
+      }
+      await expect(updateDto({ score: '99.9' })).resolves.toMatchObject({ score: 99.9 });
+    });
+
     it.each<[string, unknown]>([
-      ['score', 10.1],
-      ['score', -0.1],
       ['score', 'abc'],
       ['year', 10000],
       ['year', 2023.5],
@@ -333,10 +339,17 @@ describe('CreateMovieDto / UpdateMovieDto', () => {
       ' https://img.example.com/p.jpg',
       'img.example.com/p.jpg',
       'mac://upload/vod/p.jpg',
-    ])('海报 / 预告片 / 修复封面拒绝 %j', async (url) => {
+    ])('新建的海报 / 预告片、修复封面拒绝 %j；编辑 DTO 只校验类型与长度（改动时由 service 按同一规则拒绝）', async (url) => {
       expect(await rejects(createDto({ ...createMinimal, posterUrl: url }))).toContain('海报');
-      expect(await rejects(updateDto({ trailerUrl: url }))).toContain('预告片');
+      expect(await rejects(createDto({ ...createMinimal, trailerUrl: url }))).toContain('预告片');
       expect(await rejects(posterDto({ posterUrl: url }))).toContain('封面');
+      // 采集旧值经编辑页原样回传：DTO 层放行
+      await expect(updateDto({ posterUrl: url, trailerUrl: url })).resolves.toMatchObject({ posterUrl: url });
+    });
+
+    it('编辑 DTO 的海报 / 预告片仍限类型与列宽', async () => {
+      expect(await rejects(updateDto({ posterUrl: `https://img.example.com/${'x'.repeat(1000)}` }))).toContain('posterUrl');
+      expect(await rejects(updateDto({ trailerUrl: ['https://video.example.com/t.mp4'] }))).toContain('trailerUrl');
     });
 
     it('修复封面不能提交空串', async () => {

@@ -956,6 +956,52 @@ describe('小说模块 HTTP', () => {
       expect((await rowById(id))!.publishedAt).toEqual(new Date('2026-09-01T00:00:00.000Z'));
     });
 
+    it.each<[string, Partial<Novel>]>([
+      ['相对路径封面', { coverUrl: 'upload/vod/20240101-1/a.jpg' }],
+      ['//host 封面', { coverUrl: '//img.example.com/a.jpg' }],
+      ['带首尾空白的封面', { coverUrl: ' https://img.example.com/a.jpg ' }],
+      ['超过 10 的评分（DECIMAL(3,1) 最高 99.9）', { score: 99.9 }],
+    ])('采集旧值（%s）经编辑页原样回传：200，只改了提交的那一项（此前整次保存 400）', async (_label, legacy) => {
+      const id = (
+        await novels.save({
+          title: '采集旧值',
+          slug: `legacy-${randomUUID().slice(0, 8)}`,
+          status: NovelStatus.PUBLISHED,
+          collectSource: COLLECT_SOURCE_ID,
+          ...legacy,
+        } as Partial<Novel>)
+      ).id;
+      const before = await rowById(id);
+      const loaded = (await get(`/novels/${id}`, 'admin').expect(200)).body;
+      await patch(`/novels/${id}`, 'admin', formPayload({ ...loaded, score: String(loaded.score), intro: '编辑过' }, false)).expect(200);
+      const after = await rowById(id);
+      expect(after).toEqual({ ...before, intro: '编辑过', updatedAt: after!.updatedAt });
+    });
+
+    it.each<[string, Record<string, unknown>, string]>([
+      ['封面改成 javascript:', { coverUrl: 'javascript:alert(1)' }, '封面只能是 http(s) 地址或站内路径（/uploads/...）'],
+      ['封面改成另一个相对路径', { coverUrl: 'upload/vod/other.jpg' }, '封面只能是 http(s) 地址或站内路径（/uploads/...）'],
+      ['评分改成 10.5', { score: 10.5 }, '评分只能在 0 到 10 之间'],
+    ])('改动的值仍按规则校验：%s → 400，不落库', async (_label, change, message) => {
+      const id = (
+        await novels.save({
+          title: '采集旧值',
+          slug: `legacy-bad-${randomUUID().slice(0, 8)}`,
+          status: NovelStatus.PUBLISHED,
+          coverUrl: 'upload/vod/legacy.jpg',
+          score: 99.9,
+        } as Partial<Novel>)
+      ).id;
+      const before = await rowById(id);
+      const loaded = (await get(`/novels/${id}`, 'admin').expect(200)).body;
+      const res = await patch(`/novels/${id}`, 'admin', { ...formPayload(loaded, false), ...change }).expect(400);
+      expect(res.body.message).toBe(message);
+      expect(await rowById(id)).toEqual(before);
+      // 改成合法值照常保存
+      await patch(`/novels/${id}`, 'admin', { coverUrl: '/uploads/new.jpg', score: 9.5 }).expect(200);
+      expect(await rowById(id)).toMatchObject({ coverUrl: '/uploads/new.jpg', score: 9.5 });
+    });
+
     it('编辑页「保存并发布」草稿：status 与 publishedAt 一起写上（此前只改 status）', async () => {
       const created = (await post('/novels', 'admin', formPayload(newForm({ title: '待发', slug: 'publish-via-patch' }), false)).expect(201)).body;
       expect(created.publishedAt).toBeNull();

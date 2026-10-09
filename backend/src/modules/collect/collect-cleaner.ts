@@ -2,6 +2,7 @@
  * collect-cleaner.ts
  * 采集数据清洗工具函数（纯函数，无副作用）
  */
+import { hasDangerousScheme } from '../movie/dto/movie-dto.helpers'
 
 // 标题中常见的垃圾标签
 const TITLE_BRACKET_RE = /【[^】]*】|\[[^\]]*\]|（[^）]*）|\([^)]*\)/g
@@ -87,23 +88,47 @@ export function cleanPersonList(raw: string | null | undefined): string | null {
   return result.length > 0 ? result.join(',') : null
 }
 
-// 已知挂掉/无效的图片域名黑名单（可按需扩充）
-const DEAD_IMAGE_DOMAINS: string[] = []
+/** 海报 / 封面列宽（movies.posterUrl、novels.coverUrl、comics.coverUrl 都是 varchar(1000)） */
+export const COLLECTED_IMAGE_URL_MAX = 1000
 
 /**
- * 校验封面图 URL 是否格式合法（不发网络请求，只做格式校验）
- * 真正的网络可用性检测在 PosterCheckerService 中异步进行
+ * 采集来的海报 / 封面地址规范化成 http(s) 绝对地址，做不到就返回 null（不入库）。
+ *
+ * 资源站（MacCMS）给的 vod_pic 五花八门，此前原样入库：后台编辑页把它原样回传、被 Update DTO 判为非法，整条记录改不了；
+ * 门户 <img> 拿到 javascript: / data: 之类也不该出现。规则：
+ * - 去首尾空白；javascript: / vbscript: / data: / file: 直接丢弃（与剧集地址的 IsSafeMediaUrl 同一判定）；
+ * - `mac://host/...`（MacCMS 的写法，表示「站点配置的协议」）与 `//host/...` 补成 https；
+ * - 相对路径（`upload/vod/a.jpg`、`/upload/a.jpg`）相对于采集源接口地址的站点根解析 —— 指的是资源站上的图，
+ *   不是本站的 /uploads；
+ * - 结果不是 http(s)，或超过列宽，返回 null。
  */
-export function isValidImageUrl(url: string | null | undefined): boolean {
-  if (!url) return false
+export function normalizeCollectedImageUrl(raw: unknown, sourceApiUrl: string): string | null {
+  if (typeof raw !== 'string') return null
+  let value = raw.trim()
+  if (!value || hasDangerousScheme(value)) return null
+  if (/^mac:\/\//i.test(value)) value = `https://${value.slice('mac://'.length)}`
+  else if (value.startsWith('//')) value = `https:${value}`
+
+  let base: URL | undefined
   try {
-    const u = new URL(url)
-    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false
-    if (DEAD_IMAGE_DOMAINS.some((d) => u.hostname.includes(d))) return false
-    return true
+    base = new URL('/', sourceApiUrl)
   } catch {
-    return false
+    base = undefined
   }
+  let url: URL
+  try {
+    url = base ? new URL(value, base) : new URL(value)
+  } catch {
+    return null
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
+  return url.href.length <= COLLECTED_IMAGE_URL_MAX ? url.href : null
+}
+
+/** 评分列是 DECIMAL(3,1)，站内评分按 0–10：上游给的评分收进这个范围（超过 99.9 时此前整条写库失败），保留一位小数 */
+export function clampCollectedScore(score: number | null): number | null {
+  if (score === null || !Number.isFinite(score)) return null
+  return Math.round(Math.min(Math.max(score, 0), 10) * 10) / 10
 }
 
 /**

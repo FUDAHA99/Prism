@@ -29,7 +29,8 @@ import {
   cleanIntro,
   cleanPersonList,
   buildAliases,
-  isValidImageUrl,
+  clampCollectedScore,
+  normalizeCollectedImageUrl,
 } from './collect-cleaner';
 import { PosterCheckerService } from './poster-checker.service';
 import { Clock, SYSTEM_CLOCK, wholeSecond } from '../../common/clock/clock';
@@ -264,7 +265,9 @@ export class CollectExecutorService {
 
     // ── 数据清洗 ──
     const cleanedTitle = cleanTitle(it.vod_name);
-    const posterUrl = it.vod_pic || null;
+    // 规范化成 http(s) 绝对地址；做不到（危险协议、无法解析）就不入库，并标成「封面异常」
+    const posterUrl = normalizeCollectedImageUrl(it.vod_pic, source.apiUrl);
+    const posterGiven = typeof it.vod_pic === 'string' && it.vod_pic.trim() !== '';
 
     const data: Partial<Movie> = {
       title: cleanedTitle,
@@ -287,14 +290,14 @@ export class CollectExecutorService {
         toIntOrNull(it.vod_serial) != null &&
         toIntOrNull(it.vod_total)! > 0 &&
         toIntOrNull(it.vod_serial)! >= toIntOrNull(it.vod_total)!,
-      score: toFloatOrNull(it.vod_score) ?? undefined,
+      score: clampCollectedScore(toFloatOrNull(it.vod_score)) ?? undefined,
       status: MovieStatus.PUBLISHED,
       collectSource: source.id,
       collectExternalId: externalId,
       publishedAt: this.publishedAtOf(it),
       titleCleaned: true,
-      // 封面格式校验：格式不合法直接标异常，合法的交给异步 HEAD 检测
-      posterBroken: isValidImageUrl(posterUrl) ? null : (posterUrl ? true : null),
+      // 上游给了海报但规范化不出可用地址：直接标异常；可用的交给异步 HEAD 检测
+      posterBroken: posterUrl ? null : posterGiven ? true : null,
     } as any;
 
     if (movie) {
@@ -305,7 +308,7 @@ export class CollectExecutorService {
     movie = await this.movieRepo.save(movie);
 
     // 异步检测封面图可用性（不阻塞主采集流程）
-    if (posterUrl && isValidImageUrl(posterUrl)) {
+    if (posterUrl) {
       this.posterChecker.checkAndMark(movie.id, posterUrl).catch(() => {});
     }
 
@@ -377,9 +380,9 @@ export class CollectExecutorService {
       slug,
       author: it.vod_director || it.vod_actor || null,
       categoryId: localCategoryId ?? null,
-      coverUrl: it.vod_pic || null,
+      coverUrl: normalizeCollectedImageUrl(it.vod_pic, source.apiUrl),
       intro: it.vod_content || it.vod_blurb || null,
-      score: toFloatOrNull(it.vod_score) ?? undefined,
+      score: clampCollectedScore(toFloatOrNull(it.vod_score)) ?? undefined,
       status: NovelStatus.PUBLISHED,
       collectSource: source.id,
       collectExternalId: externalId,
@@ -411,9 +414,9 @@ export class CollectExecutorService {
       slug,
       author: it.vod_director || it.vod_actor || null,
       categoryId: localCategoryId ?? null,
-      coverUrl: it.vod_pic || null,
+      coverUrl: normalizeCollectedImageUrl(it.vod_pic, source.apiUrl),
       intro: it.vod_content || it.vod_blurb || null,
-      score: toFloatOrNull(it.vod_score) ?? undefined,
+      score: clampCollectedScore(toFloatOrNull(it.vod_score)) ?? undefined,
       status: ComicStatus.PUBLISHED,
       collectSource: source.id,
       collectExternalId: externalId,

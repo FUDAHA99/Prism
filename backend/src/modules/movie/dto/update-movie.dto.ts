@@ -110,18 +110,23 @@ export class UpdateMovieDto {
   @IsByteLength(0, TEXT_COLUMN_MAX_BYTES, { message: 'intro（简介）不能超过 65535 字节' })
   intro?: string | null;
 
-  @ApiPropertyOptional({ description: '海报：http(s) 地址或站内路径（/uploads/...），可为空串；改了会重置封面检测状态', nullable: true })
+  /**
+   * 海报 / 预告片在这里只校验类型与长度：编辑页原样回传的采集旧值（相对路径、//host、mac://、带空白）不能让整次保存 400。
+   * 协议白名单（http(s) 或站内路径）由 MovieService.update 对「与库里现值不同」的值执行，见 common/validation/changed-values。
+   */
+  @ApiPropertyOptional({
+    description: '海报：改动时须为 http(s) 地址或站内路径（/uploads/...），可为空串；改了会重置封面检测状态',
+    nullable: true,
+  })
   @IsOptional()
   @IsString()
   @MaxLength(1000)
-  @Matches(MOVIE_MEDIA_URL_PATTERN, { message: `海报${MEDIA_URL_MESSAGE}` })
   posterUrl?: string | null;
 
-  @ApiPropertyOptional({ description: '预告片：http(s) 地址或站内路径，可为空串', nullable: true })
+  @ApiPropertyOptional({ description: '预告片：改动时须为 http(s) 地址或站内路径，可为空串', nullable: true })
   @IsOptional()
   @IsString()
   @MaxLength(1000)
-  @Matches(MOVIE_MEDIA_URL_PATTERN, { message: `预告片${MEDIA_URL_MESSAGE}` })
   trailerUrl?: string | null;
 
   @ApiPropertyOptional({ description: '总时长（分钟）', minimum: 0, nullable: true })
@@ -151,11 +156,10 @@ export class UpdateMovieDto {
   @IsBoolean()
   isFinished?: boolean;
 
-  @ApiPropertyOptional({ description: '评分 0–10（编辑页回填的 "8.5" 这类字符串按数字校验）', minimum: 0, maximum: 10 })
+  /** 只校验是数字：采集来的评分可能超过 10（DECIMAL(3,1) 最高 99.9），原样回传时放行；改过的值由 service 限 0–10 */
+  @ApiPropertyOptional({ description: '评分（编辑页回填的 "8.5" 这类字符串按数字校验）；改动时须在 0–10 之间' })
   @unlessUndefined
   @IsNumber({ allowNaN: false, allowInfinity: false })
-  @Min(0)
-  @Max(10)
   score?: number;
 
   @ApiPropertyOptional({ description: '是否推荐' })

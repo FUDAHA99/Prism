@@ -14,6 +14,7 @@ import { changedAuditFields } from '../audit/audit-summary';
 import { isStaff, Viewer } from '../../common/authz/viewer';
 import { publishedDue, publishedDueParams, publishedDueSql } from '../../common/authz/publish-window';
 import { Clock, SYSTEM_CLOCK, wholeSecond } from '../../common/clock/clock';
+import { assertChangedImageUrls, assertChangedScore } from '../../common/validation/changed-values';
 import {
   NOVEL_CHAPTER_DEFAULT_LIMIT,
   NOVEL_CHAPTER_MAX_LIMIT,
@@ -312,6 +313,9 @@ export class NovelService {
     if (dto.slug && dto.slug !== existing.slug) {
       await this.assertSlugAvailable(dto.slug, id);
     }
+    // 封面的协议白名单与评分范围只查改过的值：编辑页原样回传的采集旧值放行（见 changed-values）
+    assertChangedImageUrls(dto, existing, [['coverUrl', '封面']]);
+    assertChangedScore(dto.score, existing.score);
 
     const patch = pickFields(dto, NOVEL_EDITABLE_FIELDS) as QueryDeepPartialEntity<Novel>;
     const requestedAt = dto.publishedAt ? new Date(dto.publishedAt) : undefined;

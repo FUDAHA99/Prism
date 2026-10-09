@@ -5,6 +5,7 @@ import { CollectMode } from './entities/collect-log.entity';
 import * as maccms from './maccms-client';
 import { MacCmsItem } from './maccms-client';
 import { CollectExecutorService } from './collect-executor.service';
+import { clampCollectedScore, COLLECTED_IMAGE_URL_MAX, normalizeCollectedImageUrl } from './collect-cleaner';
 import { Movie } from '../movie/entities/movie.entity';
 import { MovieSource } from '../movie/entities/movie-source.entity';
 import { MovieEpisode } from '../movie/entities/movie-episode.entity';
@@ -140,5 +141,121 @@ describe('CollectExecutorService 采集落库', () => {
       await collect(CollectContentType.MOVIE, [item({ vod_id: 9, vod_time: '2030-01-01 00:00:00' })]);
       expect((await movies.findOneByOrFail({ collectExternalId: '9' })).publishedAt!.toISOString()).toBe(NOW.toISOString());
     });
+  });
+
+  describe('海报 / 封面地址入库前规范化（此前原样入库，后台编辑页回传时被判非法，整条记录改不了）', () => {
+    it('海报：规范化后的地址入库并交给封面检测；规范化不出来的不入库并标成「封面异常」', async () => {
+      const { posterChecker } = await collect(CollectContentType.MOVIE, [
+        item({ vod_id: 1, vod_pic: ' https://img.example.com/1.jpg ' }),
+        item({ vod_id: 2, vod_pic: '//img.example.com/2.jpg' }),
+        item({ vod_id: 3, vod_pic: 'upload/vod/20240101-1/3.jpg' }),
+        item({ vod_id: 4, vod_pic: 'javascript:alert(1)' }),
+        item({ vod_id: 5, vod_pic: 'ftp://img.example.com/5.jpg' }),
+        item({ vod_id: 6 }),
+      ]);
+      const rows = await movies.find({ order: { collectExternalId: 'ASC' } });
+      // posterBroken 是 tinyint 列：库里读出 1 / 0 / null
+      expect(rows.map((r) => [r.collectExternalId, r.posterUrl, r.posterBroken == null ? null : Boolean(r.posterBroken)])).toEqual([
+        ['1', 'https://img.example.com/1.jpg', null],
+        ['2', 'https://img.example.com/2.jpg', null],
+        ['3', 'https://res.example.com/upload/vod/20240101-1/3.jpg', null],
+        ['4', null, true],
+        ['5', null, true],
+        ['6', null, null],
+      ]);
+      expect(posterChecker.checkAndMark.mock.calls.map((c) => c[1])).toEqual([
+        'https://img.example.com/1.jpg',
+        'https://img.example.com/2.jpg',
+        'https://res.example.com/upload/vod/20240101-1/3.jpg',
+      ]);
+    });
+
+    it.each([CollectContentType.NOVEL, CollectContentType.COMIC])('%s 封面同样规范化，危险协议不入库', async (type) => {
+      await collect(type, [
+        item({ vod_id: 1, vod_pic: 'mac://img.example.com/1.jpg' }),
+        item({ vod_id: 2, vod_pic: '/upload/2.jpg' }),
+        item({ vod_id: 3, vod_pic: 'data:image/svg+xml;base64,PHN2Zz4=' }),
+      ]);
+      const repo = type === CollectContentType.NOVEL ? novels : comics;
+      const rows: Array<Novel | Comic> = await repo.find({ order: { collectExternalId: 'ASC' } });
+      expect(rows.map((r) => r.coverUrl)).toEqual([
+        'https://img.example.com/1.jpg',
+        'https://res.example.com/upload/2.jpg',
+        null,
+      ]);
+    });
+
+    it('评分收进 0–10（DECIMAL(3,1) 放不下 100 以上，此前整条写库失败），保留一位小数', async () => {
+      const { log } = await collect(CollectContentType.MOVIE, [
+        item({ vod_id: 1, vod_score: '95' }),
+        item({ vod_id: 2, vod_score: '123' }),
+        item({ vod_id: 3, vod_score: '-3' }),
+        item({ vod_id: 4, vod_score: '8.75' }),
+        item({ vod_id: 5, vod_score: 'abc' }),
+      ]);
+      expect(log).toMatchObject({ insertedCount: 5, failedCount: 0 });
+      const rows = await movies.find({ order: { collectExternalId: 'ASC' } });
+      expect(rows.map((r) => Number(r.score))).toEqual([10, 10, 0, 8.8, 0]);
+    });
+  });
+});
+
+describe('normalizeCollectedImageUrl / clampCollectedScore', () => {
+  const API = 'https://res.example.com/api.php/provide/vod/';
+
+  const CASES: Array<[unknown, string | null]> = [
+    ['https://img.example.com/a.jpg', 'https://img.example.com/a.jpg'],
+    ['  http://img.example.com/a.jpg' + String.fromCharCode(10), 'http://img.example.com/a.jpg'],
+    ['//img.example.com/a.jpg', 'https://img.example.com/a.jpg'],
+    ['mac://img.example.com/a.jpg', 'https://img.example.com/a.jpg'],
+    ['MAC://img.example.com/a.jpg', 'https://img.example.com/a.jpg'],
+    ['upload/vod/a.jpg', 'https://res.example.com/upload/vod/a.jpg'],
+    ['/upload/vod/a.jpg', 'https://res.example.com/upload/vod/a.jpg'],
+    ['https://img.example.com/a b.jpg', 'https://img.example.com/a%20b.jpg'],
+    ['javascript:alert(1)', null],
+    [' JavaScript:alert(1)', null],
+    ['java' + String.fromCharCode(9) + 'script:alert(1)', null],
+    ['vbscript:msgbox(1)', null],
+    ['data:image/png;base64,AAAA', null],
+    ['file:///etc/passwd', null],
+    ['ftp://img.example.com/a.jpg', null],
+    ['', null],
+    ['   ', null],
+    [null, null],
+    [42, null],
+    [`https://img.example.com/${'x'.repeat(COLLECTED_IMAGE_URL_MAX)}`, null],
+  ];
+
+  it.each(CASES)('%j → %j', (raw, expected) => {
+    expect(normalizeCollectedImageUrl(raw, API)).toBe(expected);
+  });
+
+  it('//host 一律补成 https（采集源接口是 http 时也不降级成 http 图片，避免门户混合内容）', () => {
+    expect(normalizeCollectedImageUrl('//img.example.com/a.jpg', 'http://res.example.com/api.php/provide/vod/')).toBe(
+      'https://img.example.com/a.jpg',
+    );
+    // 相对路径跟着采集源的协议走（那就是资源站自己的地址）
+    expect(normalizeCollectedImageUrl('upload/a.jpg', 'http://res.example.com/api.php/provide/vod/')).toBe(
+      'http://res.example.com/upload/a.jpg',
+    );
+  });
+
+  it('采集源地址解析不了时，相对路径无法补全，丢弃', () => {
+    expect(normalizeCollectedImageUrl('upload/a.jpg', 'not a url')).toBeNull();
+    expect(normalizeCollectedImageUrl('https://img.example.com/a.jpg', 'not a url')).toBe('https://img.example.com/a.jpg');
+  });
+
+  const SCORES: Array<[number | null, number | null]> = [
+    [8.5, 8.5],
+    [8.75, 8.8],
+    [10, 10],
+    [99.9, 10],
+    [-1, 0],
+    [null, null],
+    [Number.NaN, null],
+  ];
+
+  it.each(SCORES)('评分 %p → %p', (score, expected) => {
+    expect(clampCollectedScore(score)).toBe(expected);
   });
 });

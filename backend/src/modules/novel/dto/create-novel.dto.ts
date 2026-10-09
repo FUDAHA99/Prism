@@ -37,6 +37,9 @@ export const CREATE_NOVEL_STATUSES = [NovelStatus.DRAFT, NovelStatus.PUBLISHED] 
  * 新建与编辑共用的可选字段（规则相同）。可空列允许 null：编辑页把库里读出的 null 原样回传
  * （例如采集来的书没有 SEO 字段，回填后再保存）；NOT NULL 列（连载状态、评分、两个开关）提交 null 一律 400，
  * 此前写库报错 500。
+ *
+ * 封面（coverUrl）与评分（score）不在这里：新建按完整规则校验，编辑只校验类型与长度、改动时由 service 校验
+ * （采集旧值原样回传不能 400），两边规则不同，分别写在 CreateNovelDto / UpdateNovelDto 上。
  */
 export abstract class NovelEditableFieldsDto {
   @ApiPropertyOptional({ description: '作者', maxLength: 200, nullable: true })
@@ -56,13 +59,6 @@ export abstract class NovelEditableFieldsDto {
   @IsString()
   @MaxLength(200)
   subType?: string | null;
-
-  @ApiPropertyOptional({ description: '封面：http(s) 地址或站内路径（/uploads/...），可为空串', nullable: true })
-  @IsOptional()
-  @IsString()
-  @MaxLength(1000)
-  @Matches(NOVEL_COVER_URL_PATTERN, { message: '封面只能是 http(s) 地址或站内路径（/uploads/...）' })
-  coverUrl?: string | null;
 
   /** 编辑页的输入框限 2000 字，但采集来的简介可能更长、回填后原样提交：上限按 TEXT 列的字节数 */
   @ApiPropertyOptional({ description: '简介，不超过 65535 字节', nullable: true })
@@ -87,14 +83,6 @@ export abstract class NovelEditableFieldsDto {
   @Transform(rawValue)
   @IsBoolean()
   isVip?: boolean;
-
-  /** DECIMAL(3,1)：编辑页回填的是 MySQL 读出的字符串（"8.5"），按数字校验 */
-  @ApiPropertyOptional({ description: '评分 0–10', minimum: 0, maximum: 10, default: 0 })
-  @unlessUndefined
-  @IsNumber({ allowNaN: false, allowInfinity: false })
-  @Min(0)
-  @Max(10)
-  score?: number;
 
   @ApiPropertyOptional({ description: 'SEO 标题', maxLength: 200, nullable: true })
   @IsOptional()
@@ -132,6 +120,21 @@ export abstract class NovelEditableFieldsDto {
  * 下一律 400。采集字段只由采集任务在服务端写入，计数由章节接口维护。
  */
 export class CreateNovelDto extends NovelEditableFieldsDto {
+  @ApiPropertyOptional({ description: '封面：http(s) 地址或站内路径（/uploads/...），可为空串', nullable: true })
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000)
+  @Matches(NOVEL_COVER_URL_PATTERN, { message: '封面只能是 http(s) 地址或站内路径（/uploads/...）' })
+  coverUrl?: string | null;
+
+  /** DECIMAL(3,1)：编辑页回填的是 MySQL 读出的字符串（"8.5"），按数字校验 */
+  @ApiPropertyOptional({ description: '评分 0–10', minimum: 0, maximum: 10, default: 0 })
+  @unlessUndefined
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(0)
+  @Max(10)
+  score?: number;
+
   @ApiProperty({ description: '书名', maxLength: 500 })
   @IsString()
   @IsNotEmpty()

@@ -208,11 +208,18 @@ describe('UpdateContentDto（全局 ValidationPipe）', () => {
 
   it.each([
     ['slug 非法', { slug: 'Not A Slug' }],
-    ['封面图 javascript:', { featuredImageUrl: 'javascript:alert(1)' }],
+    ['封面图超过列宽', { featuredImageUrl: `https://img.example.com/${'x'.repeat(500)}` }],
+    ['封面图不是字符串', { featuredImageUrl: ['https://img.example.com/a.jpg'] }],
     ['空 title', { title: '' }],
     ['正文超过 65535 字节', { body: '字'.repeat(21_846) }],
     ['publishedAt 非法', { publishedAt: 'soon' }],
   ])('%s → 400', async (_label, body) => {
     await rejects(updateDto(body));
+  });
+
+  it('封面图的协议白名单不在编辑 DTO 里（编辑页原样回传旧值要能保存；改动时由 ContentService.update 拒绝）', async () => {
+    await expect(updateDto({ featuredImageUrl: 'javascript:alert(1)' })).resolves.toMatchObject({
+      featuredImageUrl: 'javascript:alert(1)',
+    });
   });
 });

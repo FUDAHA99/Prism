@@ -713,6 +713,55 @@ describe('影视模块 HTTP', () => {
       expect((await sourcesOf(id)).map((s) => s.episodes.length)).toEqual([2, 2]);
     });
 
+    it.each<[string, Partial<Movie>]>([
+      ['相对路径海报', { posterUrl: 'upload/vod/20240101-1/a.jpg' }],
+      ['//host 海报', { posterUrl: '//img.example.com/a.jpg' }],
+      ['mac:// 海报', { posterUrl: 'mac://img.example.com/a.jpg' }],
+      ['带尾随空格的海报', { posterUrl: 'https://img.example.com/a.jpg ' }],
+      ['旧的预告片地址', { trailerUrl: 'video.example.com/t.mp4' }],
+      ['超过 10 的评分（DECIMAL(3,1) 最高 99.9）', { score: 99.9 }],
+    ])('采集旧值（%s）经编辑页原样回传：200，只改了提交的那一项（此前整次保存 400）', async (_label, legacy) => {
+      const id = await seedMovie(`legacy-${randomUUID().slice(0, 8)}`, MovieStatus.PUBLISHED, legacy);
+      const before = await movies.findOneByOrFail({ id });
+      const loaded = (await get(`/movies/${id}`, 'admin').expect(200)).body;
+      // MySQL 下 DECIMAL 读出来是字符串
+      await patch(`/movies/${id}`, 'admin', formPayload({ ...loaded, score: String(loaded.score), intro: '编辑过' }, false)).expect(200);
+      const after = await movies.findOneByOrFail({ id });
+      expect(after).toEqual({ ...before, intro: '编辑过', updatedAt: after.updatedAt });
+    });
+
+    it.each<[string, Record<string, unknown>, string]>([
+      ['海报改成 javascript:', { posterUrl: 'javascript:alert(1)' }, '海报只能是 http(s) 地址或站内路径（/uploads/...）'],
+      ['海报改成另一个相对路径', { posterUrl: 'upload/vod/other.jpg' }, '海报只能是 http(s) 地址或站内路径（/uploads/...）'],
+      ['预告片改成 data:', { trailerUrl: 'data:text/html;base64,PHNjcmlwdD4=' }, '预告片只能是 http(s) 地址或站内路径（/uploads/...）'],
+      ['评分改成 11', { score: 11 }, '评分只能在 0 到 10 之间'],
+      ['评分改成 -0.5', { score: -0.5 }, '评分只能在 0 到 10 之间'],
+    ])('改动的值仍按规则校验：%s → 400，影视不变', async (_label, change, message) => {
+      const id = await seedMovie(`legacy-bad-${randomUUID().slice(0, 8)}`, MovieStatus.PUBLISHED, {
+        posterUrl: 'upload/vod/legacy.jpg',
+        score: 99.9,
+      });
+      const before = await movies.findOneByOrFail({ id });
+      const loaded = (await get(`/movies/${id}`, 'admin').expect(200)).body;
+      const res = await patch(`/movies/${id}`, 'admin', { ...formPayload(loaded, false), ...change }).expect(400);
+      expect(res.body.message).toBe(message);
+      expect(await movies.findOneByOrFail({ id })).toEqual(before);
+    });
+
+    it('把采集旧值改成合法地址 / 合法评分：200，海报换了就重置封面检测状态', async () => {
+      const id = await seedMovie(`legacy-fix-${randomUUID().slice(0, 8)}`, MovieStatus.PUBLISHED, {
+        posterUrl: '//img.example.com/a.jpg',
+        posterBroken: true,
+        score: 99.9,
+      });
+      await patch(`/movies/${id}`, 'admin', { posterUrl: 'https://img.example.com/a.jpg', score: 9.5 }).expect(200);
+      expect(await movies.findOneByOrFail({ id })).toMatchObject({
+        posterUrl: 'https://img.example.com/a.jpg',
+        posterBroken: null,
+        score: 9.5,
+      });
+    });
+
     it('编辑页「保存并发布」草稿：status 与 publishedAt 一起写（此前只改 status，publishedAt 一直为空）', async () => {
       const id = await seedMovie('write-save-and-publish', MovieStatus.DRAFT);
       const loaded = (await get(`/movies/${id}`, 'admin').expect(200)).body;

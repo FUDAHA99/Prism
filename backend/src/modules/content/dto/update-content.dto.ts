@@ -61,11 +61,14 @@ export class UpdateContentDto {
   @IsUUID('loose')
   categoryId?: string | null;
 
-  @ApiPropertyOptional({ description: '封面图：http(s) 地址或站内路径（/uploads/...），可为空串', nullable: true })
+  /**
+   * 只校验类型与长度：编辑页把库里的旧值原样回传，规则上线前写入的地址不能让整次保存 400；
+   * 协议白名单由 ContentService.update 对「与库里现值不同」的值执行（common/validation/changed-values）。
+   */
+  @ApiPropertyOptional({ description: '封面图：改动时须为 http(s) 地址或站内路径（/uploads/...），可为空串', nullable: true })
   @IsOptional()
   @IsString()
   @MaxLength(500)
-  @Matches(CONTENT_IMAGE_URL_PATTERN, { message: '封面图只能是 http(s) 地址或站内路径' })
   featuredImageUrl?: string | null;
 
   @ApiPropertyOptional({ description: '摘要', nullable: true })

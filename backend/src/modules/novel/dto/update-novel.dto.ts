@@ -1,4 +1,4 @@
-import { IsBoolean, IsIn, IsInt, IsNotEmpty, IsOptional, IsString, Matches, Max, MaxLength, Min } from 'class-validator';
+import { IsBoolean, IsIn, IsInt, IsNotEmpty, IsNumber, IsOptional, IsString, Matches, Max, MaxLength, Min } from 'class-validator';
 import { Transform } from 'class-transformer';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { NovelStatus } from '../entities/novel.entity';
@@ -17,6 +17,22 @@ export const UPDATE_NOVEL_STATUSES = [NovelStatus.PUBLISHED] as const;
  * 「保存并发布」时的 status），全部可选；书名、slug 与 NOT NULL 列不能为 null。
  */
 export class UpdateNovelDto extends NovelEditableFieldsDto {
+  /**
+   * 封面只校验类型与长度：编辑页原样回传的采集旧值（相对路径、//host、带空白）不能让整次保存 400；
+   * 协议白名单由 NovelService.update 对「与库里现值不同」的值执行（common/validation/changed-values）。
+   */
+  @ApiPropertyOptional({ description: '封面：改动时须为 http(s) 地址或站内路径（/uploads/...），可为空串', nullable: true })
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000)
+  coverUrl?: string | null;
+
+  /** 只校验是数字：采集来的评分可能超过 10（DECIMAL(3,1) 最高 99.9），原样回传时放行；改过的值由 service 限 0–10 */
+  @ApiPropertyOptional({ description: '评分（编辑页回填的 "8.5" 这类字符串按数字校验）；改动时须在 0–10 之间' })
+  @unlessUndefined
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  score?: number;
+
   @ApiPropertyOptional({ description: '书名', maxLength: 500 })
   @unlessUndefined
   @IsString()

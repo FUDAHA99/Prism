@@ -154,16 +154,24 @@ describe('CreateComicDto / UpdateComicDto', () => {
       ['slug', 'One Piece'],
       ['author', 'x'.repeat(201)],
       ['intro', '汉'.repeat(21846)],
-      ['score', 11],
+      ['score', 'abc'],
       ['serialStatus', 'done'],
       ['isVip', 'false'],
-      ['coverUrl', 'javascript:alert(1)'],
-      ['coverUrl', '//evil.example.com/x.jpg'],
+      ['coverUrl', ['https://img.example.com/a.jpg']],
       ['categoryId', 'abc'],
       ['publishedAt', 'tomorrow'],
     ])('%s = %p → 400', async (key, value) => {
       await rejects(createDto({ ...createMinimal, [key]: value }));
       await rejects(updateDto({ [key]: value }));
+    });
+
+    it.each<[string, unknown]>([
+      ['score', 11],
+      ['coverUrl', 'javascript:alert(1)'],
+      ['coverUrl', '//evil.example.com/x.jpg'],
+    ])('%s = %p：新建 400；编辑 DTO 只校验类型（采集旧值原样回传放行，改动时由 service 拒绝）', async (key, value) => {
+      await rejects(createDto({ ...createMinimal, [key]: value }));
+      await expect(updateDto({ [key]: value })).resolves.toMatchObject({ [key]: value });
     });
   });
 });

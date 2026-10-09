@@ -19,6 +19,7 @@ import { isStaff, Viewer } from '../../common/authz/viewer';
 import { publishedDueParams, publishedDueSql } from '../../common/authz/publish-window';
 import { Clock, SYSTEM_CLOCK, wholeSecond } from '../../common/clock/clock';
 import { assertPlainObjects } from '../../common/utils/plain-object';
+import { assertChangedImageUrls, assertChangedScore } from '../../common/validation/changed-values';
 import {
   MOVIE_LIST_DEFAULT_LIMIT,
   MOVIE_LIST_MAX_LIMIT,
@@ -450,6 +451,9 @@ export class MovieService {
     if (dto.slug && dto.slug !== movie.slug) {
       await this.assertSlugAvailable(dto.slug, id);
     }
+    // 海报 / 预告片的协议白名单与评分范围只查改过的值：编辑页原样回传的采集旧值放行（见 changed-values）
+    assertChangedImageUrls(dto, movie, [['posterUrl', '海报'], ['trailerUrl', '预告片']]);
+    assertChangedScore(dto.score, movie.score);
 
     const patch = pickMovieFields(dto);
     const requestedAt = dto.publishedAt ? new Date(dto.publishedAt) : undefined;

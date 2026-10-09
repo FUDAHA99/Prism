@@ -14,6 +14,7 @@ import { changedAuditFields } from '../audit/audit-summary';
 import { isStaff, Viewer } from '../../common/authz/viewer';
 import { publishedDueParams, publishedDueSql } from '../../common/authz/publish-window';
 import { Clock, SYSTEM_CLOCK, wholeSecond } from '../../common/clock/clock';
+import { assertChangedImageUrls } from '../../common/validation/changed-values';
 import {
   CONTENT_LIST_DEFAULT_LIMIT,
   CONTENT_LIST_MAX_LIMIT,
@@ -300,6 +301,8 @@ export class ContentService {
     if (dto.slug && dto.slug !== content.slug) {
       await this.assertSlugAvailable(dto.slug, id);
     }
+    // 封面图的协议白名单只查改过的值：编辑页原样回传的旧地址放行
+    assertChangedImageUrls(dto, content, [['featuredImageUrl', '封面图']]);
 
     // 显式白名单：即使有调用方绕过 ValidationPipe 传进别的键，也只会写这几列
     const patch = pickEditable(dto);

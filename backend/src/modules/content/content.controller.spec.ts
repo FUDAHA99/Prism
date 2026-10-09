@@ -665,6 +665,28 @@ describe('内容模块 HTTP', () => {
       expect(res.body).toMatchObject({ body: '新正文', authorId: ids.editor, viewCount: 3, status: 'draft' });
     });
 
+    it('规则上线前写入的封面图（不合新规则）经编辑页原样回传：200；改成 javascript: 等 400', async () => {
+      const created = await contents.save({
+        title: '旧文章',
+        slug: 'write-legacy-cover',
+        body: '正文',
+        status: ContentStatus.DRAFT,
+        authorId: ids.admin,
+        featuredImageUrl: 'uploads/old-cover.png',
+      });
+      const loaded = (await get(`/contents/${created.id}`, 'admin').expect(200)).body;
+      await patch(`/contents/${created.id}`, 'admin', formPayload({ ...loaded, body: '改过的正文' }, false)).expect(200);
+      expect(await rowBySlug('write-legacy-cover')).toMatchObject({ body: '改过的正文', featuredImageUrl: 'uploads/old-cover.png' });
+
+      for (const url of ['javascript:alert(1)', '//evil.example.com/x.png', 'uploads/another.png']) {
+        const res = await patch(`/contents/${created.id}`, 'admin', formPayload({ ...loaded, featuredImageUrl: url }, false)).expect(400);
+        expect(res.body.message).toBe('封面图只能是 http(s) 地址或站内路径（/uploads/...）');
+      }
+      expect((await rowBySlug('write-legacy-cover'))!.featuredImageUrl).toBe('uploads/old-cover.png');
+      await patch(`/contents/${created.id}`, 'admin', { featuredImageUrl: '/uploads/new-cover.png' }).expect(200);
+      expect((await rowBySlug('write-legacy-cover'))!.featuredImageUrl).toBe('/uploads/new-cover.png');
+    });
+
     it('编辑页「保存并发布」（带定时）：status / isPublished / publishedAt 一起写（此前只改 status）', async () => {
       const created = await contents.save({
         title: '要发布',

@@ -241,6 +241,7 @@
 字段与校验规则同创建，全部可选；`title` / `slug` / `body` / `contentType` 不能为 `null`。
 `status` 只接受 `published`（后台「保存并发布」）：与「发布内容」接口一样同时写 `isPublished` 与 `publishedAt`
 （优先用本次提交的 `publishedAt`，其次保留原发布时间）；取消发布请用 2.7。`publishedAt` 为 `null` 视为不改。
+`featuredImageUrl` 只在与库里现值不同时才按「http(s) 地址或站内路径」校验：编辑页原样回传的旧地址（规则上线前写入的）不会让保存 `400`。
 
 ---
 
@@ -690,6 +691,8 @@ slug 详情另有 `sources`（`{ id, movieId, name, kind, player, sortOrder, epi
 不含 `status`、`collectSource`、`collectExternalId`、`posterBroken`、`titleCleaned`、`aliases`。
 与内容相同，`publishedAt` 晚于当前时间的影视到点之前对游客不可见（列表与 slug 详情）；采集入库的发布时间不晚于入库时刻
 （上游的上映日期 / 不带时区的更新时间可能落在未来，入库时截到当前时间）。
+采集入库的海报 / 封面先规范化成 http(s) 绝对地址：去首尾空白，`//host` 与 `mac://` 补成 https，相对路径按采集源接口的站点根补全，
+javascript: / data: / vbscript: / file: 等其他协议不入库（影视同时标成「封面异常」）；评分收进 0–10。
 
 ### 15.2 获取影视详情
 `GET /movies/:id`  🔒 后台角色（admin / editor）
@@ -775,6 +778,8 @@ slug 详情另有 `sources`（`{ id, movieId, name, kind, player, sortOrder, epi
 字段与校验规则同创建（不含 `sources`：线路与剧集只经 15.8 的接口增删改），全部可选；`title` / `slug` / `movieType` / `score` / 三个布尔字段不能为 `null`。
 `status` 只接受 `published`（后台「保存并发布」）：同时写 `publishedAt`（优先用本次提交的，其次保留原发布时间）；取消发布请用 `POST /movies/:id/unpublish`。
 `posterUrl` 改了会把封面检测状态重置为「未检测」。
+`posterUrl` / `trailerUrl` 的协议白名单与 `score` 的 0–10 只对「与库里现值不同」的值执行：编辑页把表单全部字段原样提交，
+采集来的旧值（相对路径、`//host`、`mac://`、带空白的地址，超过 10 的评分）原样回传时放行，改成新的非法值仍 `400`。
 
 ### 15.6 修复封面
 `PATCH /movies/:id/poster`  🔒 后台角色（admin / editor）
@@ -903,6 +908,7 @@ slug 详情另有 `sources`（`{ id, movieId, name, kind, player, sortOrder, epi
 
 字段与校验规则同创建，全部可选；`title` / `slug` / `serialStatus` / `score` / 两个布尔字段不能为 `null`。
 `status` 只接受 `published`（后台「保存并发布」）：同时写 `publishedAt`（优先用本次提交的，其次保留原发布时间）；取消发布请用 `POST /novels/:id/unpublish`。
+`coverUrl` 的协议白名单与 `score` 的 0–10 只对「与库里现值不同」的值执行（同 15.5）：采集来的旧值原样回传时放行。
 
 ### 16.8 发布 / 取消发布 / 删除
 `POST /novels/:id/publish`、`POST /novels/:id/unpublish`、`DELETE /novels/:id`（软删除）  🔒 后台角色（admin / editor）
