@@ -19,7 +19,8 @@
 #   → 构建全部镜像 → 在一次性 backend 容器里用 backend 自己的规则校验 compose 插值后的 JWT 密钥（同上）
 #   → 生成 nginx/nginx.active.conf
 #   → 部署前 nginx -t（一次性容器；失败则中止，生效配置换回部署前的内容，容器都不动）
-#   → up -d（不再构建）→ 等 backend → 例行部署：补齐系统角色（seed-admin.js --roles-only：不改密码、不分配角色，失败只警告）
+#   → up -d（不再构建）→ 等 backend → 例行部署：补齐系统角色（seed-admin.js --roles-only：不改密码、不分配角色，失败只警告），
+#     只读检查公开注册开关（enable_register 是 'true' 时提醒关闭方法，从不修改）
 #   → 部署后 nginx -t（真实网络）→ 重建 nginx（80/443 中断数秒）
 #   → 首次部署：建管理员 + 备份 crontab → 清理旧镜像
 # =================================================================
@@ -269,6 +270,34 @@ check_jwt_in_image() {
   log "JWT 密钥通过 backend 启动校验"
 }
 
+# ── 例行部署：公开注册开关只读检查（从不修改，失败只警告）──────────────────
+# 旧版本写入的 enable_register 默认值是 'true'，backend 的 initDefaults 只补缺失的键：从旧版本升级上来的安装，
+# 公开注册在升级后仍然开着（任何人都能注册拿到 JWT，拿不到后台权限，但能以注册用户身份发评论、改资料）。
+# 新装默认关闭。这里只读一次当前值，是 'true' 就把 docs/deploy.md 5.3 ⑥ 的关闭方法打出来，由运维决定 ——
+# 从不自动改它（零 migration；开着注册也可能是站点有意为之）。
+# 在 mysql 容器里执行（与 5.3 ⑥ 的手工命令相同）：库名、账号、密码取自容器自己的环境变量，不经宿主机命令行、不落盘。
+REGISTER_SWITCH_SQL="SELECT value FROM site_settings WHERE \`key\` = 'enable_register';"
+check_register_switch() {
+  local value
+  # stderr 丢掉：mysql 对命令行里的 -p 口令固定打一行告警；读取失败时下面给出手工查看的方法
+  if ! value=$($COMPOSE exec -T mysql sh -c \
+      'exec mysql --default-character-set=utf8mb4 -N -B -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' \
+      <<<"$REGISTER_SWITCH_SQL" 2>/dev/null); then
+    warn "读取公开注册开关失败（不影响本次部署）。请按 docs/deploy.md 5.3 ⑥ 手工查看 enable_register 的当前值"
+    return 0
+  fi
+  # 只取第一行、去掉 CR（没有这一行时为空，与 backend 一样按关闭处理）
+  value=$(printf '%s\n' "$value" | head -n 1 | tr -d '\r')
+  if [ "$value" = "true" ]; then
+    warn "公开注册目前是开启的（site_settings.enable_register = 'true'）：任何人都能自助注册账号（拿不到后台权限，但能以注册用户身份发评论）。"
+    warn "  从旧版本升级上来的安装默认如此（旧版写入的默认值是 true，新版只对新装默认关闭）；本脚本只提醒，不会替你修改。"
+    warn "  不需要公开注册时：在管理后台「系统配置 → 功能设置」关闭「允许注册」并保存，立即生效、无需重启；"
+    warn "  或在 MySQL 里执行：UPDATE site_settings SET value = 'false' WHERE \`key\` = 'enable_register';（详见 docs/deploy.md 5.3 ⑥）"
+  else
+    log "公开注册已关闭（enable_register = ${value:-（未设置，按关闭处理）}）"
+  fi
+}
+
 # ── 部署后 nginx -t：接到真实 Docker 网络，确认 upstream 主机名都能解析 ─────
 post_check_nginx() {
   local net
@@ -404,6 +433,8 @@ main() {
       warn "  或按 docs/deploy.md 5.1 用 SQL 建角色、把 admin 分配给你确认过的管理员账号；"
       warn "  不要为此运行不带 --roles-only 的 seed-admin.js（会重置 admin@cms.com 的密码）"
     fi
+    # 公开注册开关：只读一次，开着就提醒（见 check_register_switch；从不修改，失败只警告）
+    check_register_switch
   fi
 
   # ── nginx：部署后再校验一次，然后强制重建 ─────────────────────────

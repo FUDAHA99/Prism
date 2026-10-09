@@ -95,7 +95,7 @@ bash scripts/deploy.sh
 5. 检测是否首次部署（自动设置 `DB_SYNC=true` 建表）；`.env.prod` 里写着 `DB_SYNC=true` 时打印警告
 6. 用上一步构建好的镜像启动全部 6 个容器（`up -d` 不再构建）
 7. 等待 backend 就绪后接到真实 Docker 网络再跑一次 `nginx -t`，通过后强制重建 nginx 容器（每次部署 80/443 中断数秒，见第 7 节「nginx 配置变更如何生效」）
-8. 首次部署：运行 `seed-admin.js` 创建管理员账户，并配置每日自动备份；例行部署：backend 就绪后运行 `seed-admin.js --roles-only` 补齐 `admin` / `editor` 系统角色（不建账号、不改密码、不分配任何角色；没有可用的 `admin` 时打印警告和手工分配的命令，失败只警告、不中止部署，见 5.1）
+8. 首次部署：运行 `seed-admin.js` 创建管理员账户，并配置每日自动备份；例行部署：backend 就绪后运行 `seed-admin.js --roles-only` 补齐 `admin` / `editor` 系统角色（不建账号、不改密码、不分配任何角色；没有可用的 `admin` 时打印警告和手工分配的命令，失败只警告、不中止部署，见 5.1），再只读查询一次公开注册开关 `enable_register`，是 `true` 时打印关闭方法（从不修改它，查询失败只警告，见 5.3 ⑥）
 9. 清理悬空镜像（`docker image prune -f`）
 
 首次部署仅在本次执行中临时设置 `DB_SYNC=true`（不修改 `.env.prod`）；backend 容器会一直保留 `DB_SYNC=true`，直到下一次 `up` 重建它。建完表后执行 `docker compose -f docker-compose.prod.yml --env-file .env.prod up -d backend` 关闭（`restart` 无效），再执行 `docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --no-deps --force-recreate nginx` 让 nginx 重新解析 backend 的新容器 IP（或直接再执行一次 `bash scripts/deploy.sh`，两步都会做）。
@@ -319,6 +319,9 @@ docker exec -i prism-mysql sh -c 'exec mysql --default-character-set=utf8mb4 -u"
 SELECT `key`, value FROM site_settings WHERE `key` = 'enable_register';
 SQL
 ```
+
+新版 `deploy.sh` 每次例行部署都会在 backend 就绪后做这一次只读查询，值是 `true` 时打印警告和下面的关闭方法；backend 启动时读到 `true`
+也会在日志里打一行 WARN。两处都只提醒，**从不自动修改**这个值（开着注册也可能是站点有意为之）。
 
 输出 `true` 时，在管理后台「系统配置 → 功能设置」关闭「允许注册」并保存即可，立即生效，不需要重启（也可以执行
 ``UPDATE site_settings SET value = 'false' WHERE `key` = 'enable_register';``）。没有输出（这一项不存在）或输出 `false` 都表示注册已关闭。

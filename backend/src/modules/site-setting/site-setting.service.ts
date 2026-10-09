@@ -1,8 +1,13 @@
-import { BadRequestException, Injectable, OnModuleInit, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, OnModuleInit, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { SiteSetting } from './entities/site-setting.entity';
 import { assertPlainObjects } from '../../common/utils/plain-object';
+import {
+  REGISTER_SETTING_KEY,
+  REGISTRATION_OPEN_STARTUP_WARNING,
+  registrationOpenFrom,
+} from '../auth/registration-policy';
 
 interface DefaultSetting {
   key: string;
@@ -28,6 +33,8 @@ const DEFAULT_SETTINGS: DefaultSetting[] = [
 
 @Injectable()
 export class SiteSettingService implements OnModuleInit {
+  private readonly logger = new Logger(SiteSettingService.name);
+
   constructor(
     @InjectRepository(SiteSetting)
     private readonly siteSettingRepository: Repository<SiteSetting>,
@@ -35,6 +42,23 @@ export class SiteSettingService implements OnModuleInit {
 
   async onModuleInit(): Promise<void> {
     await this.initDefaults();
+    await this.warnIfRegistrationOpen();
+  }
+
+  /**
+   * 启动时只读一次注册开关，开着（与 POST /auth/register 同一条判断：恰好是 'true'）就打一行 WARN 并给出关闭方法。
+   * 从旧版本升级上来的安装库里是旧默认值 'true'，升级后注册仍然开着（docs/deploy.md 5.3 ⑥）。
+   * 只提醒，从不改值；读取失败也只记一行，不影响启动。返回是否开着（测试用）。
+   */
+  async warnIfRegistrationOpen(): Promise<boolean> {
+    try {
+      const open = registrationOpenFrom(await this.findValues([REGISTER_SETTING_KEY]));
+      if (open) this.logger.warn(REGISTRATION_OPEN_STARTUP_WARNING);
+      return open;
+    } catch (err) {
+      this.logger.warn(`启动时读取公开注册开关失败：${(err as Error)?.message ?? err}`);
+      return false;
+    }
   }
 
   async initDefaults(): Promise<void> {

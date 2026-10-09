@@ -1,9 +1,10 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, Logger } from '@nestjs/common';
 import { Repository } from 'typeorm';
 import { SiteSettingController } from './site-setting.controller';
 import { SiteSettingService } from './site-setting.service';
 import { SiteSetting } from './entities/site-setting.entity';
 import { createHttpHarness, HttpHarness } from '../../common/testing/http-harness';
+import { REGISTRATION_OPEN_STARTUP_WARNING } from '../auth/registration-policy';
 
 /**
  * POST /site-settings/batch（仅 admin）走真实 HTTP + 内存 SQLite。
@@ -93,5 +94,71 @@ describe('系统配置批量保存 HTTP', () => {
   it('editor 403、游客 401', async () => {
     await h.post('/site-settings/batch', 'editor', { settings: [{ key: 'site_name', value: 'x' }] }).expect(403);
     await h.post('/site-settings/batch', 'anonymous', { settings: [{ key: 'site_name', value: 'x' }] }).expect(401);
+  });
+});
+
+/**
+ * 1-F-3 复审 low：新默认值 'false' 只对新装生效，旧版本写入的 'true' 不被 initDefaults 覆盖 —— 升级上来的安装
+ * 公开注册仍然开着。backend 启动时读到 'true' 就打一行 WARN 并给出关闭方法；只提醒，从不改值。
+ */
+describe('启动时公开注册仍开着的提醒', () => {
+  let h: HttpHarness;
+  let settings: Repository<SiteSetting>;
+  let service: SiteSettingService;
+  let warn: jest.SpyInstance;
+
+  beforeAll(async () => {
+    warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    h = await createHttpHarness({ controllers: [SiteSettingController], providers: [SiteSettingService], entities: [SiteSetting] });
+    settings = h.ds.getRepository(SiteSetting);
+    service = h.moduleRef.get(SiteSettingService);
+  });
+
+  afterAll(async () => {
+    warn.mockRestore();
+    await h?.close();
+  });
+
+  const registrationWarnings = () => warn.mock.calls.filter(([message]) => message === REGISTRATION_OPEN_STARTUP_WARNING);
+
+  it('新库（种子值 false）启动时不提醒', async () => {
+    expect((await settings.findOneByOrFail({ key: 'enable_register' })).value).toBe('false');
+    expect(registrationWarnings()).toHaveLength(0);
+  });
+
+  it("库里是 'true'（旧版本的默认值）：启动时提醒一行，值保持 'true' 不被改动", async () => {
+    await settings.update({ key: 'enable_register' }, { value: 'true' });
+    warn.mockClear();
+
+    await service.onModuleInit();
+
+    expect(registrationWarnings()).toHaveLength(1);
+    expect(warn.mock.calls).toHaveLength(1);
+    expect(REGISTRATION_OPEN_STARTUP_WARNING).not.toMatch(/[\r\n]/);
+    expect(REGISTRATION_OPEN_STARTUP_WARNING).toContain('docs/deploy.md 5.3');
+    expect((await settings.findOneByOrFail({ key: 'enable_register' })).value).toBe('true');
+  });
+
+  it.each([['false'], ['TRUE'], [' true'], ['']])("值为 %j（注册实际是关的）：不提醒", async (value) => {
+    await settings.update({ key: 'enable_register' }, { value });
+    warn.mockClear();
+    expect(await service.warnIfRegistrationOpen()).toBe(false);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('这一行不存在：initDefaults 补成 false，不提醒', async () => {
+    await settings.delete({ key: 'enable_register' });
+    warn.mockClear();
+    await service.onModuleInit();
+    expect((await settings.findOneByOrFail({ key: 'enable_register' })).value).toBe('false');
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('读取失败只记一行，不抛出（不影响启动）', async () => {
+    const find = jest.spyOn(service, 'findValues').mockRejectedValueOnce(new Error('db down'));
+    warn.mockClear();
+    await expect(service.warnIfRegistrationOpen()).resolves.toBe(false);
+    expect(warn.mock.calls).toEqual([['启动时读取公开注册开关失败：db down']]);
+    find.mockRestore();
   });
 });
