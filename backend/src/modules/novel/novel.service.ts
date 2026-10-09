@@ -119,7 +119,31 @@ export interface NovelPage<T> {
   meta: { total: number; page: number; limit: number; totalPages: number };
 }
 
-export function toPublicNovel(n: Novel): PublicNovel {
+/**
+ * 公开视图里由章节推出来的几项：只按已发布章节算。小说行上的 chapterCount / wordCount / lastChapterAt 由章节接口维护，
+ * 未发布章节也计在内（新增章节就加 1、累加字数、刷新 lastChapterAt，并顺带刷新小说的 updatedAt）—— 原样给游客，
+ * 就能看出有几章还没发布、多少字、什么时候写的。后台视图仍用行上的值，与章节管理页一致。
+ */
+export interface PublicNovelChapterStats {
+  chapterCount: number;
+  wordCount: number;
+  lastChapterAt: Date | null;
+}
+
+const NO_PUBLIC_CHAPTERS: PublicNovelChapterStats = { chapterCount: 0, wordCount: 0, lastChapterAt: null };
+
+/** 两个时间里较晚的那个（任一为空取另一个） */
+function later(a: Date | null | undefined, b: Date | null | undefined): Date | null {
+  if (!a) return b ?? null;
+  if (!b) return a;
+  return a.getTime() >= b.getTime() ? a : b;
+}
+
+/**
+ * stats：这部小说已发布章节的统计（见 NovelService.publicChapterStats）。updatedAt 同理不用行上的值 ——
+ * 它会随未发布章节的增删改刷新；公开视图取「发布时间（没有则创建时间）」与最后一章已发布章节的创建时间中较晚者。
+ */
+export function toPublicNovel(n: Novel, stats: PublicNovelChapterStats): PublicNovel {
   return {
     id: n.id,
     title: n.title,
@@ -129,8 +153,8 @@ export function toPublicNovel(n: Novel): PublicNovel {
     subType: n.subType ?? null,
     coverUrl: n.coverUrl ?? null,
     intro: n.intro ?? null,
-    wordCount: n.wordCount,
-    chapterCount: n.chapterCount,
+    wordCount: stats.wordCount,
+    chapterCount: stats.chapterCount,
     serialStatus: n.serialStatus,
     isFeatured: n.isFeatured,
     isVip: n.isVip,
@@ -140,10 +164,10 @@ export function toPublicNovel(n: Novel): PublicNovel {
     metaTitle: n.metaTitle ?? null,
     metaKeywords: n.metaKeywords ?? null,
     metaDescription: n.metaDescription ?? null,
-    lastChapterAt: n.lastChapterAt ?? null,
+    lastChapterAt: stats.lastChapterAt,
     publishedAt: n.publishedAt ?? null,
     createdAt: n.createdAt,
-    updatedAt: n.updatedAt,
+    updatedAt: later(n.publishedAt ?? n.createdAt, stats.lastChapterAt) ?? n.createdAt,
   };
 }
 
@@ -276,7 +300,41 @@ export class NovelService {
 
     const [rows, total] = await qb.getManyAndCount();
     const meta = { total, page, limit, totalPages: Math.ceil(total / limit) };
-    return staff ? { data: rows, meta } : { data: rows.map(toPublicNovel), meta };
+    if (staff) return { data: rows, meta };
+    // 一页小说的已发布章节统计：一次分组查询，不是每本一次
+    const stats = await this.publicChapterStats(rows.map((n) => n.id));
+    return { data: rows.map((n) => toPublicNovel(n, stats.get(n.id) ?? NO_PUBLIC_CHAPTERS)), meta };
+  }
+
+  /**
+   * 已发布章节的章数、总字数、最后一章的创建时间，按小说分组（一次查询）。没有已发布章节的小说不在结果里。
+   * MAX(createdAt) 的原始值按驱动换算成 Date（MySQL 驱动已是 Date，SQLite 是 UTC 文本）。
+   */
+  private async publicChapterStats(novelIds: string[]): Promise<Map<string, PublicNovelChapterStats>> {
+    if (novelIds.length === 0) return new Map();
+    const rows: Array<{ novelId: string; chapterCount: unknown; wordCount: unknown; lastChapterAt: unknown }> =
+      await this.chapterRepo
+        .createQueryBuilder('c')
+        .select('c.novelId', 'novelId')
+        .addSelect('COUNT(c.id)', 'chapterCount')
+        .addSelect('COALESCE(SUM(c.wordCount), 0)', 'wordCount')
+        .addSelect('MAX(c.createdAt)', 'lastChapterAt')
+        .where('c.novelId IN (:...novelIds)', { novelIds })
+        .andWhere('c.isPublished = :p', { p: true })
+        .groupBy('c.novelId')
+        .getRawMany();
+    const createdAt = this.chapterRepo.metadata.findColumnWithPropertyName('createdAt')!;
+    const driver = this.chapterRepo.manager.connection.driver;
+    return new Map(
+      rows.map((row) => [
+        row.novelId,
+        {
+          chapterCount: Number(row.chapterCount),
+          wordCount: Number(row.wordCount),
+          lastChapterAt: row.lastChapterAt == null ? null : (driver.prepareHydratedValue(row.lastChapterAt, createdAt) as Date),
+        },
+      ]),
+    );
   }
 
   /** GET /novels/:id（仅后台角色，编辑页与章节管理页加载用）：任意状态、完整字段 */
@@ -297,7 +355,8 @@ export class NovelService {
       where: { slug, status: NovelStatus.PUBLISHED, deletedAt: IsNull(), publishedAt: publishedDue(this.clock.now()) },
     });
     if (!novel) throw new NotFoundException(`小说不存在: ${slug}`);
-    return toPublicNovel(novel);
+    const stats = await this.publicChapterStats([novel.id]);
+    return toPublicNovel(novel, stats.get(novel.id) ?? NO_PUBLIC_CHAPTERS);
   }
 
   /**

@@ -118,7 +118,30 @@ export interface ComicPage<T> {
   meta: { total: number; page: number; limit: number; totalPages: number };
 }
 
-export function toPublicComic(c: Comic): PublicComic {
+/**
+ * 公开视图里由章节推出来的几项：只按已发布章节算。漫画行上的 chapterCount / lastChapterAt 由章节接口维护，
+ * 未发布章节也计在内（并顺带刷新漫画的 updatedAt）—— 原样给游客，就能看出有几话还没发布、什么时候加的。
+ * 后台视图仍用行上的值，与章节管理页一致。
+ */
+export interface PublicComicChapterStats {
+  chapterCount: number;
+  lastChapterAt: Date | null;
+}
+
+const NO_PUBLIC_CHAPTERS: PublicComicChapterStats = { chapterCount: 0, lastChapterAt: null };
+
+/** 两个时间里较晚的那个（任一为空取另一个） */
+function later(a: Date | null | undefined, b: Date | null | undefined): Date | null {
+  if (!a) return b ?? null;
+  if (!b) return a;
+  return a.getTime() >= b.getTime() ? a : b;
+}
+
+/**
+ * stats：这部漫画已发布章节的统计（见 ComicService.publicChapterStats）。updatedAt 同理不用行上的值 ——
+ * 它会随未发布章节的增删改刷新；公开视图取「发布时间（没有则创建时间）」与最后一话已发布章节的创建时间中较晚者。
+ */
+export function toPublicComic(c: Comic, stats: PublicComicChapterStats): PublicComic {
   return {
     id: c.id,
     title: c.title,
@@ -128,7 +151,7 @@ export function toPublicComic(c: Comic): PublicComic {
     subType: c.subType ?? null,
     coverUrl: c.coverUrl ?? null,
     intro: c.intro ?? null,
-    chapterCount: c.chapterCount,
+    chapterCount: stats.chapterCount,
     serialStatus: c.serialStatus,
     isFeatured: c.isFeatured,
     isVip: c.isVip,
@@ -138,10 +161,10 @@ export function toPublicComic(c: Comic): PublicComic {
     metaTitle: c.metaTitle ?? null,
     metaKeywords: c.metaKeywords ?? null,
     metaDescription: c.metaDescription ?? null,
-    lastChapterAt: c.lastChapterAt ?? null,
+    lastChapterAt: stats.lastChapterAt,
     publishedAt: c.publishedAt ?? null,
     createdAt: c.createdAt,
-    updatedAt: c.updatedAt,
+    updatedAt: later(c.publishedAt ?? c.createdAt, stats.lastChapterAt) ?? c.createdAt,
   };
 }
 
@@ -274,7 +297,38 @@ export class ComicService {
 
     const [rows, total] = await qb.getManyAndCount();
     const meta = { total, page, limit, totalPages: Math.ceil(total / limit) };
-    return staff ? { data: rows, meta } : { data: rows.map(toPublicComic), meta };
+    if (staff) return { data: rows, meta };
+    // 一页漫画的已发布章节统计：一次分组查询，不是每部一次
+    const stats = await this.publicChapterStats(rows.map((c) => c.id));
+    return { data: rows.map((c) => toPublicComic(c, stats.get(c.id) ?? NO_PUBLIC_CHAPTERS)), meta };
+  }
+
+  /**
+   * 已发布章节的话数与最后一话的创建时间，按漫画分组（一次查询）。没有已发布章节的漫画不在结果里。
+   * MAX(createdAt) 的原始值按驱动换算成 Date（MySQL 驱动已是 Date，SQLite 是 UTC 文本）。
+   */
+  private async publicChapterStats(comicIds: string[]): Promise<Map<string, PublicComicChapterStats>> {
+    if (comicIds.length === 0) return new Map();
+    const rows: Array<{ comicId: string; chapterCount: unknown; lastChapterAt: unknown }> = await this.chapterRepo
+      .createQueryBuilder('c')
+      .select('c.comicId', 'comicId')
+      .addSelect('COUNT(c.id)', 'chapterCount')
+      .addSelect('MAX(c.createdAt)', 'lastChapterAt')
+      .where('c.comicId IN (:...comicIds)', { comicIds })
+      .andWhere('c.isPublished = :p', { p: true })
+      .groupBy('c.comicId')
+      .getRawMany();
+    const createdAt = this.chapterRepo.metadata.findColumnWithPropertyName('createdAt')!;
+    const driver = this.chapterRepo.manager.connection.driver;
+    return new Map(
+      rows.map((row) => [
+        row.comicId,
+        {
+          chapterCount: Number(row.chapterCount),
+          lastChapterAt: row.lastChapterAt == null ? null : (driver.prepareHydratedValue(row.lastChapterAt, createdAt) as Date),
+        },
+      ]),
+    );
   }
 
   /** GET /comics/:id（仅后台角色，编辑页与章节管理页加载用）：任意状态、完整字段 */
@@ -295,7 +349,8 @@ export class ComicService {
       where: { slug, status: ComicStatus.PUBLISHED, deletedAt: IsNull(), publishedAt: publishedDue(this.clock.now()) },
     });
     if (!comic) throw new NotFoundException(`漫画不存在: ${slug}`);
-    return toPublicComic(comic);
+    const stats = await this.publicChapterStats([comic.id]);
+    return toPublicComic(comic, stats.get(comic.id) ?? NO_PUBLIC_CHAPTERS);
   }
 
   /**

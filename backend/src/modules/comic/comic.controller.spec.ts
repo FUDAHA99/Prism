@@ -348,7 +348,8 @@ describe('漫画模块 HTTP', () => {
         score: 8.5,
         serialStatus: 'ongoing',
         viewCount: 7,
-        chapterCount: 3,
+        // 公开视图只算已发布章节（行上是 3 话，含一话未发布的）
+        chapterCount: 2,
         metaTitle: 'SEO 标题',
         metaKeywords: null,
         publishedAt: '2026-10-01T08:00:00.000Z',
@@ -456,6 +457,64 @@ describe('漫画模块 HTTP', () => {
 
     it('带了无效 token 的请求 401，不会被当成游客（后台据此回到登录页）', async () => {
       await http().get('/comics').set('Authorization', 'Bearer not.a.jwt').expect(401);
+    });
+  });
+
+  describe('公开视图的话数 / 最后更新只算已发布章节（未发布章节不外泄）', () => {
+    const publicOf = async (slug: string) => (await get(`/comics/slug/${slug}`, 'anonymous').expect(200)).body;
+    const listRowOf = async (slug: string) =>
+      (await get('/comics?limit=50', 'anonymous').expect(200)).body.data.find((r: Comic) => r.slug === slug);
+
+    it('列表与 slug 详情：只按已发布章节计；后台视图仍是行上的值', async () => {
+      const rows = await chapters.find({ where: { comicId: comicIds.published, isPublished: true } });
+      const last = rows.reduce<Date | null>((m, c) => (!m || c.createdAt > m ? c.createdAt : m), null)!;
+      for (const view of [await publicOf(slugs.published), await listRowOf(slugs.published)]) {
+        expect(view).toMatchObject({ chapterCount: 2, lastChapterAt: last.toISOString() });
+      }
+      expect((await get(`/comics/${comicIds.published}`, 'admin').expect(200)).body).toMatchObject({ chapterCount: 3 });
+    });
+
+    it('后台加一话未发布的：游客看到的话数 / 最后更新不变；发布后才计入', async () => {
+      const slug = `stats-${randomUUID().slice(0, 8)}`;
+      const created = (await as(http().post('/comics'), 'admin').send({ title: '统计', slug, status: 'published' }).expect(201)).body;
+      await as(http().post(`/comics/${created.id}/chapters`), 'admin')
+        .send({ title: '第1话', pageUrls: ['/uploads/1.jpg'], isPublished: true })
+        .expect(201);
+      const before = await publicOf(slug);
+      expect(before).toMatchObject({ chapterCount: 1 });
+      const hidden = (
+        await as(http().post(`/comics/${created.id}/chapters`), 'admin')
+          .send({ chapterNumber: 2, title: '未发布的第2话', pageUrls: ['/uploads/2.jpg'], isPublished: false })
+          .expect(201)
+      ).body;
+      expect((await get(`/comics/${created.id}`, 'admin').expect(200)).body).toMatchObject({ chapterCount: 2 });
+      expect(await publicOf(slug)).toEqual({ ...before, viewCount: before.viewCount + 1 });
+      expect(await listRowOf(slug)).toMatchObject({ chapterCount: 1, lastChapterAt: before.lastChapterAt, updatedAt: before.updatedAt });
+
+      await as(http().patch(`/comics/chapters/${hidden.id}`), 'admin').send({ isPublished: true }).expect(200);
+      expect(await publicOf(slug)).toMatchObject({ chapterCount: 2 });
+      await chapters.delete({ comicId: created.id });
+      await comics.delete(created.id);
+    });
+
+    it('一话都没发布：话数 0、lastChapterAt 为空，最后更新是发布时间；列表统计是一次分组查询', async () => {
+      const slug = `stats-empty-${randomUUID().slice(0, 8)}`;
+      const id = (
+        await comics.save({
+          title: '只有草稿话', slug, status: ComicStatus.PUBLISHED, publishedAt: new Date('2026-09-09T09:09:09.000Z'),
+          chapterCount: 5, lastChapterAt: new Date('2026-10-05T00:00:00.000Z'),
+        } as Partial<Comic>)
+      ).id;
+      await chapters.save({ comicId: id, chapterNumber: 1, title: '草稿', pageUrls: ['/uploads/x.jpg'], pageCount: 1, isPublished: false } as Partial<ComicChapter>);
+      expect(await publicOf(slug)).toMatchObject({ chapterCount: 0, lastChapterAt: null, updatedAt: '2026-09-09T09:09:09.000Z' });
+
+      const start = sql.queries.length;
+      const res = await get('/comics?limit=50', 'anonymous').expect(200);
+      expect(res.body.data.length).toBeGreaterThan(1);
+      expect(sql.queries.slice(start).filter((q) => /comic_chapters/.test(q) && /GROUP BY/i.test(q))).toHaveLength(1);
+
+      await chapters.delete({ comicId: id });
+      await comics.delete(id);
     });
   });
 

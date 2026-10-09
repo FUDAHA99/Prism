@@ -828,6 +828,7 @@ javascript: / data: / vbscript: / file: 等其他协议不入库（影视同时�
 **公开视图**（游客列表与 slug 详情）：只含 `id`、`title`、`slug`、`author`、`categoryId`、`subType`、`coverUrl`、`intro`、`wordCount`、`chapterCount`、`serialStatus`、`isFeatured`、`isVip`、`score`（DECIMAL，MySQL 下是字符串）、`viewCount`、`favoriteCount`、`metaTitle`、`metaKeywords`、`metaDescription`、`lastChapterAt`、`publishedAt`、`createdAt`、`updatedAt`；
 不含 `status`、`collectSource`、`collectExternalId`。
 `publishedAt` 晚于当前时间的小说到点之前对游客不可见：列表、slug 详情、章节目录（空）与单章（404）都一样（漫画同理）。
+公开视图的 `chapterCount` / `wordCount` / `lastChapterAt` 只按已发布章节计算（一页列表一次分组查询），`updatedAt` 取发布时间（没有则创建时间）与最后一章已发布章节的创建时间中较晚者 —— 未发布章节的章数、字数、写入时间都不外泄；后台视图仍是行上的值（含未发布章节）。漫画同理（没有 `wordCount`）。
 
 ### 16.2 获取小说详情
 `GET /novels/:id`  🔒 后台角色（admin / editor）

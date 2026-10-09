@@ -358,8 +358,9 @@ describe('小说模块 HTTP', () => {
         score: 8.5,
         serialStatus: 'ongoing',
         viewCount: 7,
-        wordCount: 1234,
-        chapterCount: 3,
+        // 公开视图只算已发布章节（行上是 1234 字 / 3 章，含一章未发布的）
+        wordCount: publishedText('published', 1).length + publishedText('published', 2).length,
+        chapterCount: 2,
         metaTitle: 'SEO 标题',
         metaKeywords: null,
         publishedAt: '2026-10-01T08:00:00.000Z',
@@ -471,6 +472,88 @@ describe('小说模块 HTTP', () => {
 
     it('带了无效 token 的请求 401，不会被当成游客（后台据此回到登录页）', async () => {
       await http().get('/novels').set('Authorization', 'Bearer not.a.jwt').expect(401);
+    });
+  });
+
+  describe('公开视图的章数 / 字数 / 最后更新只算已发布章节（未发布章节不外泄）', () => {
+    const publicOf = async (slug: string) => (await get(`/novels/slug/${slug}`, 'anonymous').expect(200)).body;
+    const listRowOf = async (slug: string) =>
+      (await get('/novels?limit=50', 'anonymous').expect(200)).body.data.find((r: Novel) => r.slug === slug);
+    /** 库里已发布章节的统计，作为对照 */
+    async function expectedStats(novelId: string) {
+      const rows = await chapters.find({ where: { novelId, isPublished: true } });
+      const last = rows.reduce<Date | null>((m, c) => (!m || c.createdAt > m ? c.createdAt : m), null);
+      return {
+        chapterCount: rows.length,
+        wordCount: rows.reduce((n, c) => n + c.wordCount, 0),
+        lastChapterAt: last ? last.toISOString() : null,
+      };
+    }
+
+    it('列表与 slug 详情：只按已发布章节计，行上的计数（含未发布章节）不外泄', async () => {
+      const expected = await expectedStats(novelIds.published);
+      expect(expected.chapterCount).toBe(2);
+      for (const view of [await publicOf(slugs.published), await listRowOf(slugs.published)]) {
+        expect(view).toMatchObject(expected);
+        // 最后更新取「发布时间」与「最后一章已发布章节」中较晚者，不随未发布章节的写入变化
+        expect(view.updatedAt).toBe(expected.lastChapterAt! > '2026-10-01T08:00:00.000Z' ? expected.lastChapterAt : '2026-10-01T08:00:00.000Z');
+      }
+      // 后台视图仍是行上的值
+      const staff = (await get(`/novels/${novelIds.published}`, 'admin').expect(200)).body;
+      expect(staff).toMatchObject({ wordCount: 1234, chapterCount: 3 });
+    });
+
+    it('后台加一章未发布的：游客看到的章数 / 字数 / 最后更新都不变；发布后才计入', async () => {
+      const slug = `stats-${randomUUID().slice(0, 8)}`;
+      const created = (await as(http().post('/novels'), 'admin').send({ title: '统计', slug, status: 'published' }).expect(201)).body;
+      await as(http().post(`/novels/${created.id}/chapters`), 'admin').send({ title: '第一章', content: '一二三', isPublished: true }).expect(201);
+      const before = await publicOf(slug);
+      expect(before).toMatchObject({ chapterCount: 1, wordCount: 3 });
+
+      const hidden = (
+        await as(http().post(`/novels/${created.id}/chapters`), 'admin')
+          .send({ chapterNumber: 2, title: '未发布的第二章', content: '机密'.repeat(300), isPublished: false })
+          .expect(201)
+      ).body;
+      const staff = (await get(`/novels/${created.id}`, 'admin').expect(200)).body;
+      expect(staff).toMatchObject({ chapterCount: 2, wordCount: 603 });
+      // 游客：一个字段都没变（此前 chapterCount=2、wordCount=603、lastChapterAt 是未发布章节的创建时间）
+      expect(await publicOf(slug)).toEqual({ ...before, viewCount: before.viewCount + 1 });
+      expect(await listRowOf(slug)).toMatchObject({
+        chapterCount: 1,
+        wordCount: 3,
+        lastChapterAt: before.lastChapterAt,
+        updatedAt: before.updatedAt,
+      });
+
+      await as(http().patch(`/novels/chapters/${hidden.id}`), 'admin').send({ isPublished: true }).expect(200);
+      expect(await publicOf(slug)).toMatchObject({ chapterCount: 2, wordCount: 603 });
+
+      await novels.delete(created.id);
+    });
+
+    it('一章都没发布的已发布小说：章数 0、字数 0、lastChapterAt 为空，最后更新是发布时间', async () => {
+      const slug = `stats-empty-${randomUUID().slice(0, 8)}`;
+      const id = (
+        await novels.save({
+          title: '只有草稿章', slug, status: NovelStatus.PUBLISHED, publishedAt: new Date('2026-09-09T09:09:09.000Z'),
+          chapterCount: 5, wordCount: 5000, lastChapterAt: new Date('2026-10-05T00:00:00.000Z'),
+        } as Partial<Novel>)
+      ).id;
+      await chapters.save({ novelId: id, chapterNumber: 1, title: '草稿', content: '草稿正文', wordCount: 4, isPublished: false } as Partial<NovelChapter>);
+      expect(await publicOf(slug)).toMatchObject({
+        chapterCount: 0, wordCount: 0, lastChapterAt: null, updatedAt: '2026-09-09T09:09:09.000Z',
+      });
+      await chapters.delete({ novelId: id });
+      await novels.delete(id);
+    });
+
+    it('列表的统计是一次分组查询（不是每本一次）', async () => {
+      const start = sql.queries.length;
+      const res = await get('/novels?limit=50', 'anonymous').expect(200);
+      expect(res.body.data.length).toBeGreaterThan(1);
+      const statsQueries = sql.queries.slice(start).filter((q) => /novel_chapters/.test(q) && /GROUP BY/i.test(q));
+      expect(statsQueries).toHaveLength(1);
     });
   });
 
