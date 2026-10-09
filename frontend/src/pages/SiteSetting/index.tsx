@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import {
   App,
   Button,
@@ -26,6 +26,7 @@ export default function SiteSettingPage() {
   const { message } = App.useApp()
   const [basicForm] = Form.useForm<BasicSettingValues>()
   const [featureForm] = Form.useForm<FeatureSettingValues>()
+  const [activeTab, setActiveTab] = useState('basic')
 
   const queryClient = useQueryClient()
 
@@ -58,14 +59,24 @@ export default function SiteSettingPage() {
 
   const handleSave = async () => {
     if (!initialValues) return
-    let values: [Partial<BasicSettingValues>, Partial<FeatureSettingValues>]
+    // 两个标签都预先渲染，错误字段可能在当前看不到的那个标签里：antd 只在那个面板里高亮，
+    // 不切过去、不提示的话，点保存什么也不发生（复审 low）。逐个校验，失败就切到出错的标签并提示
+    let basicValues: Partial<BasicSettingValues>
+    let featureValues: Partial<FeatureSettingValues>
     try {
-      values = await Promise.all([basicForm.validateFields(), featureForm.validateFields()])
+      basicValues = await basicForm.validateFields()
     } catch {
-      // 表单校验失败，antd 会自动高亮错误字段
+      setActiveTab('basic')
+      message.error('请先修正「基本设置」中标出的项')
       return
     }
-    const [basicValues, featureValues] = values
+    try {
+      featureValues = await featureForm.validateFields()
+    } catch {
+      setActiveTab('feature')
+      message.error('请先修正「功能设置」中标出的项')
+      return
+    }
     // 只提交改过的项（见 utils/site-settings.ts）：没打开过、没改过的开关保持库里原来的值，
     // 不再被补成 false 一起写回（此前只改站点名称就会悄悄关掉注册、评论与评论审核）
     const changed = changedSettings(
@@ -194,7 +205,7 @@ export default function SiteSettingPage() {
         }
       />
 
-      <Tabs defaultActiveKey="basic" items={tabItems} />
+      <Tabs activeKey={activeTab} onChange={setActiveTab} items={tabItems} />
     </div>
   )
 }
