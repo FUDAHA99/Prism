@@ -533,6 +533,44 @@ describe('影视模块 HTTP', () => {
       },
     );
 
+    it('公开视图只给 http(s) 与以 / 开头的剧集地址：库里的 javascript: 等存量数据与磁力链不交给门户，后台照常看到全部', async () => {
+      const slug = `episode-filter-${randomUUID().slice(0, 8)}`;
+      const id = (
+        await movies.save({ title: '剧集过滤', slug, status: MovieStatus.PUBLISHED, publishedAt: new Date('2026-10-01T00:00:00Z') } as Partial<Movie>)
+      ).id;
+      const src = await ds.getRepository(MovieSource).save({ movieId: id, name: '线路', kind: MovieSourceKind.PLAY, sortOrder: 0 });
+      // 直接写库：模拟加校验之前采集 / 写入的存量数据
+      const urls = [
+        'https://cdn.example.com/1.m3u8',
+        'javascript:alert(document.domain)',
+        ' JAVASCRIPT:alert(1)',
+        'data:text/html;base64,PHNjcmlwdD4=',
+        '/uploads/2.mp4',
+        '//cdn.example.com/3.m3u8',
+        'magnet:?xt=urn:btih:abc',
+        'vbscript:msgbox(1)',
+        '  http://cdn.example.com/4.m3u8  ',
+        'relative/5.m3u8',
+      ];
+      for (const [i, url] of urls.entries()) {
+        await ds.getRepository(MovieEpisode).save({ sourceId: src.id, title: `第${i + 1}集`, episodeNumber: i + 1, url, sortOrder: i });
+      }
+      const res = await get(`/movies/slug/${slug}`, 'anonymous').expect(200);
+      expect(res.body.sources[0].episodes.map((e: { url: string }) => e.url)).toEqual([
+        'https://cdn.example.com/1.m3u8',
+        '/uploads/2.mp4',
+        '//cdn.example.com/3.m3u8',
+        'http://cdn.example.com/4.m3u8',
+      ]);
+      expect(JSON.stringify(res.body)).not.toMatch(/javascript|vbscript|data:|magnet/i);
+
+      const staff = await get(`/movies/${id}`, 'editor').expect(200);
+      expect(staff.body.sources[0].episodes).toHaveLength(urls.length);
+      // 不影响后面按「已发布影视」计数的用例
+      await ds.getRepository(MovieSource).delete({ movieId: id });
+      await movies.delete(id);
+    });
+
     it('公开接口不解析 token：带着管理员 token 也读不到草稿（后台从不调用这条）', async () => {
       await get(`/movies/slug/${slugs.draft}`, 'admin').expect(404);
     });

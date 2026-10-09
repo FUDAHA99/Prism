@@ -688,6 +688,7 @@
 
 **公开视图**（游客列表与 slug 详情）：只含 `id`、`title`、`originalTitle`、`slug`、`movieType`、`categoryId`、`subType`、`year`、`region`、`language`、`director`、`actors`、`intro`、`posterUrl`、`trailerUrl`、`duration`、`totalEpisodes`、`currentEpisode`、`isFinished`、`score`（DECIMAL，MySQL 下是字符串）、`isFeatured`、`isVip`、`metaTitle`、`metaKeywords`、`metaDescription`、`viewCount`、`likeCount`、`publishedAt`、`createdAt`、`updatedAt`；
 slug 详情另有 `sources`（`{ id, movieId, name, kind, player, sortOrder, episodes }`，`episodes` 为 `{ id, sourceId, title, episodeNumber, url, durationSec, sortOrder }`）。
+公开视图的 `episodes` 只含地址为 http(s) 或以 `/` 开头的剧集（去首尾空白）：javascript: / data: 等存量数据、磁力链等门户播放不了的协议都不出现（后台视图照常是全部剧集）；采集入库时 javascript: / vbscript: / data: / file: 协议的剧集直接丢弃，数量与涉及的 vod_id 写在采集日志的错误信息里。
 不含 `status`、`collectSource`、`collectExternalId`、`posterBroken`、`titleCleaned`、`aliases`。
 与内容相同，`publishedAt` 晚于当前时间的影视到点之前对游客不可见（列表与 slug 详情）；采集入库的发布时间不晚于入库时刻
 （上游的上映日期 / 不带时区的更新时间可能落在未来，入库时截到当前时间）。

@@ -33,6 +33,7 @@ import {
   normalizeCollectedImageUrl,
 } from './collect-cleaner';
 import { PosterCheckerService } from './poster-checker.service';
+import { hasDangerousScheme } from '../movie/dto/movie-dto.helpers';
 import { Clock, SYSTEM_CLOCK, wholeSecond } from '../../common/clock/clock';
 
 import { Movie, MovieStatus, MovieType } from '../movie/entities/movie.entity';
@@ -45,6 +46,8 @@ import { QueryCollectLogDto, RunCollectDto } from './dto/run-collect.dto';
 
 /** 单条失败的错误摘要上限（vod_id 来自上游，可以很长） */
 const ITEM_ERROR_MAX_CHARS = 500;
+/** 采集日志里列出的「丢弃了剧集的条目」最多几个（其余只计数） */
+const DROPPED_VOD_IDS_SHOWN = 5;
 
 interface RunStats {
   total: number;
@@ -53,6 +56,20 @@ interface RunStats {
   skipped: number;
   failed: number;
   firstError?: string;
+  /** 因危险协议被丢弃的剧集数，以及涉及的条目（vod_id） */
+  droppedEpisodes: number;
+  droppedVodIds: string[];
+}
+
+/** vod_id 来自上游：写进日志前截短 */
+const clipVodId = (id: unknown): string => String(id).slice(0, 64);
+
+/** 采集日志末尾附加的说明：危险协议的剧集地址被丢弃了多少、涉及哪些条目 */
+function droppedEpisodesNote(stats: RunStats): string | null {
+  if (stats.droppedEpisodes === 0) return null;
+  const shown = stats.droppedVodIds.slice(0, DROPPED_VOD_IDS_SHOWN).join(', ');
+  const more = stats.droppedVodIds.length > DROPPED_VOD_IDS_SHOWN ? ` 等 ${stats.droppedVodIds.length} 个条目` : '';
+  return `已丢弃 ${stats.droppedEpisodes} 个剧集地址：使用了 javascript: / vbscript: / data: / file: 协议（vod_id: ${shown}${more}）`;
 }
 
 @Injectable()
@@ -127,6 +144,8 @@ export class CollectExecutorService {
       updated: 0,
       skipped: 0,
       failed: 0,
+      droppedEpisodes: 0,
+      droppedVodIds: [],
     };
 
     let finalStatus: CollectLogStatus = CollectLogStatus.SUCCESS;
@@ -174,6 +193,9 @@ export class CollectExecutorService {
       this.logger.error(`采集 ${source.name} 失败: ${collectErrorLogDetail(e)}`);
     }
 
+    const note = droppedEpisodesNote(stats);
+    if (note) errorMessage = errorMessage ? `${errorMessage}\n${note}` : note;
+
     const durationMs = Date.now() - startedAt;
     await this.logRepo.update(logId, {
       status: finalStatus,
@@ -211,7 +233,7 @@ export class CollectExecutorService {
         }
         const localCategoryId = mappingMap.get(sourceCategoryId);
 
-        const result = await this.upsertOne(source, it, localCategoryId);
+        const result = await this.upsertOne(source, it, localCategoryId, stats);
         if (result === 'inserted') stats.inserted++;
         else if (result === 'updated') stats.updated++;
         else stats.skipped++;
@@ -231,12 +253,13 @@ export class CollectExecutorService {
     source: CollectSource,
     it: MacCmsItem,
     localCategoryId: string | null | undefined,
+    stats: RunStats,
   ): Promise<'inserted' | 'updated' | 'skipped'> {
     const externalId = String(it.vod_id);
 
     switch (source.contentType) {
       case CollectContentType.MOVIE:
-        return this.upsertMovie(source, it, localCategoryId, externalId);
+        return this.upsertMovie(source, it, localCategoryId, externalId, stats);
       case CollectContentType.NOVEL:
         return this.upsertNovel(source, it, localCategoryId, externalId);
       case CollectContentType.COMIC:
@@ -253,6 +276,7 @@ export class CollectExecutorService {
     it: MacCmsItem,
     localCategoryId: string | null | undefined,
     externalId: string,
+    stats: RunStats,
   ): Promise<'inserted' | 'updated'> {
     let movie = await this.movieRepo.findOne({
       where: { collectSource: source.id, collectExternalId: externalId },
@@ -313,14 +337,27 @@ export class CollectExecutorService {
     }
 
     // 同步线路 + 剧集（增量替换：旧的删，新的插，避免脏数据堆积）
-    const parsed = parsePlayData(it.vod_play_from, it.vod_play_url);
+    // 剧集地址来自不可信的上游：javascript: / vbscript: / data: / file: 协议（与后台 DTO 的 IsSafeMediaUrl 同一判定）
+    // 不入库，计入采集日志。此前原样写进 movie_episodes.url，公开详情原样返回，门户播放失败时渲染成可点击的链接。
+    const parsed = parsePlayData(it.vod_play_from, it.vod_play_url).map((p) => {
+      const episodes = p.episodes.filter((ep) => !hasDangerousScheme(ep.url));
+      return { ...p, episodes, dropped: p.episodes.length - episodes.length };
+    });
+    const dropped = parsed.reduce((n, p) => n + p.dropped, 0);
+    if (dropped > 0) {
+      stats.droppedEpisodes += dropped;
+      stats.droppedVodIds.push(clipVodId(it.vod_id));
+      this.logger.warn(`采集条目 vod_id=${clipVodId(it.vod_id)}：丢弃 ${dropped} 个危险协议的剧集地址`);
+    }
+    // 剧集全部被丢弃的线路不建（门户上会是一条 0 集的空线路）；上游给了播放数据就以它为准替换旧线路
+    const usable = parsed.filter((p) => p.episodes.length > 0 || p.dropped === 0);
     if (parsed.length > 0) {
       // 清旧（cascade 会带走 episodes）
       const oldSources = await this.movieSourceRepo.find({ where: { movieId: movie.id } });
       if (oldSources.length > 0) await this.movieSourceRepo.remove(oldSources);
 
-      for (let i = 0; i < parsed.length; i++) {
-        const p = parsed[i];
+      for (let i = 0; i < usable.length; i++) {
+        const p = usable[i];
         const ms = this.movieSourceRepo.create({
           movieId: movie.id,
           name: p.name,

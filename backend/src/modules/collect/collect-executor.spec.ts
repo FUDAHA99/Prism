@@ -143,6 +143,60 @@ describe('CollectExecutorService 采集落库', () => {
     });
   });
 
+  describe('剧集地址：危险协议不入库，计入采集日志', () => {
+    const TAB = String.fromCharCode(9);
+    const playUrl = (eps: string[]) => eps.map((u, i) => `第${i + 1}集$${u}`).join('#');
+
+    it('javascript: / data: / vbscript: / file:（含大小写、前导空白、夹 Tab）的剧集丢弃，其余照常入库；日志写明数量与条目', async () => {
+      const { log } = await collect(CollectContentType.MOVIE, [
+        item({
+          vod_id: 11,
+          vod_play_from: 'ckm3u8$$$evil',
+          vod_play_url: [
+            playUrl(['https://cdn.example.com/11/1.m3u8', 'javascript:alert(1)', 'https://cdn.example.com/11/3.m3u8']),
+            playUrl(['data:text/html;base64,PHNjcmlwdD4=', ` JavaScript:alert(1)`, `java${TAB}script:alert(1)`]),
+          ].join('$$$'),
+        }),
+        item({
+          vod_id: 12,
+          vod_play_from: 'ckm3u8',
+          vod_play_url: playUrl(['vbscript:msgbox(1)', 'file:///etc/passwd', 'magnet:?xt=urn:btih:abc', '/share/12.m3u8']),
+        }),
+      ]);
+      // 两个条目都正常入库（不算失败），日志说明丢了几个、是哪些条目
+      expect(log).toMatchObject({ status: 'success', insertedCount: 2, failedCount: 0 });
+      expect(log.errorMessage).toBe(
+        '已丢弃 6 个剧集地址：使用了 javascript: / vbscript: / data: / file: 协议（vod_id: 11, 12）',
+      );
+
+      const m11 = await movies.findOneOrFail({ where: { collectExternalId: '11' }, relations: { sources: { episodes: true } } });
+      // 全部剧集都被丢弃的线路（evil）不建
+      expect(m11.sources.map((s) => s.name)).toEqual(['ckm3u8']);
+      expect(m11.sources[0].episodes.map((e) => e.url).sort()).toEqual([
+        'https://cdn.example.com/11/1.m3u8',
+        'https://cdn.example.com/11/3.m3u8',
+      ]);
+      const m12 = await movies.findOneOrFail({ where: { collectExternalId: '12' }, relations: { sources: { episodes: true } } });
+      // 其他协议（磁力链等）后台照常保存，只有危险协议被丢弃
+      expect(m12.sources[0].episodes.map((e) => e.url).sort()).toEqual(['/share/12.m3u8', 'magnet:?xt=urn:btih:abc']);
+      expect(JSON.stringify(await ds.getRepository(MovieEpisode).find())).not.toMatch(/javascript|vbscript|data:|file:/i);
+    });
+
+    it('涉及的条目超过 5 个时只列前 5 个，其余计数；没有丢弃时日志不多写', async () => {
+      const items = Array.from({ length: 7 }, (_, i) =>
+        item({ vod_id: 100 + i, vod_play_from: 'ckm3u8', vod_play_url: playUrl(['https://cdn.example.com/ok.m3u8', 'javascript:alert(1)']) }),
+      );
+      const { log } = await collect(CollectContentType.MOVIE, items);
+      expect(log.errorMessage).toBe(
+        '已丢弃 7 个剧集地址：使用了 javascript: / vbscript: / data: / file: 协议（vod_id: 100, 101, 102, 103, 104 等 7 个条目）',
+      );
+      const clean = await collect(CollectContentType.MOVIE, [
+        item({ vod_id: 200, vod_play_from: 'ckm3u8', vod_play_url: playUrl(['https://cdn.example.com/ok.m3u8']) }),
+      ]);
+      expect(clean.log.errorMessage).toBe('');
+    });
+  });
+
   describe('海报 / 封面地址入库前规范化（此前原样入库，后台编辑页回传时被判非法，整条记录改不了）', () => {
     it('海报：规范化后的地址入库并交给封面检测；规范化不出来的不入库并标成「封面异常」', async () => {
       const { posterChecker } = await collect(CollectContentType.MOVIE, [

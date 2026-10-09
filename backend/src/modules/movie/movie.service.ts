@@ -151,13 +151,25 @@ export interface MoviePage<T> {
   meta: { total: number; page: number; limit: number; totalPages: number };
 }
 
+/**
+ * 游客视图里的剧集地址只给 http(s) 绝对地址与以 / 开头的地址（站内路径、协议相对地址）：门户播放器把它交给
+ * <video> / hls.js，播放失败时还会渲染成「用外部播放器打开」的 <a href>。javascript: / data: 等协议在写入时已被拦截
+ * （后台 DTO 的 IsSafeMediaUrl、采集入库前同一判定），这里再挡一层；magnet: / thunder: 等其他协议后台仍可保存，
+ * 但门户播放不了，也不再交给门户。被滤掉的剧集不出现在公开视图里（目录与播放页的下标随之连续）。
+ */
+const PUBLIC_EPISODE_URL = /^(?:https?:\/\/|\/)/i;
+
+export function isPublicEpisodeUrl(url: unknown): url is string {
+  return typeof url === 'string' && PUBLIC_EPISODE_URL.test(url.trim());
+}
+
 function toPublicEpisode(e: MovieEpisode): PublicMovieEpisode {
   return {
     id: e.id,
     sourceId: e.sourceId,
     title: e.title,
     episodeNumber: e.episodeNumber,
-    url: e.url,
+    url: e.url.trim(),
     durationSec: e.durationSec ?? null,
     sortOrder: e.sortOrder,
   };
@@ -171,7 +183,7 @@ function toPublicSource(s: MovieSource): PublicMovieSource {
     kind: s.kind,
     player: s.player ?? null,
     sortOrder: s.sortOrder,
-    episodes: (s.episodes ?? []).map(toPublicEpisode),
+    episodes: (s.episodes ?? []).filter((e) => isPublicEpisodeUrl(e.url)).map(toPublicEpisode),
   };
 }
 
