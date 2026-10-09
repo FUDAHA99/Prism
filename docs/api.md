@@ -620,10 +620,14 @@
 
 ## 十三、系统配置 `/site-settings`
 
-🔒 需要认证
+`GET /site-settings/public` — 前台可见的配置（公开，9 个白名单键）
+
+🔒 以下仅 `admin`：
 
 `GET /site-settings` — 获取所有配置  
-`PATCH /site-settings` — 批量保存配置（key-value 对象）
+`POST /site-settings/batch` — 批量保存配置：`{ "settings": [{ "key": "site_name", "value": "Prism" }] }`。
+每一项都必须是对象且带 `key`（小写字母开头，只含小写字母、数字、下划线）；`[[]]` 这类嵌套数组 `400`，
+不会再以空 key 命中第一项配置并把它清空。先整体检查再逐项写，任何一项不合法时一项都不写。
 
 ---
 
@@ -733,6 +737,8 @@ slug 详情另有 `sources`（`{ id, movieId, name, kind, player, sortOrder, epi
 只接受上面这些字段，其余字段（`id`、`viewCount`、`likeCount`、`collectSource`、`collectExternalId`、`posterBroken`、`titleCleaned`、`aliases`、时间戳等）一律 `400`；
 采集字段只由采集任务在服务端写入。`status` 只能是 `draft`（默认）或 `published`，为 `published` 时 `publishedAt` 缺省为当前时间。
 `sources` 里的线路与剧集同样只认上面列出的字段：带 `id` / `movieId` / `sourceId` 一律 `400`（归属取新建的影视），最多 50 条线路、每条最多 2000 集。
+`sources` / `episodes` 的每一项都必须是对象（`[[]]`、`[[{...}]]` 这类嵌套数组 `400`）。影视、线路、剧集在同一个事务里写入，
+任何一步失败整体回滚，不会留下占着 slug 的半截影视；`POST /movies/:id/sources` 的线路与剧集同理。
 
 | 字段 | 规则 |
 |------|------|

@@ -4,6 +4,7 @@ import {
   ArrayMaxSize,
   IsArray,
   IsNotEmpty,
+  IsObject,
   IsOptional,
   IsString,
   Matches,
@@ -44,6 +45,9 @@ export class BatchUpsertSettingDto {
   @ApiProperty({ description: '配置项列表', type: [UpsertSettingDto] })
   @IsArray()
   @ArrayMaxSize(SETTING_BATCH_MAX_ITEMS)
+  // 每一项必须是对象：只有 ValidateNested 时 [[]] 能通过，service 拿到数组、key 为 undefined，
+  // findOne({ where: { key: undefined } }) 被 TypeORM 忽略条件，命中第一行并把它的值清空
+  @IsObject({ each: true, message: 'settings 的每一项都必须是对象' })
   @ValidateNested({ each: true })
   @Type(() => UpsertSettingDto)
   settings: UpsertSettingDto[];

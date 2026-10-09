@@ -313,7 +313,8 @@ describe('AuditService 脱敏、截断与列表字段', () => {
       );
       const updated = await lastRaw('UPDATE');
       expect(JSON.parse(updated.newValues!)).toEqual({
-        changedFields: ['apiUrl', 'extraHeaders', 'userAgent', 'bogus'],
+        // 采集源逐字段写库：请求体以外的键（bogus）既不写进库，也不出现在变更字段里
+        changedFields: ['apiUrl', 'userAgent', 'extraHeaders'],
         apiHost: 'res2.example.com',
         extraHeaders: { 'X-Api-Key': AUDIT_REDACTED },
       });

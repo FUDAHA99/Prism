@@ -220,6 +220,20 @@ describe('CreateMovieDto / UpdateMovieDto', () => {
       await rejects(createDto({ ...createMinimal, ...extra }));
     });
 
+    it.each<[string, Record<string, unknown>, string]>([
+      // 只有 ValidateNested 时这几种都能通过（class-validator 递归进内层数组），service 拿到数组写库 500、留下半截记录
+      ['线路是空数组 [[]]', { sources: [[]] }, 'sources 的每一项都必须是对象'],
+      ['线路包在内层数组里 [[{...}]]', { sources: [[{ name: '线路' }]] }, 'sources 的每一项都必须是对象'],
+      ['第二条线路的剧集是 [[]]', { sources: [{ name: 'ok' }, { name: 'bad', episodes: [[]] }] }, 'sources.1.episodes 的每一项都必须是对象'],
+      ['剧集包在内层数组里', { sources: [{ name: '线路', episodes: [[{ title: '1', url: 'https://v/1' }]] }] }, 'sources.0.episodes 的每一项都必须是对象'],
+    ])('新建时%s → 400，消息指明哪一层', async (_label, extra, message) => {
+      expect(await rejects(createDto({ ...createMinimal, ...extra }))).toContain(message);
+    });
+
+    it('新增线路（POST /movies/:id/sources）时剧集是嵌套数组 → 400', async () => {
+      expect(await rejects(sourceDto({ name: '线路', episodes: [[]] }))).toContain('episodes 的每一项都必须是对象');
+    });
+
     it.each<[string, Record<string, unknown>]>([
       ['线路带 movieId', { name: '线路', movieId: '00000000-0000-4000-8000-000000000007' }],
       ['线路带 id', { name: '线路', id: '00000000-0000-4000-8000-000000000008' }],

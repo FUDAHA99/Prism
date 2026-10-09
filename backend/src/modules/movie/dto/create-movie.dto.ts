@@ -9,6 +9,7 @@ import {
   IsISO8601,
   IsNotEmpty,
   IsNumber,
+  IsObject,
   IsOptional,
   IsString,
   IsUUID,
@@ -117,6 +118,8 @@ export class CreateMovieSourceDto {
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(MOVIE_MAX_EPISODES_PER_SOURCE)
+  // 每一项必须是对象：只有 ValidateNested 时 [[...]] 能通过（class-validator 递归进内层数组），service 拿到数组写库 500
+  @IsObject({ each: true, message: 'episodes 的每一项都必须是对象' })
   @ValidateNested({ each: true })
   @Type(() => CreateMovieEpisodeDto)
   episodes?: CreateMovieEpisodeDto[];
@@ -305,6 +308,7 @@ export class CreateMovieDto {
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(MOVIE_MAX_SOURCES)
+  @IsObject({ each: true, message: 'sources 的每一项都必须是对象' })
   @ValidateNested({ each: true })
   @Type(() => CreateMovieSourceDto)
   sources?: CreateMovieSourceDto[];

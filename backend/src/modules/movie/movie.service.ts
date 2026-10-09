@@ -5,7 +5,7 @@ import {
   Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, IsNull, SelectQueryBuilder } from 'typeorm';
+import { EntityManager, Repository, IsNull, SelectQueryBuilder } from 'typeorm';
 import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { Movie, MovieType, MovieStatus } from './entities/movie.entity';
 import {
@@ -18,6 +18,7 @@ import { changedAuditFields } from '../audit/audit-summary';
 import { isStaff, Viewer } from '../../common/authz/viewer';
 import { publishedDueParams, publishedDueSql } from '../../common/authz/publish-window';
 import { Clock, SYSTEM_CLOCK, wholeSecond } from '../../common/clock/clock';
+import { assertPlainObjects } from '../../common/utils/plain-object';
 import {
   MOVIE_LIST_DEFAULT_LIMIT,
   MOVIE_LIST_MAX_LIMIT,
@@ -251,12 +252,13 @@ export class MovieService {
   }
 
   /**
-   * 给影视写一条线路及其剧集。movieId / sourceId 只来自调用方（路径参数或刚建好的父记录），
+   * 给影视写一条线路及其剧集（em：调用方开的事务）。movieId / sourceId 只来自调用方（路径参数或刚建好的父记录），
    * 请求体里的字段逐个挑：即便有调用方绕过 ValidationPipe 塞进 id / movieId / sourceId，也挪不动别人的线路与剧集。
    */
-  private async insertSource(movieId: string, dto: CreateMovieSourceDto): Promise<MovieSource> {
-    const saved = await this.sourceRepo.save(
-      this.sourceRepo.create({
+  private async insertSource(em: EntityManager, movieId: string, dto: CreateMovieSourceDto): Promise<MovieSource> {
+    const sourceRepo = em.getRepository(MovieSource);
+    const saved = await sourceRepo.save(
+      sourceRepo.create({
         movieId,
         name: dto.name,
         kind: dto.kind ?? MovieSourceKind.PLAY,
@@ -266,11 +268,18 @@ export class MovieService {
     );
     const episodes = dto.episodes ?? [];
     if (episodes.length > 0) {
-      await this.episodeRepo.save(
+      await em.getRepository(MovieEpisode).save(
         episodes.map((e, idx) => this.newEpisode(saved.id, e, { episodeNumber: idx + 1, sortOrder: idx })),
       );
     }
     return saved;
+  }
+
+  /** 线路（及其剧集）逐项必须是对象：服务端兜底，见 assertPlainObjects */
+  private plainSources(sources: CreateMovieSourceDto[] | undefined): CreateMovieSourceDto[] {
+    const list = assertPlainObjects(sources, 'sources');
+    for (const source of list) assertPlainObjects(source.episodes, 'episodes');
+    return list;
   }
 
   private newEpisode(
@@ -291,23 +300,31 @@ export class MovieService {
   /**
    * 新建影视（仅后台角色）。列按 MOVIE_EDITABLE_FIELDS 逐个挑；status 只能是 draft（默认）或 published，
    * published 时 publishedAt 缺省为当前时间。线路与剧集按嵌套 DTO 逐字段写，归属取刚建好的影视。
+   *
+   * 影视、线路、剧集在同一个事务里写：任何一步失败整体回滚。此前逐条提交，第二条线路的剧集写库失败时，
+   * 影视与第一条线路已经落库（草稿残留），这条残留还占着 slug，用同一 slug 重试只会得到 409。
    */
   async create(dto: CreateMovieDto, userId: string): Promise<Movie> {
     await this.assertSlugAvailable(dto.slug);
+    const sources = this.plainSources(dto.sources);
 
     const requestedAt = dto.publishedAt ? new Date(dto.publishedAt) : undefined;
     const published = dto.status === MovieStatus.PUBLISHED;
-    const movie = this.movieRepo.create({
-      ...(pickMovieFields(dto) as Partial<Movie>),
-      movieType: dto.movieType ?? MovieType.MOVIE,
-      status: published ? MovieStatus.PUBLISHED : MovieStatus.DRAFT,
-      publishedAt: published ? (requestedAt ?? this.publishNow()) : requestedAt,
+    const saved = await this.movieRepo.manager.transaction(async (em) => {
+      const movieRepo = em.getRepository(Movie);
+      const movie = await movieRepo.save(
+        movieRepo.create({
+          ...(pickMovieFields(dto) as Partial<Movie>),
+          movieType: dto.movieType ?? MovieType.MOVIE,
+          status: published ? MovieStatus.PUBLISHED : MovieStatus.DRAFT,
+          publishedAt: published ? (requestedAt ?? this.publishNow()) : requestedAt,
+        }),
+      );
+      for (const source of sources) {
+        await this.insertSource(em, movie.id, source);
+      }
+      return movie;
     });
-    const saved = await this.movieRepo.save(movie);
-
-    for (const source of dto.sources ?? []) {
-      await this.insertSource(saved.id, source);
-    }
 
     await this.auditService.log({
       userId,
@@ -541,7 +558,10 @@ export class MovieService {
 
   // ==================== Sources ====================
 
-  /** 给影视加一条线路（可带剧集）：所属影视只取路径参数，线路与剧集的列逐个挑（见 insertSource） */
+  /**
+   * 给影视加一条线路（可带剧集）：所属影视只取路径参数，线路与剧集的列逐个挑（见 insertSource）；
+   * 线路与剧集同一个事务，剧集写失败不会留下一条空线路。
+   */
   async addSource(
     movieId: string,
     dto: CreateMovieSourceDto,
@@ -549,7 +569,8 @@ export class MovieService {
   ): Promise<MovieSource> {
     const movie = await this.movieRepo.findOne({ where: { id: movieId }, select: { id: true } });
     if (!movie) throw new NotFoundException(`影视不存在: ${movieId}`);
-    const saved = await this.insertSource(movieId, dto);
+    assertPlainObjects(dto.episodes, 'episodes');
+    const saved = await this.movieRepo.manager.transaction((em) => this.insertSource(em, movieId, dto));
     await this.auditService.log({
       userId,
       action: 'MOVIE_SOURCE_CREATE',

@@ -288,6 +288,9 @@ describe('分类映射 DTO', () => {
     [{ items: [{ sourceCategoryId: '1', sourceCategoryName: 'x', localCategoryId: 'y'.repeat(37) }] }, /localCategoryId/],
     [{ items: [{ sourceCategoryId: '1', sourceCategoryName: 'x', sourceId: 'other-source' }] }, /sourceId/],
     [{ items: [{ sourceCategoryId: '1', sourceCategoryName: 'x', id: 'hijack' }] }, /id/],
+    // 只有 ValidateNested 时这两种能通过：service 以 sourceCategoryId = undefined 命中该源第一条映射并清空它
+    [{ items: [[]] }, /items 的每一项都必须是对象/],
+    [{ items: [[{ sourceCategoryId: '1', sourceCategoryName: 'x' }]] }, /items 的每一项都必须是对象/],
   ])('%p → 400', async (body, pattern) => {
     expect(await batch.fails(body)).toMatch(pattern);
   });

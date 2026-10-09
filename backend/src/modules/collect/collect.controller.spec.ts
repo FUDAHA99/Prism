@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { ExecutionContext, Logger, ValidationPipe } from '@nestjs/common';
+import { BadRequestException, ExecutionContext, Logger, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { AuthGuard } from '@nestjs/passport';
 import { getRepositoryToken } from '@nestjs/typeorm';
@@ -214,6 +214,57 @@ describe('CollectController（HTTP）', () => {
         .send({ sourceCategoryId: '6', sourceCategoryName: '动作片', enabled: true });
       expect(res.status).toBe(201);
     });
+
+    it.each([
+      ['[[]]', [[]]],
+      ['[[{...}]]', [[{ sourceCategoryId: '6', sourceCategoryName: '动作片' }]]],
+      ['合法项后面跟一个空数组', [{ sourceCategoryId: '6', sourceCategoryName: '动作片' }, []]],
+    ])('POST /mappings/batch：items 为嵌套数组 %s → 400，不查不写（此前 201，命中该源第一条映射并清空本地分类）', async (_label, items) => {
+      const res = await http().post(`/collect/sources/${SOURCE_ID}/mappings/batch`).send({ items });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toBe('items 的每一项都必须是对象');
+      expect(mappingRepo.findOne).not.toHaveBeenCalled();
+      expect(mappingRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('纵深防御：绕过 ValidationPipe 直接调 service，缺 sourceCategoryId / 嵌套数组 → 400，不查不写', async () => {
+      const service = app.get(CollectSourceService);
+      for (const call of [
+        () => service.upsertMapping(SOURCE_ID, { sourceCategoryName: '动作片' } as never, 'admin-id'),
+        () => service.upsertMapping(SOURCE_ID, [] as never, 'admin-id'),
+        () => service.batchUpsertMappings(SOURCE_ID, [[]] as never, 'admin-id'),
+        // 第二项有问题时第一项也不写（先整体检查）
+        () =>
+          service.batchUpsertMappings(
+            SOURCE_ID,
+            [{ sourceCategoryId: '6', sourceCategoryName: '动作片' }, { sourceCategoryName: '缺 id' }] as never,
+            'admin-id',
+          ),
+      ]) {
+        await expect(call()).rejects.toBeInstanceOf(BadRequestException);
+      }
+      expect(mappingRepo.findOne).not.toHaveBeenCalled();
+      expect(mappingRepo.save).not.toHaveBeenCalled();
+    });
+  });
+
+  it('纵深防御：采集源的新建 / 编辑逐字段写库，请求体以外的列（id、累计条数、最近运行时间）写不进去', async () => {
+    const service = app.get(CollectSourceService);
+    await service.create(
+      { ...uiCreatePayload, id: 'hijack', totalCollected: 999, lastRunAt: new Date(0), categoryMappings: [{}] } as never,
+      'admin-id',
+    );
+    const created = sourceRepo.create.mock.calls[0][0];
+    expect(created).not.toHaveProperty('id');
+    expect(created).not.toHaveProperty('totalCollected');
+    expect(created).not.toHaveProperty('lastRunAt');
+    expect(created).not.toHaveProperty('categoryMappings');
+    expect(created).toMatchObject({ name: uiCreatePayload.name, apiUrl: uiCreatePayload.apiUrl });
+
+    await service.update(SOURCE_ID, { remark: '备注', id: 'hijack', totalCollected: 999 } as never, 'admin-id');
+    const saved = sourceRepo.save.mock.calls[sourceRepo.save.mock.calls.length - 1][0];
+    expect(saved).toMatchObject({ id: SOURCE_ID, remark: '备注' });
+    expect(saved).not.toHaveProperty('totalCollected');
   });
 
   describe('GET /collect/logs', () => {

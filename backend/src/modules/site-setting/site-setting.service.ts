@@ -1,7 +1,8 @@
-import { Injectable, OnModuleInit, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, OnModuleInit, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { SiteSetting } from './entities/site-setting.entity';
+import { assertPlainObjects } from '../../common/utils/plain-object';
 
 interface DefaultSetting {
   key: string;
@@ -95,7 +96,15 @@ export class SiteSettingService implements OnModuleInit {
     return setting;
   }
 
+  /**
+   * 按 key 写一项配置（有则改值，无则新建）。key 缺失时 400：TypeORM 会忽略 where 里值为 undefined 的条件，
+   * findOne({ where: { key: undefined } }) 命中的是表里第一行 —— 此前 POST /site-settings/batch {settings:[[]]}
+   * 返回 200，实际把第一项配置（site_name）的值清空了。
+   */
   async upsert(key: string, value: string): Promise<SiteSetting> {
+    if (typeof key !== 'string' || key.trim() === '') {
+      throw new BadRequestException('配置项的 key 不能为空');
+    }
     const existing = await this.siteSettingRepository.findOne({ where: { key } });
     if (existing) {
       await this.siteSettingRepository.update(existing.id, { value });
@@ -106,8 +115,15 @@ export class SiteSettingService implements OnModuleInit {
     return this.siteSettingRepository.save(setting);
   }
 
+  /** 批量保存：先确认每一项都是对象、都有 key，再逐项写 —— 不会出现前几项已写入、后面一项 400 的半截保存 */
   async batchUpsert(settings: Array<{ key: string; value?: string }>): Promise<void> {
-    for (const { key, value } of settings) {
+    const items = assertPlainObjects(settings, 'settings');
+    for (const item of items) {
+      if (typeof item.key !== 'string' || item.key.trim() === '') {
+        throw new BadRequestException('配置项的 key 不能为空');
+      }
+    }
+    for (const { key, value } of items) {
       await this.upsert(key, value ?? '');
     }
   }

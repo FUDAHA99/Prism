@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { ValidationPipe } from '@nestjs/common';
+import { BadRequestException, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { JwtModule, JwtService } from '@nestjs/jwt';
@@ -804,6 +804,74 @@ describe('影视模块 HTTP', () => {
       await patch(`/movies/${id}/poster`, 'editor', { posterUrl: 'https://img.example.com/fixed.jpg' }).expect(200);
       expect(await movies.findOneByOrFail({ id })).toMatchObject({ posterUrl: 'https://img.example.com/fixed.jpg', posterBroken: null });
       await patch(`/movies/${id}/poster`, 'editor', { posterUrl: 'https://img.example.com/x.jpg', posterBroken: false }).expect(400);
+    });
+
+    it.each<[string, Record<string, unknown>]>([
+      ['sources: [[]]', { sources: [[]] }],
+      ['sources: [[{ name }]]', { sources: [[{ name: '线路' }]] }],
+      ['第二条线路的 episodes: [[]]', { sources: [{ name: 'ok' }, { name: 'bad', episodes: [[]] }] }],
+    ])('嵌套数组 %s → 400，影视 / 线路 / 剧集一行都不写，slug 仍可用（此前 500 并留下半截记录、占住 slug）', async (_label, extra) => {
+      const slug = `nested-${randomUUID().slice(0, 8)}`;
+      const sourceCount = await ds.getRepository(MovieSource).count();
+      const res = await post('/movies', 'admin', { title: '嵌套', slug, ...extra }).expect(400);
+      expect(res.body.message).toMatch(/的每一项都必须是对象/);
+      expect(await rowBySlug(slug)).toBeNull();
+      expect(await ds.getRepository(MovieSource).count()).toBe(sourceCount);
+      await post('/movies', 'admin', { title: '嵌套', slug }).expect(201);
+    });
+
+    it('纵深防御：绕过 ValidationPipe 直接调 service，嵌套数组同样 400、什么都不写', async () => {
+      const service = app.get(MovieService);
+      const slug = `nested-direct-${randomUUID().slice(0, 8)}`;
+      const err = await service
+        .create({ title: '直调', slug, sources: [{ name: 'ok' }, { name: 'bad', episodes: [[]] }] } as never, ids.admin)
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(BadRequestException);
+      expect((err as BadRequestException).message).toBe('episodes 的第 1 项必须是对象');
+      expect(await rowBySlug(slug)).toBeNull();
+      const target = await seedMovie(`nested-add-${randomUUID().slice(0, 8)}`, MovieStatus.DRAFT);
+      const before = (await sourcesOf(target)).length;
+      await expect(service.addSource(target, { name: 'x', episodes: [[]] } as never, ids.admin)).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+      expect(await sourcesOf(target)).toHaveLength(before);
+    });
+
+    it('新建影视是一个事务：第二条线路的剧集写库失败时整体回滚，不留影视 / 线路 / 剧集，同一 slug 可以重来', async () => {
+      // 让「标题为 boom 的剧集」在库里写失败（模拟线路、剧集写到一半出错）
+      await ds.query(
+        "CREATE TRIGGER boom_episode BEFORE INSERT ON movie_episodes WHEN NEW.title = 'boom' BEGIN SELECT RAISE(ABORT, 'boom'); END",
+      );
+      const slug = `tx-${randomUUID().slice(0, 8)}`;
+      const counts = async () => [await movies.count({ withDeleted: true }), await ds.getRepository(MovieSource).count(), await ds.getRepository(MovieEpisode).count()];
+      const before = await counts();
+      try {
+        await post('/movies', 'admin', {
+          title: '事务',
+          slug,
+          status: 'published',
+          sources: [
+            { name: 'a', episodes: [{ title: 'e1', url: 'https://cdn.example.com/tx/1.m3u8' }] },
+            { name: 'b', episodes: [{ title: 'boom', url: 'https://cdn.example.com/tx/2.m3u8' }] },
+          ],
+        }).expect(500);
+        expect(await counts()).toEqual(before);
+        expect(await rowBySlug(slug)).toBeNull();
+
+        // 加线路（带剧集）同样是一个事务：剧集失败不留空线路
+        const target = await seedMovie(`tx-add-${randomUUID().slice(0, 8)}`, MovieStatus.DRAFT);
+        const sourcesBefore = (await sourcesOf(target)).length;
+        await post(`/movies/${target}/sources`, 'admin', { name: 'c', episodes: [{ title: 'boom', url: 'https://cdn.example.com/tx/3.m3u8' }] }).expect(500);
+        expect(await sourcesOf(target)).toHaveLength(sourcesBefore);
+      } finally {
+        await ds.query('DROP TRIGGER boom_episode');
+      }
+      const res = await post('/movies', 'admin', {
+        title: '事务',
+        slug,
+        sources: [{ name: 'a', episodes: [{ title: 'e1', url: 'https://cdn.example.com/tx/1.m3u8' }] }],
+      }).expect(201);
+      expect(res.body.sources).toHaveLength(1);
     });
 
     it('接口新建时带线路与剧集：201，归属取刚建好的影视；嵌套项带 id / movieId / sourceId 一律 400，别人的线路不动', async () => {

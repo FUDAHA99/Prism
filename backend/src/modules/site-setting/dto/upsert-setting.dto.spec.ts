@@ -80,6 +80,14 @@ describe('BatchUpsertSettingDto（全局 ValidationPipe）', () => {
     expect(messages.length).toBeGreaterThan(0);
   });
 
+  it.each([
+    ['[[]]', { settings: [[]] }],
+    ['[[{key,value}]]', { settings: [[{ key: 'site_name', value: 'x' }]] }],
+    ['合法项后面跟一个嵌套数组', { settings: [{ key: 'site_name', value: 'x' }, []] }],
+  ])('嵌套数组 %s → 400（此前通过校验，service 以 key = undefined 命中第一行并清空它）', async (_label, body) => {
+    expect(await messagesOf(body)).toContain('settings 的每一项都必须是对象');
+  });
+
   it('value 传对象时被全局隐式转换成字符串，不会把对象原样交给 service', async () => {
     const dto = (await validate({ settings: [{ key: 'site_name', value: { $gt: '' } }] })) as BatchUpsertSettingDto;
     expect(typeof dto.settings[0].value).toBe('string');

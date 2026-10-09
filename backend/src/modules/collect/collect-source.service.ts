@@ -17,6 +17,7 @@ import {
   UpdateCollectSourceDto,
 } from './dto/collect-source.dto';
 import { UpsertCategoryMappingDto } from './dto/category-mapping.dto';
+import { assertPlainObjects, isPlainObject } from '../../common/utils/plain-object';
 
 /** 「测试连接」回显给后台的上游字符串（msg、样本标题等）截到这么长 */
 const TEST_ECHO_MAX_CHARS = 200;
@@ -26,6 +27,43 @@ function clip(value: unknown): string | number | undefined {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   const text = String(value);
   return text.length > TEST_ECHO_MAX_CHARS ? `${text.slice(0, TEST_ECHO_MAX_CHARS)}…` : text;
+}
+
+/** 采集源可写的列（与 CreateCollectSourceDto 一致）；按白名单逐个挑，undefined 视为没提交 */
+const SOURCE_EDITABLE_FIELDS = [
+  'name',
+  'sourceType',
+  'apiUrl',
+  'contentType',
+  'status',
+  'sortOrder',
+  'timeoutSec',
+  'userAgent',
+  'extraHeaders',
+  'defaultPlayFrom',
+  'remark',
+] as const;
+
+function pickSourceFields(dto: UpdateCollectSourceDto): Partial<CollectSource> {
+  const source = dto as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key of SOURCE_EDITABLE_FIELDS) {
+    if (source[key] !== undefined) out[key] = source[key];
+  }
+  return out as Partial<CollectSource>;
+}
+
+/** 映射项：必须是对象，查找键 sourceCategoryId 与 NOT NULL 的 sourceCategoryName 必须是非空字符串 */
+function assertMappingItem(dto: UpsertCategoryMappingDto): void {
+  if (!isPlainObject(dto)) {
+    throw new BadRequestException('分类映射必须是对象');
+  }
+  if (typeof dto.sourceCategoryId !== 'string' || dto.sourceCategoryId.trim() === '') {
+    throw new BadRequestException('sourceCategoryId（源站分类 ID）不能为空');
+  }
+  if (typeof dto.sourceCategoryName !== 'string' || dto.sourceCategoryName.trim() === '') {
+    throw new BadRequestException('sourceCategoryName（源站分类名）不能为空');
+  }
 }
 
 /** 与 collect_category_mappings 的列长一致：超长的源分类 ID 存不进去，名称截断 */
@@ -47,8 +85,9 @@ export class CollectSourceService {
   // ============ CRUD ============
 
   async create(dto: CreateCollectSourceDto, userId: string) {
+    // 逐字段写库（不展开请求体）：id / totalCollected / lastRunAt 等由服务端维护
     const entity = this.sourceRepo.create({
-      ...dto,
+      ...pickSourceFields(dto),
       sourceType: dto.sourceType ?? CollectSourceType.MACCMS_JSON,
       contentType: dto.contentType ?? CollectContentType.MOVIE,
       status: dto.status ?? CollectSourceStatus.ACTIVE,
@@ -103,11 +142,12 @@ export class CollectSourceService {
 
   async update(id: string, dto: UpdateCollectSourceDto, userId: string) {
     const item = await this.findOne(id);
+    const patch = pickSourceFields(dto);
     // 必须在 Object.assign 之前算：之后 item 已是新值
-    const changedFields = changedAuditFields(item, dto);
-    Object.assign(item, dto);
+    const changedFields = changedAuditFields(item, patch);
+    Object.assign(item, patch);
     const saved = await this.sourceRepo.save(item);
-    // 不记请求体原文（DTO 是 interface，客户端发什么就会存什么）：只记变更字段名，
+    // 不记请求体原文：只记变更字段名，
     // apiUrl 只记 host、请求头只记名称
     const newValues: Record<string, unknown> = { changedFields };
     if (changedFields.includes('apiUrl')) newValues.apiHost = auditUrlHost(saved.apiUrl);
@@ -210,11 +250,17 @@ export class CollectSourceService {
     });
   }
 
+  /**
+   * 按（采集源, 源分类 ID）新增或更新一条映射。sourceCategoryId 缺失时 400：TypeORM 会忽略 where 里值为 undefined 的
+   * 条件，findOne({ where: { sourceId, sourceCategoryId: undefined } }) 命中的是该源的第一条映射 —— 此前
+   * POST /collect/sources/:id/mappings/batch {items:[[]]} 返回 201，实际把那条映射的本地分类清成了 null。
+   */
   async upsertMapping(
     sourceId: string,
     dto: UpsertCategoryMappingDto,
     userId: string,
   ) {
+    assertMappingItem(dto);
     await this.findOne(sourceId); // 确保源存在
 
     let m = await this.mappingRepo.findOne({
@@ -256,8 +302,11 @@ export class CollectSourceService {
     items: UpsertCategoryMappingDto[],
     userId: string,
   ) {
+    // 先整体检查，再逐条写：不会出现前几条已写入、后面一条 400 的半截保存
+    const list = assertPlainObjects(items, 'items');
+    list.forEach(assertMappingItem);
     const results = [];
-    for (const it of items) {
+    for (const it of list) {
       results.push(await this.upsertMapping(sourceId, it, userId));
     }
     return results;

@@ -5,6 +5,7 @@ import {
   IsArray,
   IsBoolean,
   IsNotEmpty,
+  IsObject,
   IsOptional,
   IsString,
   MaxLength,
@@ -48,6 +49,9 @@ export class BatchUpsertCategoryMappingDto {
   @ApiProperty({ type: [UpsertCategoryMappingDto], maxItems: MAPPING_BATCH_MAX_ITEMS })
   @IsArray()
   @ArrayMaxSize(MAPPING_BATCH_MAX_ITEMS)
+  // 每一项必须是对象：只有 ValidateNested 时 [[]] 能通过，service 以 sourceCategoryId = undefined 查映射，
+  // TypeORM 忽略这个条件、命中该源的第一条映射并把它的本地分类清空
+  @IsObject({ each: true, message: 'items 的每一项都必须是对象' })
   @ValidateNested({ each: true })
   @Type(() => UpsertCategoryMappingDto)
   items: UpsertCategoryMappingDto[];
