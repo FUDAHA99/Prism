@@ -144,6 +144,52 @@ describe('后台新建用户 HTTP（POST /users，再 POST /users/:id/assign-rol
     expect(again.body.message).toBe('该用户名已被使用');
   });
 
+  /**
+   * 1-F-3 复审 low：关闭公开注册后 POST /users 是开设账号的唯一入口（含由 admin 开设其他 admin），
+   * 但 USER_CREATE 此前把操作人记成新建出来的账号本身、IP / UA 写死 'system'，审计页看不出是哪个管理员建的号。
+   */
+  it('审计 USER_CREATE：操作人是当前管理员，IP 取 nginx 追加的那一跳、UA 取请求头，资源是新账号', async () => {
+    const created = await h
+      .as(h.http().post('/users'), 'admin')
+      .set('X-Forwarded-For', '6.6.6.6, 203.0.113.9')
+      .set('User-Agent', 'admin-browser/1.0')
+      .send(body())
+      .expect(201);
+    const id = created.body.data.id;
+    const rows = await audits.findBy({ action: 'USER_CREATE', resourceId: id });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      userId: h.ids.admin,
+      resourceType: 'user',
+      resourceId: id,
+      ipAddress: '203.0.113.9',
+      userAgent: 'admin-browser/1.0',
+    });
+    expect(rows[0].newValues).toEqual({ email: created.body.data.email, username: created.body.data.username });
+  });
+
+  it('自助注册（开关打开时）没有操作者：USER_CREATE 与 USER_REGISTER 都记新账号本人与请求来源', async () => {
+    const settings = h.ds.getRepository(SiteSetting);
+    await settings.update({ key: 'enable_register' }, { value: 'true' });
+    try {
+      const res = await h
+        .http()
+        .post('/auth/register')
+        .set('X-Forwarded-For', '198.51.100.4')
+        .set('User-Agent', 'self-register/2.0')
+        .send({ username: 'selfreg2', email: 'selfreg2@cms.test', password: 'Regist123!', nickname: '自助二号' })
+        .expect(201);
+      const id = res.body.data.user.id;
+      for (const action of ['USER_CREATE', 'USER_REGISTER']) {
+        const rows = await audits.findBy({ action, resourceId: id });
+        expect({ action, rows: rows.length }).toEqual({ action, rows: 1 });
+        expect(rows[0]).toMatchObject({ userId: id, ipAddress: '198.51.100.4', userAgent: 'self-register/2.0' });
+      }
+    } finally {
+      await settings.update({ key: 'enable_register' }, { value: 'false' });
+    }
+  });
+
   it.each(['plain', 'editor'] as const)('%s → 403，不建账号', async (who) => {
     const count = await users.count();
     await h.post('/users', who, body()).expect(403);

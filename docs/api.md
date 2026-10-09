@@ -515,6 +515,8 @@
 
 请求体不收角色（带 `roleIds` 为 `400`）：建好后用 7.7 分配。后台「用户管理 → 新建用户」就是这样两步提交的，默认分配 `editor`；
 第二步失败时账号已经建好、没有角色，后台会提示到「编辑」里补上。公开注册（1.2）默认关闭，后台账号都从这里开设。
+审计记一条 `USER_CREATE`：操作人是当前管理员，资源是新账号，IP 与 User-Agent 取自请求（IP 是 nginx 追加的那一跳）；
+自助注册（1.2）没有操作者，`USER_CREATE` 与 `USER_REGISTER` 都记新账号本人。
 
 ```json
 { "username": "editor_zhang", "email": "zhang@example.com", "password": "Staff2026x", "nickname": "小张", "isActive": true }

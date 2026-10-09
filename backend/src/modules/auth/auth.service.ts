@@ -160,12 +160,16 @@ export class AuthService {
     registerDto: RegisterDto,
     requestInfo: LoginAttemptData = { ip: 'unknown' },
   ): Promise<LoginResponse> {
-    const user = await this.userService.create({
-      username: registerDto.username,
-      email: registerDto.email,
-      password: registerDto.password,
-      nickname: registerDto.nickname,
-    });
+    // 自助注册没有操作者：USER_CREATE 记新账号本人，来源与下面的 USER_REGISTER 相同
+    const user = await this.userService.create(
+      {
+        username: registerDto.username,
+        email: registerDto.email,
+        password: registerDto.password,
+        nickname: registerDto.nickname,
+      },
+      { ip: requestInfo.ip, userAgent: requestInfo.userAgent ?? 'unknown' },
+    );
 
     await this.roleService.assignDefaultRole(user.id);
 

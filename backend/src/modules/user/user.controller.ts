@@ -9,6 +9,7 @@ import {
   Query,
   HttpCode,
   HttpStatus,
+  Req,
   UseInterceptors,
   ClassSerializerInterceptor,
 } from '@nestjs/common';
@@ -23,6 +24,7 @@ import { UserRoleIdsDto } from './dto/user-role-ids.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthUser } from '../auth/interfaces/auth.interface';
 import { Access } from '../../common/authz/access.decorator';
+import { clientIp } from '../../common/utils/client-ip';
 // :id 统一校验并转小写：库是 utf8mb4_unicode_ci，大写 id 能查到同一个用户，
 // 而「不能移除自己的管理员角色」等自我保护按字符串比较 currentUser.id，大写即可绕过
 import { ParseLowercaseUuidPipe } from '../../common/pipes/parse-lowercase-uuid.pipe';
@@ -43,8 +45,15 @@ export class UserController {
   async create(
     @Body() createUserDto: CreateUserDto,
     @CurrentUser() currentUser: AuthUser,
+    @Req() req: { ip?: string; headers: Record<string, string | string[] | undefined> },
   ) {
-    return this.userService.create(createUserDto);
+    // 审计记操作的管理员与真实来源（IP 取 nginx 追加的那一跳，见 clientIp）
+    const userAgent = req.headers['user-agent'];
+    return this.userService.create(createUserDto, {
+      actorId: currentUser.id,
+      ip: clientIp(req),
+      userAgent: typeof userAgent === 'string' ? userAgent : null,
+    });
   }
 
   @Get()

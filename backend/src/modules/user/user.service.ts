@@ -37,10 +37,15 @@ const USER_AUDIT_FIELDS = ['username', 'email', 'nickname', 'avatarUrl', 'isActi
 /** 本人修改资料（PATCH /auth/me）能改、审计能记录的字段 */
 const PROFILE_FIELDS = ['nickname', 'avatarUrl'] as const;
 
-/** 审计里的来源信息（本人修改资料时取自请求；后台接口沿用 'system'） */
+/** 审计里的来源信息（本人修改资料、后台新建用户时取自请求；其余后台接口沿用 'system'） */
 export interface RequestInfo {
   ip?: string | null;
   userAgent?: string | null;
+}
+
+/** 新建账号的审计信息：后台新建时带上操作的管理员；自助注册没有操作者（记新账号本人） */
+export interface CreateUserAudit extends RequestInfo {
+  actorId?: string;
 }
 
 @Injectable()
@@ -56,7 +61,12 @@ export class UserService {
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
   ) {}
 
-  async create(createUserDto: CreateUserDto): Promise<SafeUser> {
+  /**
+   * 新建账号（后台 POST /users 与自助注册共用）。审计 USER_CREATE：操作人是 audit.actorId（后台新建时为当前管理员），
+   * 没有时是新账号本人（自助注册）；IP / UA 取调用方传入的请求信息。此前一律记成新账号本人、IP / UA 写死 'system'，
+   * 关闭公开注册后这是开设账号的唯一入口（含由 admin 开设其他 admin），审计却看不出是哪个管理员、从哪里建的号。
+   */
+  async create(createUserDto: CreateUserDto, audit: CreateUserAudit = {}): Promise<SafeUser> {
     const { email, username } = createUserDto;
 
     const existingEmail = await this.findByEmail(email);
@@ -90,12 +100,12 @@ export class UserService {
     await this.clearUserCache();
 
     await this.auditService.log({
-      userId: savedUser.id,
+      userId: audit.actorId ?? savedUser.id,
       action: 'USER_CREATE',
       resourceType: 'user',
       resourceId: savedUser.id,
-      ipAddress: 'system',
-      userAgent: 'system',
+      ipAddress: audit.ip ?? 'system',
+      userAgent: audit.userAgent ?? 'system',
       newValues: { email: savedUser.email, username: savedUser.username },
     });
 
