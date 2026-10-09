@@ -200,11 +200,20 @@ describe('createUserErrorField（后端的提示显示在哪个输入框下）',
 
   it('清单覆盖 CreateUserDto、邮箱规则与 UserService.create 查重的全部提示', () => {
     const create = service.slice(service.indexOf('async create('), service.indexOf('async findAll('))
+    // display-name.ts 里只取 UserService.create 实际用到的提示（其余如「清空昵称……」只有编辑接口会返回）
+    const displayNameMessages = new Map(
+      [...displayName.matchAll(/export const (\w+_MESSAGE) =\s*'([^']+)';/g)].map((m) => [m[1], m[2]] as const),
+    )
+    const usedByCreate = [...new Set([...create.matchAll(/\b([A-Z][A-Z_]*_MESSAGE)\b/g)].map((m) => m[1]))]
+    expect(usedByCreate.length).toBeGreaterThan(0)
     const fromBackend = [
       ...[...dto.matchAll(/message: '([^']+)'/g)].map((m) => m[1]),
       ...[...email.matchAll(/message: '([^']+)'/g)].map((m) => m[1]),
       ...[...create.matchAll(/new ConflictException\('([^']+)'\)/g)].map((m) => m[1]),
-      ...[...displayName.matchAll(/export const \w+_MESSAGE = '([^']+)';/g)].map((m) => m[1]),
+      ...usedByCreate.map((name) => {
+        expect({ name, defined: displayNameMessages.has(name) }).toEqual({ name, defined: true })
+        return displayNameMessages.get(name) as string
+      }),
     ]
     expect(fromBackend.length).toBeGreaterThan(10)
     expect([...new Set(fromBackend)].sort()).toEqual(Object.keys(EXPECTED).sort())
