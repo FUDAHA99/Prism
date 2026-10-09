@@ -24,6 +24,7 @@ import {
   type CreateNovelData,
 } from '../../api/novel'
 import PageHeader from '../../components/common/PageHeader'
+import QueryErrorResult from '../../components/common/QueryErrorResult'
 import MediaPicker from '../../components/media/MediaPicker'
 import { generateSlug } from '../../utils'
 
@@ -35,7 +36,7 @@ export default function NovelForm() {
   const qc = useQueryClient()
   const [form] = Form.useForm<CreateNovelData>()
 
-  const { data: novel, isLoading } = useQuery({
+  const { data: novel, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['novel', id],
     queryFn: () => getNovel(id!),
     enabled: isEditing,
@@ -99,6 +100,19 @@ export default function NovelForm() {
     return (
       <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 80 }}>
         <Spin size="large" />
+      </div>
+    )
+  }
+
+  // 编辑时原数据没读到（403 / 5xx / 不存在）：不显示空表单，免得把空白内容当成修改提交
+  if (isEditing && isError) {
+    return (
+      <div>
+        <PageHeader
+          title="编辑小说"
+          extra={<Button onClick={() => navigate('/novels')}>返回列表</Button>}
+        />
+        <QueryErrorResult error={error} onRetry={refetch} />
       </div>
     )
   }

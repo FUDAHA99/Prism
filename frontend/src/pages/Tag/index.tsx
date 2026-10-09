@@ -15,6 +15,7 @@ import { DeleteOutlined, EditOutlined, PlusOutlined, SearchOutlined } from '@ant
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { getTags, createTag, updateTag, deleteTag } from '../../api/tag'
 import PageHeader from '../../components/common/PageHeader'
+import { QueryErrorSwitch } from '../../components/common/QueryErrorResult'
 import type { Tag } from '../../types'
 
 const { Text } = Typography
@@ -45,7 +46,7 @@ export default function TagPage() {
 
   const queryClient = useQueryClient()
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['tags', search],
     queryFn: () => getTags(search || undefined),
   })
@@ -210,19 +211,21 @@ export default function TagPage() {
         />
       </div>
 
-      <Table
-        rowKey="id"
-        columns={columns}
-        dataSource={tags}
-        loading={isLoading}
-        scroll={{ x: 700 }}
-        pagination={{
-          pageSize: 20,
-          showTotal: (total) => `共 ${total} 个标签`,
-          showSizeChanger: false,
-        }}
-        size="middle"
-      />
+      <QueryErrorSwitch isError={isError} error={error} onRetry={refetch}>
+        <Table
+          rowKey="id"
+          columns={columns}
+          dataSource={tags}
+          loading={isLoading}
+          scroll={{ x: 700 }}
+          pagination={{
+            pageSize: 20,
+            showTotal: (total) => `共 ${total} 个标签`,
+            showSizeChanger: false,
+          }}
+          size="middle"
+        />
+      </QueryErrorSwitch>
 
       <Modal
         title={modalMode === 'create' ? '新建标签' : `编辑标签：${editingTag?.name ?? ''}`}

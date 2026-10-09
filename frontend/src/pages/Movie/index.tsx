@@ -43,6 +43,8 @@ import {
   type MovieType,
 } from '../../api/movie'
 import PageHeader from '../../components/common/PageHeader'
+import { QueryErrorSwitch } from '../../components/common/QueryErrorResult'
+import { actionErrorMessage } from '../../api/errors'
 import { formatDate } from '../../utils'
 
 const TYPE_LABELS: Record<MovieType, string> = {
@@ -120,7 +122,7 @@ export default function MovieList() {
     filters.posterBroken === 'ok' ? false :
     filters.posterBroken === 'unchecked' ? ('null' as const) : undefined
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['movies', filters],
     queryFn: () =>
       getMovies({
@@ -139,7 +141,7 @@ export default function MovieList() {
       message.success('删除成功')
       queryClient.invalidateQueries({ queryKey: ['movies'] })
     },
-    onError: () => message.error('删除失败'),
+    onError: (e: Error) => message.error(actionErrorMessage('删除失败', e)),
   })
 
   const publishMutation = useMutation({
@@ -149,7 +151,7 @@ export default function MovieList() {
       message.success(v.status === 'published' ? '已取消发布' : '发布成功')
       queryClient.invalidateQueries({ queryKey: ['movies'] })
     },
-    onError: () => message.error('操作失败'),
+    onError: (e: Error) => message.error(actionErrorMessage('操作失败', e)),
   })
 
   const columns: TableColumnsType<Movie> = [
@@ -386,20 +388,22 @@ export default function MovieList() {
         </Col>
       </Row>
 
-      <Table<Movie>
-        rowKey="id"
-        dataSource={data?.data ?? []}
-        columns={columns}
-        loading={isLoading}
-        pagination={{
-          current: filters.page,
-          total: data?.meta?.total ?? 0,
-          pageSize: 20,
-          showTotal: (t) => `共 ${t} 条`,
-          onChange: (page) => setFilters((p) => ({ ...p, page })),
-        }}
-        scroll={{ x: 1300 }}
-      />
+      <QueryErrorSwitch isError={isError} error={error} onRetry={refetch}>
+        <Table<Movie>
+          rowKey="id"
+          dataSource={data?.data ?? []}
+          columns={columns}
+          loading={isLoading}
+          pagination={{
+            current: filters.page,
+            total: data?.meta?.total ?? 0,
+            pageSize: 20,
+            showTotal: (t) => `共 ${t} 条`,
+            onChange: (page) => setFilters((p) => ({ ...p, page })),
+          }}
+          scroll={{ x: 1300 }}
+        />
+      </QueryErrorSwitch>
 
       {/* 修复封面 Modal */}
       <Modal

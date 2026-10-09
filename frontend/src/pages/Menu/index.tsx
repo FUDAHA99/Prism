@@ -30,6 +30,7 @@ import {
 } from '../../api/menu'
 import type { CreateMenuData } from '../../api/menu'
 import PageHeader from '../../components/common/PageHeader'
+import { QueryErrorSwitch } from '../../components/common/QueryErrorResult'
 import type { MenuItem } from '../../types'
 import { safeHref } from '../../utils/safe-href'
 
@@ -55,7 +56,7 @@ export default function MenuPage() {
 
   const queryClient = useQueryClient()
 
-  const { data: menus = [], isLoading } = useQuery({
+  const { data: menus = [], isLoading, isError, error, refetch } = useQuery({
     queryKey: ['menus'],
     queryFn: getMenus,
   })
@@ -251,15 +252,17 @@ export default function MenuPage() {
         }
       />
 
-      <Table
-        rowKey="id"
-        columns={columns}
-        dataSource={menus}
-        loading={isLoading}
-        scroll={{ x: 800 }}
-        pagination={{ pageSize: 50, showSizeChanger: false }}
-        size="middle"
-      />
+      <QueryErrorSwitch isError={isError} error={error} onRetry={refetch}>
+        <Table
+          rowKey="id"
+          columns={columns}
+          dataSource={menus}
+          loading={isLoading}
+          scroll={{ x: 800 }}
+          pagination={{ pageSize: 50, showSizeChanger: false }}
+          size="middle"
+        />
+      </QueryErrorSwitch>
 
       <Modal
         title={modalMode === 'create' ? '新建菜单项' : `编辑：${editingItem?.name ?? ''}`}

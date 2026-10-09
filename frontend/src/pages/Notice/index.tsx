@@ -34,7 +34,9 @@ import {
   deleteNotice,
 } from '../../api/notice'
 import type { CreateNoticeData } from '../../api/notice'
+import { actionErrorMessage } from '../../api/errors'
 import PageHeader from '../../components/common/PageHeader'
+import { QueryErrorSwitch } from '../../components/common/QueryErrorResult'
 import type { Notice, NoticeLevel } from '../../types'
 
 const { Text } = Typography
@@ -67,7 +69,7 @@ export default function NoticePage() {
 
   const queryClient = useQueryClient()
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['notices', page],
     queryFn: () => getNotices({ page, limit: 20 }),
   })
@@ -99,7 +101,7 @@ export default function NoticePage() {
   const toggleMutation = useMutation({
     mutationFn: (id: string) => toggleNoticePublish(id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['notices'] }),
-    onError: () => message.error('操作失败'),
+    onError: (e: Error) => message.error(actionErrorMessage('操作失败', e)),
   })
 
   const deleteMutation = useMutation({
@@ -261,22 +263,24 @@ export default function NoticePage() {
         }
       />
 
-      <Table
-        rowKey="id"
-        columns={columns}
-        dataSource={notices}
-        loading={isLoading}
-        scroll={{ x: 800 }}
-        pagination={{
-          current: page,
-          pageSize: 20,
-          total,
-          onChange: (p) => setPage(p),
-          showSizeChanger: false,
-          showTotal: (t) => `共 ${t} 条公告`,
-        }}
-        size="middle"
-      />
+      <QueryErrorSwitch isError={isError} error={error} onRetry={refetch}>
+        <Table
+          rowKey="id"
+          columns={columns}
+          dataSource={notices}
+          loading={isLoading}
+          scroll={{ x: 800 }}
+          pagination={{
+            current: page,
+            pageSize: 20,
+            total,
+            onChange: (p) => setPage(p),
+            showSizeChanger: false,
+            showTotal: (t) => `共 ${t} 条公告`,
+          }}
+          size="middle"
+        />
+      </QueryErrorSwitch>
 
       <Modal
         title={modalMode === 'create' ? '发布公告' : `编辑公告：${editingNotice?.title ?? ''}`}

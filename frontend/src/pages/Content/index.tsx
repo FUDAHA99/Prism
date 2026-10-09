@@ -30,8 +30,10 @@ import {
   publishContent,
   unpublishContent,
 } from '../../api/content'
+import { actionErrorMessage } from '../../api/errors'
 import type { Content } from '../../types'
 import PageHeader from '../../components/common/PageHeader'
+import { QueryErrorSwitch } from '../../components/common/QueryErrorResult'
 import { formatDate } from '../../utils'
 
 const CONTENT_TYPE_LABELS: Record<string, string> = {
@@ -70,7 +72,7 @@ export default function ContentList() {
     page: 1,
   })
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['contents', filters],
     queryFn: () =>
       getContents({
@@ -88,8 +90,8 @@ export default function ContentList() {
       message.success('删除成功')
       queryClient.invalidateQueries({ queryKey: ['contents'] })
     },
-    onError: () => {
-      message.error('删除失败')
+    onError: (e: Error) => {
+      message.error(actionErrorMessage('删除失败', e))
     },
   })
 
@@ -100,8 +102,8 @@ export default function ContentList() {
       message.success(variables.isPublished ? '已取消发布' : '发布成功')
       queryClient.invalidateQueries({ queryKey: ['contents'] })
     },
-    onError: () => {
-      message.error('操作失败')
+    onError: (e: Error) => {
+      message.error(actionErrorMessage('操作失败', e))
     },
   })
 
@@ -277,19 +279,21 @@ export default function ContentList() {
         </Col>
       </Row>
 
-      <Table<Content>
-        rowKey="id"
-        dataSource={contents}
-        columns={columns}
-        loading={isLoading}
-        pagination={{
-          current: filters.page,
-          total,
-          pageSize: 20,
-          showTotal: (t) => `共 ${t} 条`,
-          onChange: (page) => setFilters((prev) => ({ ...prev, page })),
-        }}
-      />
+      <QueryErrorSwitch isError={isError} error={error} onRetry={refetch}>
+        <Table<Content>
+          rowKey="id"
+          dataSource={contents}
+          columns={columns}
+          loading={isLoading}
+          pagination={{
+            current: filters.page,
+            total,
+            pageSize: 20,
+            showTotal: (t) => `共 ${t} 条`,
+            onChange: (page) => setFilters((prev) => ({ ...prev, page })),
+          }}
+        />
+      </QueryErrorSwitch>
     </div>
   )
 }

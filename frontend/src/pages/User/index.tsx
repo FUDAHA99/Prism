@@ -17,7 +17,9 @@ import { DeleteOutlined, EditOutlined, SearchOutlined } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { assignRoles, deleteUser, getUsers, removeRoles, updateUser } from '../../api/user'
 import { getRoles } from '../../api/role'
+import { actionErrorMessage } from '../../api/errors'
 import PageHeader from '../../components/common/PageHeader'
+import { QueryErrorSwitch } from '../../components/common/QueryErrorResult'
 import { formatDate } from '../../utils'
 import { ASCII_EMAIL_RULE } from '../../utils/email'
 import type { Role, User } from '../../types'
@@ -47,7 +49,7 @@ export default function UserPage() {
 
   const queryClient = useQueryClient()
 
-  const { data: usersData, isLoading } = useQuery({
+  const { data: usersData, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['users', search],
     queryFn: () => getUsers({ search: search || undefined }),
   })
@@ -107,8 +109,8 @@ export default function UserPage() {
       message.success('用户已删除')
       queryClient.invalidateQueries({ queryKey: ['users'] })
     },
-    onError: () => {
-      message.error('删除失败，请重试')
+    onError: (e: Error) => {
+      message.error(actionErrorMessage('删除失败', e))
     },
   })
 
@@ -257,19 +259,21 @@ export default function UserPage() {
         </Button>
       </div>
 
-      <Table
-        rowKey="id"
-        columns={columns}
-        dataSource={users}
-        loading={isLoading}
-        scroll={{ x: 1100 }}
-        pagination={{
-          pageSize: 20,
-          showTotal: (total) => `共 ${total} 名用户`,
-          showSizeChanger: false,
-        }}
-        size="middle"
-      />
+      <QueryErrorSwitch isError={isError} error={error} onRetry={refetch}>
+        <Table
+          rowKey="id"
+          columns={columns}
+          dataSource={users}
+          loading={isLoading}
+          scroll={{ x: 1100 }}
+          pagination={{
+            pageSize: 20,
+            showTotal: (total) => `共 ${total} 名用户`,
+            showSizeChanger: false,
+          }}
+          size="middle"
+        />
+      </QueryErrorSwitch>
 
       <Modal
         title={`编辑用户：${editingUser?.username ?? ''}`}

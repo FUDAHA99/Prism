@@ -7,6 +7,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { listLogs, getLog, CollectLog, CollectLogStatus } from '../../api/collect'
 import PageHeader from '../../components/common/PageHeader'
+import QueryErrorResult, { QueryErrorSwitch } from '../../components/common/QueryErrorResult'
 
 const { Text } = Typography
 
@@ -32,7 +33,7 @@ export default function CollectLogs() {
   const [pageSize, setPageSize] = useState(20)
   const [openId, setOpenId] = useState<string | undefined>(initialId)
 
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['collect-logs', page, pageSize],
     queryFn: () => listLogs({ page, pageSize }),
     // 列表如果有运行中的，3 秒轮询
@@ -93,19 +94,21 @@ export default function CollectLogs() {
         extra={<Button icon={<ReloadOutlined />} onClick={() => refetch()}>刷新</Button>}
       />
       <Card>
-        <Table
-          rowKey="id"
-          loading={isLoading}
-          columns={columns}
-          dataSource={data?.items ?? []}
-          scroll={{ x: 1100 }}
-          pagination={{
-            current: page, pageSize, total: data?.total ?? 0,
-            showSizeChanger: true,
-            onChange: (p, s) => { setPage(p); setPageSize(s) },
-          }}
-          locale={{ emptyText: <Empty description="尚无采集记录" /> }}
-        />
+        <QueryErrorSwitch isError={isError} error={error} onRetry={refetch}>
+          <Table
+            rowKey="id"
+            loading={isLoading}
+            columns={columns}
+            dataSource={data?.items ?? []}
+            scroll={{ x: 1100 }}
+            pagination={{
+              current: page, pageSize, total: data?.total ?? 0,
+              showSizeChanger: true,
+              onChange: (p, s) => { setPage(p); setPageSize(s) },
+            }}
+            locale={{ emptyText: <Empty description="尚无采集记录" /> }}
+          />
+        </QueryErrorSwitch>
       </Card>
 
       <LogDetailDrawer logId={openId} onClose={() => {
@@ -117,7 +120,7 @@ export default function CollectLogs() {
 
 // ==========================
 function LogDetailDrawer({ logId, onClose }: { logId?: string; onClose: () => void }) {
-  const { data: log, refetch } = useQuery({
+  const { data: log, isError, error, refetch } = useQuery({
     queryKey: ['collect-log', logId],
     queryFn: () => getLog(logId!),
     enabled: !!logId,
@@ -182,7 +185,7 @@ function LogDetailDrawer({ logId, onClose }: { logId?: string; onClose: () => vo
             </Card>
           ) : null}
         </>
-      ) : <Empty />}
+      ) : isError ? <QueryErrorResult error={error} onRetry={refetch} /> : <Empty />}
     </Drawer>
   )
 }

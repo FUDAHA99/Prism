@@ -35,7 +35,9 @@ import {
   deleteAdvertisement,
 } from '../../api/advertisement'
 import type { CreateAdData } from '../../api/advertisement'
+import { actionErrorMessage } from '../../api/errors'
 import PageHeader from '../../components/common/PageHeader'
+import { QueryErrorSwitch } from '../../components/common/QueryErrorResult'
 import type { Advertisement, AdType } from '../../types'
 
 const { Text } = Typography
@@ -76,7 +78,7 @@ export default function AdvertisementPage() {
 
   const queryClient = useQueryClient()
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['advertisements', search],
     queryFn: () => getAdvertisements(search || undefined),
   })
@@ -105,7 +107,7 @@ export default function AdvertisementPage() {
   const toggleMutation = useMutation({
     mutationFn: (id: string) => toggleAdvertisement(id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['advertisements'] }),
-    onError: () => message.error('操作失败'),
+    onError: (e: Error) => message.error(actionErrorMessage('操作失败', e)),
   })
 
   const deleteMutation = useMutation({
@@ -293,15 +295,17 @@ export default function AdvertisementPage() {
         />
       </div>
 
-      <Table
-        rowKey="id"
-        columns={columns}
-        dataSource={ads}
-        loading={isLoading}
-        scroll={{ x: 900 }}
-        pagination={{ pageSize: 20, showSizeChanger: false, showTotal: (t) => `共 ${t} 个广告` }}
-        size="middle"
-      />
+      <QueryErrorSwitch isError={isError} error={error} onRetry={refetch}>
+        <Table
+          rowKey="id"
+          columns={columns}
+          dataSource={ads}
+          loading={isLoading}
+          scroll={{ x: 900 }}
+          pagination={{ pageSize: 20, showSizeChanger: false, showTotal: (t) => `共 ${t} 个广告` }}
+          size="middle"
+        />
+      </QueryErrorSwitch>
 
       <Modal
         title={modalMode === 'create' ? '新建广告' : `编辑广告：${editingAd?.title ?? ''}`}

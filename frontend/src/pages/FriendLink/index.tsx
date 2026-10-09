@@ -24,6 +24,7 @@ import {
 } from '../../api/friendLink'
 import type { CreateFriendLinkData } from '../../api/friendLink'
 import PageHeader from '../../components/common/PageHeader'
+import { QueryErrorSwitch } from '../../components/common/QueryErrorResult'
 import type { FriendLink } from '../../types'
 import { safeHref } from '../../utils/safe-href'
 
@@ -41,7 +42,7 @@ export default function FriendLinkPage() {
 
   const queryClient = useQueryClient()
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['friend-links'],
     queryFn: getFriendLinks,
   })
@@ -210,19 +211,21 @@ export default function FriendLinkPage() {
         }
       />
 
-      <Table
-        rowKey="id"
-        columns={columns}
-        dataSource={links}
-        loading={isLoading}
-        scroll={{ x: 800 }}
-        pagination={{
-          pageSize: 20,
-          showTotal: (total) => `共 ${total} 个友情链接`,
-          showSizeChanger: false,
-        }}
-        size="middle"
-      />
+      <QueryErrorSwitch isError={isError} error={error} onRetry={refetch}>
+        <Table
+          rowKey="id"
+          columns={columns}
+          dataSource={links}
+          loading={isLoading}
+          scroll={{ x: 800 }}
+          pagination={{
+            pageSize: 20,
+            showTotal: (total) => `共 ${total} 个友情链接`,
+            showSizeChanger: false,
+          }}
+          size="middle"
+        />
+      </QueryErrorSwitch>
 
       <Modal
         title={

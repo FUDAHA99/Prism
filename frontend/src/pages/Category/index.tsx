@@ -22,6 +22,7 @@ import {
   updateCategory,
 } from '../../api/category'
 import PageHeader from '../../components/common/PageHeader'
+import { QueryErrorSwitch } from '../../components/common/QueryErrorResult'
 import type { Category } from '../../types'
 
 const { Text } = Typography
@@ -53,7 +54,7 @@ export default function CategoryPage() {
 
   const queryClient = useQueryClient()
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['categories'],
     queryFn: () => getCategories(),
   })
@@ -255,19 +256,21 @@ export default function CategoryPage() {
         }
       />
 
-      <Table
-        rowKey="id"
-        columns={columns}
-        dataSource={categories}
-        loading={isLoading}
-        scroll={{ x: 900 }}
-        pagination={{
-          pageSize: 20,
-          showTotal: (total) => `共 ${total} 个分类`,
-          showSizeChanger: false,
-        }}
-        size="middle"
-      />
+      <QueryErrorSwitch isError={isError} error={error} onRetry={refetch}>
+        <Table
+          rowKey="id"
+          columns={columns}
+          dataSource={categories}
+          loading={isLoading}
+          scroll={{ x: 900 }}
+          pagination={{
+            pageSize: 20,
+            showTotal: (total) => `共 ${total} 个分类`,
+            showSizeChanger: false,
+          }}
+          size="middle"
+        />
+      </QueryErrorSwitch>
 
       <Modal
         title={modalMode === 'create' ? '新建分类' : `编辑分类：${editingCategory?.name ?? ''}`}

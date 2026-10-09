@@ -14,6 +14,7 @@ import { SaveOutlined } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { getSiteSettings, saveSiteSettings } from '../../api/siteSetting'
 import PageHeader from '../../components/common/PageHeader'
+import QueryErrorResult from '../../components/common/QueryErrorResult'
 import type { SiteSetting } from '../../types'
 
 /** 将配置数组转换为 key-value 对象 */
@@ -39,7 +40,7 @@ export default function SiteSettingPage() {
 
   const queryClient = useQueryClient()
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['site-settings'],
     queryFn: getSiteSettings,
   })
@@ -103,6 +104,16 @@ export default function SiteSettingPage() {
     return (
       <div style={{ display: 'flex', justifyContent: 'center', padding: 80 }}>
         <Spin size="large" />
+      </div>
+    )
+  }
+
+  // 读取失败时不显示表单：空表单一保存，会把所有配置项写成空值 / 关闭
+  if (isError) {
+    return (
+      <div style={{ padding: 24 }}>
+        <PageHeader title="系统配置" subtitle="管理站点基本信息与功能开关" />
+        <QueryErrorResult error={error} onRetry={refetch} />
       </div>
     )
   }

@@ -28,6 +28,8 @@ import {
   batchDeleteComments,
 } from '../../api/comment'
 import PageHeader from '../../components/common/PageHeader'
+import { QueryErrorSwitch } from '../../components/common/QueryErrorResult'
+import { actionErrorMessage } from '../../api/errors'
 import type { Comment, CommentStatus } from '../../types'
 
 const { Text } = Typography
@@ -54,7 +56,7 @@ export default function CommentPage() {
 
   const queryClient = useQueryClient()
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['comments', statusFilter, page],
     queryFn: () => getComments({ status: statusFilter || undefined, page, limit: PAGE_SIZE }),
   })
@@ -83,19 +85,19 @@ export default function CommentPage() {
   const batchApproveMutation = useMutation({
     mutationFn: (ids: string[]) => batchApproveComments(ids),
     onSuccess: () => { message.success(`已批量通过 ${selectedIds.length} 条评论`); setSelectedIds([]); invalidate() },
-    onError: () => message.error('批量操作失败'),
+    onError: (e: Error) => message.error(actionErrorMessage('批量操作失败', e)),
   })
 
   const batchSpamMutation = useMutation({
     mutationFn: (ids: string[]) => batchSpamComments(ids),
     onSuccess: () => { message.success(`已批量标记 ${selectedIds.length} 条为垃圾`); setSelectedIds([]); invalidate() },
-    onError: () => message.error('批量操作失败'),
+    onError: (e: Error) => message.error(actionErrorMessage('批量操作失败', e)),
   })
 
   const batchDeleteMutation = useMutation({
     mutationFn: (ids: string[]) => batchDeleteComments(ids),
     onSuccess: () => { message.success(`已批量删除 ${selectedIds.length} 条评论`); setSelectedIds([]); invalidate() },
-    onError: () => message.error('批量删除失败'),
+    onError: (e: Error) => message.error(actionErrorMessage('批量删除失败', e)),
   })
 
   const comments: Comment[] = data?.data ?? []
@@ -209,23 +211,25 @@ export default function CommentPage() {
         />
       )}
 
-      <Table
-        rowKey="id"
-        rowSelection={rowSelection}
-        columns={columns}
-        dataSource={comments}
-        loading={isLoading}
-        scroll={{ x: 900 }}
-        pagination={{
-          current: page,
-          pageSize: PAGE_SIZE,
-          total,
-          onChange: (p) => setPage(p),
-          showTotal: (t) => `共 ${t} 条评论`,
-          showSizeChanger: false,
-        }}
-        size="middle"
-      />
+      <QueryErrorSwitch isError={isError} error={error} onRetry={refetch}>
+        <Table
+          rowKey="id"
+          rowSelection={rowSelection}
+          columns={columns}
+          dataSource={comments}
+          loading={isLoading}
+          scroll={{ x: 900 }}
+          pagination={{
+            current: page,
+            pageSize: PAGE_SIZE,
+            total,
+            onChange: (p) => setPage(p),
+            showTotal: (t) => `共 ${t} 条评论`,
+            showSizeChanger: false,
+          }}
+          size="middle"
+        />
+      </QueryErrorSwitch>
     </div>
   )
 }

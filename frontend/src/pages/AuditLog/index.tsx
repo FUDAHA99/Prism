@@ -4,6 +4,7 @@ import type { TableColumnsType } from 'antd'
 import { useQuery } from '@tanstack/react-query'
 import { getAuditLogs } from '../../api/auditLog'
 import PageHeader from '../../components/common/PageHeader'
+import { QueryErrorSwitch } from '../../components/common/QueryErrorResult'
 import type { AuditLog } from '../../types'
 
 const { Text } = Typography
@@ -116,7 +117,7 @@ export default function AuditLogPage() {
   const [action, setAction] = useState('')
   const [page, setPage] = useState(1)
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['audit-logs', action, page],
     queryFn: () =>
       getAuditLogs({
@@ -195,22 +196,24 @@ export default function AuditLogPage() {
         />
       </div>
 
-      <Table
-        rowKey="id"
-        columns={columns}
-        dataSource={logs}
-        loading={isLoading}
-        scroll={{ x: 900 }}
-        pagination={{
-          current: page,
-          pageSize: PAGE_SIZE,
-          total,
-          onChange: (p) => setPage(p),
-          showTotal: (t) => `共 ${t} 条日志`,
-          showSizeChanger: false,
-        }}
-        size="middle"
-      />
+      <QueryErrorSwitch isError={isError} error={error} onRetry={refetch}>
+        <Table
+          rowKey="id"
+          columns={columns}
+          dataSource={logs}
+          loading={isLoading}
+          scroll={{ x: 900 }}
+          pagination={{
+            current: page,
+            pageSize: PAGE_SIZE,
+            total,
+            onChange: (p) => setPage(p),
+            showTotal: (t) => `共 ${t} 条日志`,
+            showSizeChanger: false,
+          }}
+          size="middle"
+        />
+      </QueryErrorSwitch>
     </div>
   )
 }

@@ -44,6 +44,7 @@ import {
   type MovieSource,
 } from '../../api/movie'
 import PageHeader from '../../components/common/PageHeader'
+import QueryErrorResult from '../../components/common/QueryErrorResult'
 import MediaPicker from '../../components/media/MediaPicker'
 import { generateSlug } from '../../utils'
 
@@ -57,7 +58,7 @@ export default function MovieForm() {
   const queryClient = useQueryClient()
   const [form] = Form.useForm<FormValues>()
 
-  const { data: movie, isLoading } = useQuery({
+  const { data: movie, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['movie', id],
     queryFn: () => getMovie(id!),
     enabled: isEditing,
@@ -137,6 +138,19 @@ export default function MovieForm() {
     return (
       <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 80 }}>
         <Spin size="large" />
+      </div>
+    )
+  }
+
+  // 编辑时原数据没读到（403 / 5xx / 不存在）：不显示空表单，免得把空白内容当成修改提交
+  if (isEditing && isError) {
+    return (
+      <div>
+        <PageHeader
+          title="编辑影视"
+          extra={<Button onClick={() => navigate('/movies')}>返回列表</Button>}
+        />
+        <QueryErrorResult error={error} onRetry={refetch} />
       </div>
     )
   }

@@ -24,6 +24,7 @@ import {
   type CreateComicData,
 } from '../../api/comic'
 import PageHeader from '../../components/common/PageHeader'
+import QueryErrorResult from '../../components/common/QueryErrorResult'
 import MediaPicker from '../../components/media/MediaPicker'
 import { generateSlug } from '../../utils'
 
@@ -35,7 +36,7 @@ export default function ComicForm() {
   const qc = useQueryClient()
   const [form] = Form.useForm<CreateComicData>()
 
-  const { data: comic, isLoading } = useQuery({
+  const { data: comic, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['comic', id],
     queryFn: () => getComic(id!),
     enabled: isEditing,
@@ -99,6 +100,19 @@ export default function ComicForm() {
     return (
       <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 80 }}>
         <Spin size="large" />
+      </div>
+    )
+  }
+
+  // 编辑时原数据没读到（403 / 5xx / 不存在）：不显示空表单，免得把空白内容当成修改提交
+  if (isEditing && isError) {
+    return (
+      <div>
+        <PageHeader
+          title="编辑漫画"
+          extra={<Button onClick={() => navigate('/comics')}>返回列表</Button>}
+        />
+        <QueryErrorResult error={error} onRetry={refetch} />
       </div>
     )
   }

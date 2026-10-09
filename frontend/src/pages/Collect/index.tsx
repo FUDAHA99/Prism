@@ -14,6 +14,7 @@ import {
   CollectSource, CollectMode,
 } from '../../api/collect'
 import PageHeader from '../../components/common/PageHeader'
+import { QueryErrorSwitch } from '../../components/common/QueryErrorResult'
 
 const { Text } = Typography
 
@@ -35,7 +36,7 @@ export default function CollectList() {
   const [runTarget, setRunTarget] = useState<CollectSource | null>(null)
   const [runForm] = Form.useForm()
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['collect-sources', page, pageSize, keyword, contentType, statusFilter],
     queryFn: () => listSources({
       page, pageSize, keyword: keyword || undefined,
@@ -184,18 +185,20 @@ export default function CollectList() {
           </Button>
         </Space>
 
-        <Table
-          rowKey="id"
-          loading={isLoading}
-          columns={columns}
-          dataSource={data?.items ?? []}
-          scroll={{ x: 1200 }}
-          pagination={{
-            current: page, pageSize, total: data?.total ?? 0,
-            showSizeChanger: true,
-            onChange: (p, s) => { setPage(p); setPageSize(s) },
-          }}
-        />
+        <QueryErrorSwitch isError={isError} error={error} onRetry={refetch}>
+          <Table
+            rowKey="id"
+            loading={isLoading}
+            columns={columns}
+            dataSource={data?.items ?? []}
+            scroll={{ x: 1200 }}
+            pagination={{
+              current: page, pageSize, total: data?.total ?? 0,
+              showSizeChanger: true,
+              onChange: (p, s) => { setPage(p); setPageSize(s) },
+            }}
+          />
+        </QueryErrorSwitch>
       </Card>
 
       {/* 执行采集 Modal */}

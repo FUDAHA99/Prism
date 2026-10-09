@@ -13,6 +13,7 @@ import {
 } from '../../api/collect'
 import { getCategories } from '../../api/category'
 import PageHeader from '../../components/common/PageHeader'
+import QueryErrorResult from '../../components/common/QueryErrorResult'
 
 const { Text } = Typography
 
@@ -23,7 +24,7 @@ export default function CollectForm() {
   const qc = useQueryClient()
   const [form] = Form.useForm()
 
-  const { data: source, isLoading } = useQuery({
+  const { data: source, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['collect-source', id],
     queryFn: () => getSource(id!),
     enabled: isEdit,
@@ -56,6 +57,19 @@ export default function CollectForm() {
     },
     onError: (e: any) => message.error(e?.message || '保存失败'),
   })
+
+  // 编辑时原数据没读到（403 / 5xx / 不存在）：不显示空表单，免得把空白配置当成修改提交
+  if (isEdit && isError) {
+    return (
+      <div>
+        <PageHeader
+          title="编辑采集源"
+          extra={<Button icon={<ArrowLeftOutlined />} onClick={() => nav('/collect')}>返回</Button>}
+        />
+        <QueryErrorResult error={error} onRetry={refetch} />
+      </div>
+    )
+  }
 
   return (
     <div>
@@ -161,7 +175,7 @@ function MappingsPanel({ sourceId }: { sourceId: string }) {
     queryFn: getCategories,
   })
 
-  const { data: mappings = [], refetch: refetchMappings, isLoading } = useQuery({
+  const { data: mappings = [], refetch: refetchMappings, isLoading, error: mappingsError } = useQuery({
     queryKey: ['collect-mappings', sourceId],
     queryFn: () => listMappings(sourceId),
   })
@@ -282,7 +296,9 @@ function MappingsPanel({ sourceId }: { sourceId: string }) {
         留空本地分类 / 关闭"启用"开关 = 该分类的内容会被跳过。
       </Text>
 
-      {merged.length === 0 ? (
+      {mappingsError ? (
+        <QueryErrorResult error={mappingsError} onRetry={refetchMappings} />
+      ) : merged.length === 0 ? (
         <Empty description="尚无分类映射，点击「从源站探查分类」开始" />
       ) : (
         <Table

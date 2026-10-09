@@ -24,7 +24,9 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { UploadFile } from 'antd'
 import { deleteMediaFile, getMediaFiles, uploadFile, UPLOAD_MAX_SIZE } from '../../api/media'
+import { actionErrorMessage } from '../../api/errors'
 import PageHeader from '../../components/common/PageHeader'
+import { QueryErrorSwitch } from '../../components/common/QueryErrorResult'
 import { formatBytes, formatDate } from '../../utils'
 import type { MediaFile } from '../../types'
 
@@ -163,7 +165,7 @@ export default function MediaPage() {
     limit: PAGE_SIZE,
   }
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['media', params],
     queryFn: () => getMediaFiles(params),
   })
@@ -174,8 +176,8 @@ export default function MediaPage() {
       message.success('文件已删除')
       queryClient.invalidateQueries({ queryKey: ['media'] })
     },
-    onError: () => {
-      message.error('删除失败，请重试')
+    onError: (e: Error) => {
+      message.error(actionErrorMessage('删除失败', e))
     },
   })
 
@@ -238,23 +240,25 @@ export default function MediaPage() {
         />
       </div>
 
-      <Spin spinning={isLoading}>
-        {files.length === 0 && !isLoading ? (
-          <div style={{ textAlign: 'center', padding: '60px 0', color: '#8c8c8c' }}>
-            暂无媒体文件
-          </div>
-        ) : (
-          <Row gutter={[16, 16]}>
-            {files.map((file) => (
-              <Col key={file.id} xs={24} sm={12} md={8} lg={6} xl={4}>
-                <MediaCard file={file} onDelete={handleDelete} />
-              </Col>
-            ))}
-          </Row>
-        )}
-      </Spin>
+      <QueryErrorSwitch isError={isError} error={error} onRetry={refetch}>
+        <Spin spinning={isLoading}>
+          {files.length === 0 && !isLoading ? (
+            <div style={{ textAlign: 'center', padding: '60px 0', color: '#8c8c8c' }}>
+              暂无媒体文件
+            </div>
+          ) : (
+            <Row gutter={[16, 16]}>
+              {files.map((file) => (
+                <Col key={file.id} xs={24} sm={12} md={8} lg={6} xl={4}>
+                  <MediaCard file={file} onDelete={handleDelete} />
+                </Col>
+              ))}
+            </Row>
+          )}
+        </Spin>
+      </QueryErrorSwitch>
 
-      {total > PAGE_SIZE && (
+      {!isError && total > PAGE_SIZE && (
         <div style={{ marginTop: 24, textAlign: 'right' }}>
           <Pagination
             current={page}

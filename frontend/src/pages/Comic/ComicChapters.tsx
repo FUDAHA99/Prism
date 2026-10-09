@@ -39,6 +39,7 @@ import {
 } from '../../api/comic'
 import { uploadFile, UPLOAD_MAX_SIZE } from '../../api/media'
 import PageHeader from '../../components/common/PageHeader'
+import { QueryErrorSwitch } from '../../components/common/QueryErrorResult'
 import { formatDate } from '../../utils'
 
 export default function ComicChaptersPage() {
@@ -56,7 +57,7 @@ export default function ComicChaptersPage() {
     enabled: !!id,
   })
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['comic-chapters', id, page],
     queryFn: () => listComicChapters(id!, { page, limit: 20 }),
     enabled: !!id,
@@ -214,19 +215,21 @@ export default function ComicChaptersPage() {
         </div>
       )}
 
-      <Table<ComicChapter>
-        rowKey="id"
-        loading={isLoading}
-        dataSource={data?.data ?? []}
-        columns={columns}
-        pagination={{
-          current: page,
-          total: data?.meta?.total ?? 0,
-          pageSize: 20,
-          showTotal: (t) => `共 ${t} 条`,
-          onChange: setPage,
-        }}
-      />
+      <QueryErrorSwitch isError={isError} error={error} onRetry={refetch}>
+        <Table<ComicChapter>
+          rowKey="id"
+          loading={isLoading}
+          dataSource={data?.data ?? []}
+          columns={columns}
+          pagination={{
+            current: page,
+            total: data?.meta?.total ?? 0,
+            pageSize: 20,
+            showTotal: (t) => `共 ${t} 条`,
+            onChange: setPage,
+          }}
+        />
+      </QueryErrorSwitch>
 
       <ComicChapterModal
         open={open}

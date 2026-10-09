@@ -30,6 +30,7 @@ import ReactECharts from 'echarts-for-react'
 import { getDashboardStats, getSystemInfo } from '../../api/stats'
 import { useAuthStore } from '../../stores/authStore'
 import PageHeader from '../../components/common/PageHeader'
+import QueryErrorResult from '../../components/common/QueryErrorResult'
 
 const { Text, Title } = Typography
 
@@ -99,17 +100,36 @@ function MetricCard({ icon, title, value, suffix, color, background }: MetricCar
 export default function Dashboard() {
   const user = useAuthStore((s) => s.user)
 
-  const { data: sys, isLoading: sysLoading, refetch: refetchSys } = useQuery({
+  const {
+    data: sys,
+    isLoading: sysLoading,
+    error: sysError,
+    refetch: refetchSys,
+  } = useQuery({
     queryKey: ['system-info'],
     queryFn: getSystemInfo,
     refetchInterval: 30_000,
   })
 
-  const { data: stats } = useQuery({
+  const {
+    data: stats,
+    error: statsError,
+    refetch: refetchStats,
+  } = useQuery({
     queryKey: ['dashboard-stats'],
     queryFn: getDashboardStats,
     refetchInterval: 60_000,
   })
+
+  // 系统信息读不到（403 / 5xx / 断网）：此前会一直转圈，现在说明原因
+  if (!sys && sysError) {
+    return (
+      <div>
+        <PageHeader title={`欢迎回来，${user?.nickname ?? user?.username ?? '管理员'}`} />
+        <QueryErrorResult error={sysError} onRetry={refetchSys} />
+      </div>
+    )
+  }
 
   if (sysLoading || !sys) {
     return (
@@ -391,52 +411,57 @@ export default function Dashboard() {
         {/* ─── 状态摘要 ─── */}
         <Col xs={24} lg={8}>
           <Card title="内容状态" bodyStyle={{ padding: 16 }}>
-            <Row gutter={[12, 12]}>
-              <Col span={12}>
-                <Statistic
-                  title="已发布"
-                  value={stats?.content.published ?? 0}
-                  valueStyle={{ color: '#10B981' }}
-                />
-              </Col>
-              <Col span={12}>
-                <Statistic
-                  title="草稿"
-                  value={stats?.content.draft ?? 0}
-                  valueStyle={{ color: '#94A3B8' }}
-                />
-              </Col>
-              <Col span={12}>
-                <Statistic
-                  title="待审评论"
-                  value={stats?.comment.pending ?? 0}
-                  valueStyle={{ color: '#F59E0B' }}
-                />
-              </Col>
-              <Col span={12}>
-                <Statistic
-                  title="活跃用户"
-                  value={stats?.user.active ?? 0}
-                  valueStyle={{ color: '#6366F1' }}
-                />
-              </Col>
-              <Col span={24}>
-                <div style={{ marginTop: 4 }}>
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    媒体库容量
-                  </Text>
-                  <Title level={5} style={{ margin: 0 }}>
-                    {fmtBytes(stats?.media.totalSize ?? 0)}
-                    <Text
-                      type="secondary"
-                      style={{ fontSize: 12, marginLeft: 8, fontWeight: 400 }}
-                    >
-                      ({stats?.media.total ?? 0} 个文件)
+            {/* 计数读不到时不显示一排 0（看起来像「确实没有」），而是说明原因 */}
+            {!stats && statsError ? (
+              <QueryErrorResult error={statsError} onRetry={refetchStats} />
+            ) : (
+              <Row gutter={[12, 12]}>
+                <Col span={12}>
+                  <Statistic
+                    title="已发布"
+                    value={stats?.content.published ?? 0}
+                    valueStyle={{ color: '#10B981' }}
+                  />
+                </Col>
+                <Col span={12}>
+                  <Statistic
+                    title="草稿"
+                    value={stats?.content.draft ?? 0}
+                    valueStyle={{ color: '#94A3B8' }}
+                  />
+                </Col>
+                <Col span={12}>
+                  <Statistic
+                    title="待审评论"
+                    value={stats?.comment.pending ?? 0}
+                    valueStyle={{ color: '#F59E0B' }}
+                  />
+                </Col>
+                <Col span={12}>
+                  <Statistic
+                    title="活跃用户"
+                    value={stats?.user.active ?? 0}
+                    valueStyle={{ color: '#6366F1' }}
+                  />
+                </Col>
+                <Col span={24}>
+                  <div style={{ marginTop: 4 }}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      媒体库容量
                     </Text>
-                  </Title>
-                </div>
-              </Col>
-            </Row>
+                    <Title level={5} style={{ margin: 0 }}>
+                      {fmtBytes(stats?.media.totalSize ?? 0)}
+                      <Text
+                        type="secondary"
+                        style={{ fontSize: 12, marginLeft: 8, fontWeight: 400 }}
+                      >
+                        ({stats?.media.total ?? 0} 个文件)
+                      </Text>
+                    </Title>
+                  </div>
+                </Col>
+              </Row>
+            )}
           </Card>
         </Col>
       </Row>

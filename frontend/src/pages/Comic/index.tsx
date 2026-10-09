@@ -36,6 +36,7 @@ import {
   type ComicSerialStatus,
 } from '../../api/comic'
 import PageHeader from '../../components/common/PageHeader'
+import { QueryErrorSwitch } from '../../components/common/QueryErrorResult'
 import { formatDate } from '../../utils'
 
 const STATUS_COLOR: Record<string, string> = {
@@ -76,7 +77,7 @@ export default function ComicList() {
     page: 1,
   })
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['comics', filters],
     queryFn: () =>
       getComics({
@@ -298,20 +299,22 @@ export default function ComicList() {
         </Col>
       </Row>
 
-      <Table<Comic>
-        rowKey="id"
-        dataSource={data?.data ?? []}
-        columns={columns}
-        loading={isLoading}
-        pagination={{
-          current: filters.page,
-          total: data?.meta?.total ?? 0,
-          pageSize: 20,
-          showTotal: (t) => `共 ${t} 条`,
-          onChange: (page) => setFilters((p) => ({ ...p, page })),
-        }}
-        scroll={{ x: 1100 }}
-      />
+      <QueryErrorSwitch isError={isError} error={error} onRetry={refetch}>
+        <Table<Comic>
+          rowKey="id"
+          dataSource={data?.data ?? []}
+          columns={columns}
+          loading={isLoading}
+          pagination={{
+            current: filters.page,
+            total: data?.meta?.total ?? 0,
+            pageSize: 20,
+            showTotal: (t) => `共 ${t} 条`,
+            onChange: (page) => setFilters((p) => ({ ...p, page })),
+          }}
+          scroll={{ x: 1100 }}
+        />
+      </QueryErrorSwitch>
     </div>
   )
 }

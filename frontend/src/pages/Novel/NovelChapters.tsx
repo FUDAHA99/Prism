@@ -35,6 +35,7 @@ import {
   type CreateNovelChapterData,
 } from '../../api/novel'
 import PageHeader from '../../components/common/PageHeader'
+import { QueryErrorSwitch } from '../../components/common/QueryErrorResult'
 import { formatDate } from '../../utils'
 
 export default function NovelChaptersPage() {
@@ -52,7 +53,7 @@ export default function NovelChaptersPage() {
     enabled: !!id,
   })
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['novel-chapters', id, page],
     queryFn: () => listNovelChapters(id!, { page, limit: 20 }),
     enabled: !!id,
@@ -213,19 +214,21 @@ export default function NovelChaptersPage() {
         </div>
       )}
 
-      <Table<NovelChapter>
-        rowKey="id"
-        loading={isLoading}
-        dataSource={data?.data ?? []}
-        columns={columns}
-        pagination={{
-          current: page,
-          total: data?.meta?.total ?? 0,
-          pageSize: 20,
-          showTotal: (t) => `共 ${t} 条`,
-          onChange: setPage,
-        }}
-      />
+      <QueryErrorSwitch isError={isError} error={error} onRetry={refetch}>
+        <Table<NovelChapter>
+          rowKey="id"
+          loading={isLoading}
+          dataSource={data?.data ?? []}
+          columns={columns}
+          pagination={{
+            current: page,
+            total: data?.meta?.total ?? 0,
+            pageSize: 20,
+            showTotal: (t) => `共 ${t} 条`,
+            onChange: setPage,
+          }}
+        />
+      </QueryErrorSwitch>
 
       <ChapterModal
         open={open}

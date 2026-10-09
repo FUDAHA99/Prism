@@ -20,7 +20,9 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { getContent, createContent, updateContent } from '../../api/content'
 import { getCategories } from '../../api/category'
 import type { CreateContentData } from '../../api/content'
+import { actionErrorMessage } from '../../api/errors'
 import PageHeader from '../../components/common/PageHeader'
+import QueryErrorResult from '../../components/common/QueryErrorResult'
 import MarkdownEditor from '../../components/editor/MarkdownEditor'
 import MediaPicker from '../../components/media/MediaPicker'
 import { generateSlug } from '../../utils'
@@ -47,7 +49,13 @@ export default function ContentForm() {
   const [form] = Form.useForm<ContentFormValues>()
 
   // Load content when editing
-  const { data: contentData, isLoading: isLoadingContent } = useQuery({
+  const {
+    data: contentData,
+    isLoading: isLoadingContent,
+    isError: isContentError,
+    error: contentError,
+    refetch: refetchContent,
+  } = useQuery({
     queryKey: ['content', id],
     queryFn: () => getContent(id!),
     enabled: isEditing,
@@ -86,8 +94,8 @@ export default function ContentForm() {
       queryClient.invalidateQueries({ queryKey: ['contents'] })
       navigate('/contents')
     },
-    onError: () => {
-      message.error('创建失败，请重试')
+    onError: (e: Error) => {
+      message.error(actionErrorMessage('创建失败', e))
     },
   })
 
@@ -99,8 +107,8 @@ export default function ContentForm() {
       queryClient.invalidateQueries({ queryKey: ['content', id] })
       navigate('/contents')
     },
-    onError: () => {
-      message.error('更新失败，请重试')
+    onError: (e: Error) => {
+      message.error(actionErrorMessage('更新失败', e))
     },
   })
 
@@ -148,6 +156,19 @@ export default function ContentForm() {
     return (
       <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 80 }}>
         <Spin size="large" tip="加载中..." />
+      </div>
+    )
+  }
+
+  // 编辑时原内容没读到（403 / 5xx / 不存在）：不显示空表单，免得把空白内容当成修改提交
+  if (isEditing && isContentError) {
+    return (
+      <div>
+        <PageHeader
+          title="编辑内容"
+          extra={<Button onClick={() => navigate('/contents')}>返回列表</Button>}
+        />
+        <QueryErrorResult error={contentError} onRetry={refetchContent} />
       </div>
     )
   }

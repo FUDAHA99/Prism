@@ -36,6 +36,7 @@ import {
   type NovelSerialStatus,
 } from '../../api/novel'
 import PageHeader from '../../components/common/PageHeader'
+import { QueryErrorSwitch } from '../../components/common/QueryErrorResult'
 import { formatDate } from '../../utils'
 
 const STATUS_COLOR: Record<string, string> = {
@@ -76,7 +77,7 @@ export default function NovelList() {
     page: 1,
   })
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['novels', filters],
     queryFn: () =>
       getNovels({
@@ -300,20 +301,22 @@ export default function NovelList() {
         </Col>
       </Row>
 
-      <Table<Novel>
-        rowKey="id"
-        dataSource={data?.data ?? []}
-        columns={columns}
-        loading={isLoading}
-        pagination={{
-          current: filters.page,
-          total: data?.meta?.total ?? 0,
-          pageSize: 20,
-          showTotal: (t) => `共 ${t} 条`,
-          onChange: (page) => setFilters((p) => ({ ...p, page })),
-        }}
-        scroll={{ x: 1100 }}
-      />
+      <QueryErrorSwitch isError={isError} error={error} onRetry={refetch}>
+        <Table<Novel>
+          rowKey="id"
+          dataSource={data?.data ?? []}
+          columns={columns}
+          loading={isLoading}
+          pagination={{
+            current: filters.page,
+            total: data?.meta?.total ?? 0,
+            pageSize: 20,
+            showTotal: (t) => `共 ${t} 条`,
+            onChange: (page) => setFilters((p) => ({ ...p, page })),
+          }}
+          scroll={{ x: 1100 }}
+        />
+      </QueryErrorSwitch>
     </div>
   )
 }

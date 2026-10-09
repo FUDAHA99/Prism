@@ -32,6 +32,7 @@ import {
   assignPermissions,
 } from '../../api/role'
 import PageHeader from '../../components/common/PageHeader'
+import { QueryErrorSwitch } from '../../components/common/QueryErrorResult'
 import type { Role, Permission } from '../../types'
 
 const { Text } = Typography
@@ -62,7 +63,7 @@ export default function RolePage() {
 
   const queryClient = useQueryClient()
 
-  const { data: roles, isLoading } = useQuery({
+  const { data: roles, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['roles'],
     queryFn: getRoles,
   })
@@ -255,15 +256,17 @@ export default function RolePage() {
         }
       />
 
-      <Table
-        rowKey="id"
-        columns={columns}
-        dataSource={roles ?? []}
-        loading={isLoading}
-        scroll={{ x: 800 }}
-        pagination={{ pageSize: 20, showSizeChanger: false }}
-        size="middle"
-      />
+      <QueryErrorSwitch isError={isError} error={error} onRetry={refetch}>
+        <Table
+          rowKey="id"
+          columns={columns}
+          dataSource={roles ?? []}
+          loading={isLoading}
+          scroll={{ x: 800 }}
+          pagination={{ pageSize: 20, showSizeChanger: false }}
+          size="middle"
+        />
+      </QueryErrorSwitch>
 
       {/* 创建/编辑 Modal */}
       <Modal
