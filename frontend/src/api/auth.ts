@@ -46,6 +46,21 @@ export async function getProfile(): Promise<User> {
   return res.data
 }
 
+/** PATCH /auth/me 能改的字段：只有昵称与头像；null 或空串表示清空 */
+export interface UpdateProfileData {
+  nickname?: string | null
+  avatarUrl?: string | null
+}
+
+/**
+ * 修改本人资料（任意已登录用户；admin、editor 都走这里）。请求体只能带昵称与头像，带了其他字段后端整个 400；
+ * 邮箱、用户名、角色由管理员在「用户管理」里改。返回与 GET /auth/me 同形状的当前用户。
+ */
+export async function updateProfile(data: UpdateProfileData): Promise<User> {
+  const res = await apiClient.patch<User>('/auth/me', data)
+  return res.data
+}
+
 export async function changePassword(data: {
   currentPassword: string
   newPassword: string

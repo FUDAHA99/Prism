@@ -2,15 +2,21 @@ import React from 'react'
 import { Button, Form, Input, message, Tabs } from 'antd'
 import { LockOutlined, UserOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
-import { changePassword } from '../../api/auth'
-import { updateUser } from '../../api/user'
+import { useQueryClient } from '@tanstack/react-query'
+import { changePassword, updateProfile } from '../../api/auth'
+import { errorMessage } from '../../api/errors'
 import PageHeader from '../../components/common/PageHeader'
 import { useAuthStore } from '../../stores/authStore'
-import { ASCII_EMAIL_RULE } from '../../utils/email'
+import {
+  PROFILE_AVATAR_URL_MAX,
+  PROFILE_NICKNAME_MAX,
+  avatarUrlProblem,
+  buildProfileUpdate,
+  nicknameProblem,
+} from '../../utils/profile'
 
 interface ProfileFormValues {
   nickname: string
-  email: string
   avatarUrl: string
 }
 
@@ -20,9 +26,15 @@ interface PasswordFormValues {
   confirmPassword: string
 }
 
+/**
+ * 个人资料：走 PATCH /auth/me，只能改昵称与头像（admin、editor 都能改自己的）。
+ * 此前调的是 PATCH /users/:id —— 那是仅 admin 的用户管理接口，editor 保存一律 403，且失败时只提示「更新失败」。
+ * 邮箱、用户名、角色由管理员在「用户管理」里改，这里只读显示。
+ */
 function ProfileTab() {
   const user = useAuthStore((s) => s.user)
   const updateUserStore = useAuthStore((s) => s.updateUser)
+  const queryClient = useQueryClient()
   const [form] = Form.useForm<ProfileFormValues>()
   const [loading, setLoading] = React.useState(false)
 
@@ -30,7 +42,6 @@ function ProfileTab() {
     if (user) {
       form.setFieldsValue({
         nickname: user.nickname ?? '',
-        email: user.email,
         avatarUrl: user.avatarUrl ?? '',
       })
     }
@@ -39,21 +50,24 @@ function ProfileTab() {
   const handleSubmit = async () => {
     if (!user) return
     const values = await form.validateFields()
+    const payload = buildProfileUpdate(user, values)
+    if (Object.keys(payload).length === 0) {
+      message.info('没有需要保存的修改')
+      return
+    }
     setLoading(true)
     try {
-      const res = await updateUser(user.id, {
-        nickname: values.nickname,
-        email: values.email,
-        avatarUrl: values.avatarUrl || undefined,
-      })
+      const res = await updateProfile(payload)
+      // 返回值与 GET /auth/me 同形状：同时刷新登录态与 MainLayout 的资料缓存
+      queryClient.setQueryData(['auth', 'me'], res)
       updateUserStore({
         nickname: res.nickname,
-        email: res.email,
         avatarUrl: res.avatarUrl,
       })
       message.success('个人信息已更新')
-    } catch {
-      message.error('更新失败，请重试')
+    } catch (err: unknown) {
+      // 后端的原因（如「该昵称已被其他用户使用」、头像地址不合法）已由拦截器放进 Error.message
+      message.error(errorMessage(err, '更新失败，请重试'))
     } finally {
       setLoading(false)
     }
@@ -65,31 +79,40 @@ function ProfileTab() {
         <Input value={user?.username ?? ''} disabled />
       </Form.Item>
 
-      <Form.Item
-        name="nickname"
-        label="昵称"
-      >
-        <Input placeholder="请输入昵称" maxLength={50} />
+      <Form.Item label="邮箱" extra="邮箱由管理员在「用户管理」中修改">
+        <Input value={user?.email ?? ''} disabled />
       </Form.Item>
 
       <Form.Item
-        name="email"
-        label="邮箱"
+        name="nickname"
+        label="昵称"
+        extra="留空表示不设置昵称（显示用户名）；不能与其他用户的用户名或昵称相同"
         rules={[
-          { required: true, message: '请输入邮箱' },
-          { type: 'email', message: '邮箱格式不正确' },
-          ASCII_EMAIL_RULE,
+          {
+            validator: (_, value?: string) => {
+              const problem = nicknameProblem(value)
+              return problem ? Promise.reject(new Error(problem)) : Promise.resolve()
+            },
+          },
         ]}
       >
-        <Input placeholder="请输入邮箱" />
+        <Input placeholder="请输入昵称" maxLength={PROFILE_NICKNAME_MAX} />
       </Form.Item>
 
       <Form.Item
         name="avatarUrl"
-        label="头像 URL"
-        rules={[{ type: 'url', message: '请输入有效的 URL' }]}
+        label="头像地址"
+        extra="http(s) 地址或站内路径（如媒体库上传得到的 /uploads/...）；留空表示不设置"
+        rules={[
+          {
+            validator: (_, value?: string) => {
+              const problem = avatarUrlProblem(value)
+              return problem ? Promise.reject(new Error(problem)) : Promise.resolve()
+            },
+          },
+        ]}
       >
-        <Input placeholder="https://example.com/avatar.png" />
+        <Input placeholder="https://example.com/avatar.png" maxLength={PROFILE_AVATAR_URL_MAX} />
       </Form.Item>
 
       <Form.Item>
