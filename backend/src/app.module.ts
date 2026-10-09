@@ -8,7 +8,6 @@ import { AccessGuard } from './common/authz/access.guard';
 
 // 配置导入
 import configuration from './config/configuration';
-import databaseConfig from './config/database.config';
 import { resolveRateLimit } from './config/rate-limit';
 
 // 模块导入
@@ -41,7 +40,7 @@ import { RedisModule } from './shared/redis/redis.module';
   imports: [
     // 配置模块
     ConfigModule.forRoot({
-      load: [configuration, databaseConfig],
+      load: [configuration],
       isGlobal: true,
       cache: true,
     }),

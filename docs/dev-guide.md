@@ -14,7 +14,7 @@
 | npm | 9.x | 随 Node.js 附带 |
 | Git | 2.x | https://git-scm.com |
 
-> SQLite 数据库无需单独安装，`better-sqlite3` 依赖内置。
+> 本地数据库用根目录 `docker-compose.yml` 起的 MySQL 8 + Redis 7（需要 Docker），见第 3 节。
 
 ### 1.2 后端启动
 
@@ -29,7 +29,7 @@ cp .env.example .env
 # 编辑 .env，确认以下关键配置：
 # APP_PORT=3001
 # JWT_SECRET=your-secret-key
-# DATABASE_TYPE=sqlite
+# DB_TYPE=mysql（仅支持 mysql / mariadb）
 
 # 开发模式启动（文件监听 + 自动重启）
 npm run start:dev
@@ -77,9 +77,13 @@ JWT_EXPIRES_IN=2h
 JWT_REFRESH_EXPIRES_IN=7d
 JWT_REMEMBER_EXPIRES_IN=30d
 
-# 数据库（SQLite）
-DATABASE_TYPE=sqlite
-DATABASE_NAME=cms-dev.sqlite
+# 数据库（与根目录 docker-compose.yml 的开发 MySQL 一致；DB_TYPE 仅支持 mysql / mariadb）
+DB_TYPE=mysql
+DATABASE_HOST=127.0.0.1
+DATABASE_PORT=3306
+DATABASE_NAME=cms_dev
+DATABASE_USER=cms
+DATABASE_PASSWORD=cms123
 
 # CORS（允许的前端域名，逗号分隔）
 CORS_ORIGIN=http://localhost:5173,http://localhost:3002
@@ -96,19 +100,20 @@ CACHE_TTL=300
 
 ## 3. 数据库管理
 
-本项目使用 SQLite，数据库文件在 `backend/cms-dev.sqlite`。
+运行时只支持 MySQL / MariaDB：`DB_TYPE` 未设置时为 mysql，写成其他值（包括 `sqlite`）启动时直接报
+「不支持的 DB_TYPE」。本地开发用根目录 `docker-compose.yml` 起的 MySQL 8（库 `cms_dev`，账号 `cms` / `cms123`）。
+
+`better-sqlite3` 只用于下面两处，不能当运行时数据库（`NovelChapter.content` 是 longtext，TypeORM 的 SQLite 驱动不支持）：
+
+- 测试的内存夹具：spec 里 `TypeOrmModule` 直接配 `type: 'better-sqlite3'`，不经过 `DatabaseModule`；
+- `scripts/migrate-sqlite-to-mysql.js`：把早期的 SQLite 开发库迁到 MySQL。
 
 ### 查看数据库
 
 ```bash
-cd backend
-node -e "
-const Database = require('better-sqlite3');
-const db = new Database('cms-dev.sqlite');
-const tables = db.prepare(\"SELECT name FROM sqlite_master WHERE type='table'\").all();
-console.log(tables.map(t => t.name));
-db.close();
-"
+# 命令行
+docker compose exec mysql mysql -ucms -pcms123 cms_dev -e "SHOW TABLES;"
+# 或浏览器打开 Adminer：http://localhost:8080（服务器填 mysql，账号 cms / cms123）
 ```
 
 ### TypeORM 自动同步
@@ -326,7 +331,7 @@ author: User;
 ### Q: 修改 Entity 后数据不同步
 
 TypeORM `synchronize: true` 在开发模式下自动同步，但某些操作（如修改列名）可能导致数据丢失。建议：
-- 删除 `cms-dev.sqlite` 重新启动（开发时）
+- 开发时可以直接重建本地库：`docker compose down -v` 后再 `docker compose up -d`（会清空本地 MySQL 与 Redis 的数据）
 - 生产环境使用 Migration
 
 ### Q: 文件上传失败 `ENOENT: no such file or directory`
@@ -344,13 +349,10 @@ mkdir -p backend/uploads
 
 ### Q: 数据库字段出现乱码
 
-SQLite 使用 UTF-8 编码，但若通过旧版 Node.js 客户端或不当方式写入，可能出现 Latin1 → UTF-8 双编码。修复方式：
-```js
-// 使用 better-sqlite3 直接更新
-const db = new Database('./cms-dev.sqlite');
-db.prepare('UPDATE users SET nickname = ? WHERE username = ?')
-  .run('系统管理员', 'admin');
-db.close();
+库表与连接都是 utf8mb4（compose 的 `--character-set-server=utf8mb4`，TypeORM 连接配置 `charset: 'utf8mb4'`）。
+若用错误字符集的客户端写入，可能出现 Latin1 → UTF-8 双编码；修正时客户端要显式指定 utf8mb4：
+```bash
+docker compose exec mysql mysql -ucms -pcms123 --default-character-set=utf8mb4 cms_dev   -e "UPDATE users SET nickname = '系统管理员' WHERE username = 'admin';"
 ```
 
 ---
