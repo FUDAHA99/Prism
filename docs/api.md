@@ -465,8 +465,16 @@
 ### 7.3 创建用户
 `POST /users`
 
+字段：`username`、`email`、`password`、`nickname`、`avatarUrl`、`isActive`（只接受 JSON 的 `true` / `false`，缺省为 `true`）；其余字段 `400`。
+
 ### 7.4 更新用户
 `PATCH /users/:id`
+```json
+{ "nickname": "新昵称", "email": "new@example.com", "isActive": false }
+```
+字段全部可选：`username`、`email`、`nickname`、`avatarUrl`、`isActive`。只写提交了的字段 —— 不带 `isActive` 时启用状态不变；
+`isActive` 只接受 JSON 的 `true` / `false`（字符串 `"false"` 为 `400`）；不能借此把自己停用（`400`，与 7.6 相同）。
+`nickname` / `avatarUrl` 传 `null` 或空串表示清空；`username` 不能为 `null`。`password` 不经此接口修改（`400`）。
 
 ### 7.5 删除用户（软删除）
 `DELETE /users/:id`

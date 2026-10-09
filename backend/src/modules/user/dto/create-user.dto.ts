@@ -9,7 +9,17 @@ import {
 import { ApiProperty } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import { IsAccountEmail } from '../../auth/dto/account-email.decorator';
+import { rawValue } from '../../movie/dto/movie-dto.helpers';
 
+/** 用户名：字母、数字、下划线、连字符；入库前去空白并转小写（新建与编辑同一规则） */
+export const USERNAME_PATTERN = /^[a-zA-Z0-9_-]+$/;
+export const normalizeUsername = ({ value }: { value: unknown }): unknown =>
+  typeof value === 'string' ? value.toLowerCase().trim() : value;
+
+/**
+ * POST /users（仅 admin）。不给属性写初始值（此前 `isActive = true`）：@nestjs/mapped-types 会把初始值连同校验
+ * 一起继承给派生类，PATCH 时请求体没带 isActive 也会写入 true —— 缺省值改由 UserService.create 补。
+ */
 export class CreateUserDto {
   @ApiProperty({
     example: 'admin',
@@ -21,10 +31,10 @@ export class CreateUserDto {
   @IsString({ message: '用户名必须是字符串' })
   @MinLength(3, { message: '用户名长度不能少于3个字符' })
   @MaxLength(50, { message: '用户名长度不能超过50个字符' })
-  @Matches(/^[a-zA-Z0-9_-]+$/, {
+  @Matches(USERNAME_PATTERN, {
     message: '用户名只能包含字母、数字、下划线和连字符',
   })
-  @Transform(({ value }) => value?.toLowerCase().trim())
+  @Transform(normalizeUsername)
   username: string;
 
   @ApiProperty({
@@ -33,7 +43,7 @@ export class CreateUserDto {
     required: true,
   })
   // 与登录 / 注册同一条规则（只收 ASCII，去首尾空白并转小写）：管理员不能再建出、改出用户自己登录不上的账号。
-  // UpdateUserDto 经 PartialType 继承这里的校验与转换
+  // UpdateUserDto 用同一个装饰器
   @IsAccountEmail()
   email: string;
 
@@ -65,13 +75,15 @@ export class CreateUserDto {
   @IsOptional()
   avatarUrl?: string;
 
+  /** 只认 JSON 布尔：全局隐式转换会把字符串 "false" 变成 true（与 PATCH /users/:id/status 同一规则） */
   @ApiProperty({
     example: true,
-    description: '是否激活',
+    description: '是否激活（缺省为 true）',
     required: false,
     default: true,
   })
-  @IsBoolean({ message: '激活状态必须是布尔值' })
   @IsOptional()
-  isActive?: boolean = true;
+  @Transform(rawValue)
+  @IsBoolean({ message: 'isActive 必须是 true 或 false' })
+  isActive?: boolean;
 }

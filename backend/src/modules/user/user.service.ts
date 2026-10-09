@@ -53,8 +53,13 @@ export class UserService {
     }
 
     const passwordHash = await this.hashPassword(createUserDto.password);
+    // 逐字段写库（不展开请求体）；isActive 缺省为启用（此前靠 DTO 的属性初始值，见 CreateUserDto）
     const user = this.userRepository.create({
-      ...createUserDto,
+      username,
+      email,
+      nickname: createUserDto.nickname ?? undefined,
+      avatarUrl: createUserDto.avatarUrl ?? undefined,
+      isActive: typeof createUserDto.isActive === 'boolean' ? createUserDto.isActive : true,
       passwordHash,
     });
 
@@ -228,12 +233,21 @@ export class UserService {
     await revokeAllSessions(this.cacheManager, id);
   }
 
+  /**
+   * 后台编辑用户（PATCH /users/:id）。逐字段写库，只写请求里真正提交了的列（此前 `{ ...dto }` 整体展开：
+   * DTO 继承来的 isActive = true 每次都会写进去，被禁用的账号改个昵称就恢复启用）。
+   * 与 PATCH /users/:id/status 同一条规则：不能把自己停用（否则管理员把自己锁在后台外面）。
+   */
   async update(
     id: string,
     updateUserDto: UpdateUserDto,
     currentUserId?: string,
   ): Promise<SafeUser> {
     const user = await this.findOne(id);
+
+    if (currentUserId && user.id === currentUserId && updateUserDto.isActive === false) {
+      throw new BadRequestException('不能禁用自己的账户');
+    }
 
     if (updateUserDto.email && updateUserDto.email !== user.email) {
       const existingEmail = await this.findByEmail(updateUserDto.email);
@@ -249,15 +263,22 @@ export class UserService {
       }
     }
 
-    const updateData: Partial<User> & { password?: string } = { ...updateUserDto };
+    // username / email / isActive 是 NOT NULL 列：只认真正的字符串 / 布尔（null 视为不改）；nickname / avatarUrl 可以清空
+    const updateData: Partial<User> = {};
+    if (typeof updateUserDto.username === 'string') updateData.username = updateUserDto.username;
+    if (typeof updateUserDto.email === 'string') updateData.email = updateUserDto.email;
+    if (updateUserDto.nickname !== undefined) updateData.nickname = updateUserDto.nickname;
+    if (updateUserDto.avatarUrl !== undefined) updateData.avatarUrl = updateUserDto.avatarUrl;
+    if (typeof updateUserDto.isActive === 'boolean') updateData.isActive = updateUserDto.isActive;
     if (updateUserDto.password) {
-      (updateData as any).passwordHash = await this.hashPassword(updateUserDto.password);
+      updateData.passwordHash = await this.hashPassword(updateUserDto.password);
     }
-    delete (updateData as any).password;
 
-    await this.userRepository.update(id, updateData);
+    if (Object.keys(updateData).length > 0) {
+      await this.userRepository.update(id, updateData);
+    }
     await this.clearUserCache(id);
-    if ((updateData as any).passwordHash) {
+    if (updateData.passwordHash) {
       // 管理员重置密码：该用户已签发的 token（可能已经泄露）一并作废，受信任 IP 一并清空；
       // 改密失败计数清零，本人用新密码登录后可以立刻改成自己的密码
       await revokeAllSessions(this.cacheManager, id);
