@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ThrottlerModule } from '@nestjs/throttler';
-import { ScheduleModule } from '@nestjs/schedule';
 import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerBehindProxyGuard } from './common/guards/throttler-behind-proxy.guard';
 import { AccessGuard } from './common/authz/access.guard';
@@ -55,9 +54,6 @@ import { RedisModule } from './shared/redis/redis.module';
         throttlers: [resolveRateLimit(configService)],
       }),
     }),
-    
-    // 定时任务模块
-    ScheduleModule.forRoot(),
     
     // 共享模块
     DatabaseModule,
