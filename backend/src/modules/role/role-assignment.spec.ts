@@ -43,6 +43,10 @@ import { globalValidationPipeOptions } from '../../common/pipes/global-validatio
 
 const ADMIN = { email: 'admin@cms.test', password: 'Admin123!' };
 const OTHER = { email: 'other@cms.test', password: 'Other123!' };
+
+// beforeAll 真跑 bcrypt（cost 12）：建两个账号再登录两次。单独跑约 1 秒，整套 jest 并行时 CPU 被占满，
+// 超过默认的 5 秒 beforeAll 时限、18 条用例一起失败（与改动无关的偶发失败），这里给足余量
+jest.setTimeout(60_000);
 /** 格式合法、但库里不存在的角色 ID */
 const UNKNOWN_ID = '3f0c6c1e-2b7a-4c1e-9a52-0d6f3c1b2a90';
 
