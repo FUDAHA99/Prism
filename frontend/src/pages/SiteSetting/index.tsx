@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react'
+import React, { useEffect, useMemo } from 'react'
 import {
   App,
   Button,
@@ -15,28 +15,17 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { getSiteSettings, saveSiteSettings } from '../../api/siteSetting'
 import PageHeader from '../../components/common/PageHeader'
 import QueryErrorResult from '../../components/common/QueryErrorResult'
-import type { SiteSetting } from '../../types'
-
-/** 将配置数组转换为 key-value 对象 */
-function toFormValues(settings: SiteSetting[]): Record<string, string> {
-  return settings.reduce<Record<string, string>>((acc, item) => {
-    acc[item.key] = item.value
-    return acc
-  }, {})
-}
-
-/** 将 form 对象转换为批量保存数组格式 */
-function toSettingsArray(values: Record<string, string>): Array<{ key: string; value: string }> {
-  return Object.entries(values).map(([key, value]) => ({
-    key,
-    value: value === undefined || value === null ? '' : String(value),
-  }))
-}
+import {
+  changedSettings,
+  settingsFormValues,
+  type BasicSettingValues,
+  type FeatureSettingValues,
+} from '../../utils/site-settings'
 
 export default function SiteSettingPage() {
   const { message } = App.useApp()
-  const [basicForm] = Form.useForm<Record<string, string>>()
-  const [featureForm] = Form.useForm<Record<string, string | boolean | number>>()
+  const [basicForm] = Form.useForm<BasicSettingValues>()
+  const [featureForm] = Form.useForm<FeatureSettingValues>()
 
   const queryClient = useQueryClient()
 
@@ -45,26 +34,15 @@ export default function SiteSettingPage() {
     queryFn: getSiteSettings,
   })
 
+  // 载入时两张表单的值：既用来填表单，也是保存时判断「改了什么」的基准
+  const initialValues = useMemo(() => (data ? settingsFormValues(data) : undefined), [data])
+
   // 加载后填充表单
   useEffect(() => {
-    if (!data) return
-    const vals = toFormValues(data)
-
-    basicForm.setFieldsValue({
-      site_name: vals.site_name ?? '',
-      site_description: vals.site_description ?? '',
-      site_logo: vals.site_logo ?? '',
-      site_favicon: vals.site_favicon ?? '',
-      site_icp: vals.site_icp ?? '',
-    })
-
-    featureForm.setFieldsValue({
-      enable_register: vals.enable_register === 'true',
-      enable_comment: vals.enable_comment === 'true',
-      comment_audit: vals.comment_audit === 'true',
-      posts_per_page: Number(vals.posts_per_page ?? 10),
-    })
-  }, [data, basicForm, featureForm])
+    if (!initialValues) return
+    basicForm.setFieldsValue(initialValues.basic)
+    featureForm.setFieldsValue(initialValues.feature)
+  }, [initialValues, basicForm, featureForm])
 
   const saveMutation = useMutation({
     mutationFn: (settings: Array<{ key: string; value: string }>) =>
@@ -79,25 +57,26 @@ export default function SiteSettingPage() {
   })
 
   const handleSave = async () => {
+    if (!initialValues) return
+    let values: [Partial<BasicSettingValues>, Partial<FeatureSettingValues>]
     try {
-      const [basicValues, featureValues] = await Promise.all([
-        basicForm.validateFields(),
-        featureForm.validateFields(),
-      ])
-
-      // 将 boolean/number 转换为 string
-      const merged: Record<string, string> = {
-        ...basicValues,
-        enable_register: String(featureValues.enable_register ?? false),
-        enable_comment: String(featureValues.enable_comment ?? false),
-        comment_audit: String(featureValues.comment_audit ?? false),
-        posts_per_page: String(featureValues.posts_per_page ?? 10),
-      }
-
-      saveMutation.mutate(toSettingsArray(merged))
+      values = await Promise.all([basicForm.validateFields(), featureForm.validateFields()])
     } catch {
       // 表单校验失败，antd 会自动高亮错误字段
+      return
     }
+    const [basicValues, featureValues] = values
+    // 只提交改过的项（见 utils/site-settings.ts）：没打开过、没改过的开关保持库里原来的值，
+    // 不再被补成 false 一起写回（此前只改站点名称就会悄悄关掉注册、评论与评论审核）
+    const changed = changedSettings(
+      { ...initialValues.basic, ...initialValues.feature },
+      { ...basicValues, ...featureValues },
+    )
+    if (changed.length === 0) {
+      message.info('没有需要保存的修改')
+      return
+    }
+    saveMutation.mutate(changed)
   }
 
   if (isLoading) {
@@ -122,6 +101,8 @@ export default function SiteSettingPage() {
     {
       key: 'basic',
       label: '基本设置',
+      // 两个标签都预先渲染：表单字段始终挂载，校验与取值覆盖到全部配置项（保存时仍只提交改过的项）
+      forceRender: true,
       children: (
         <Card>
           <Form form={basicForm} layout="vertical" style={{ maxWidth: 600 }}>
@@ -155,6 +136,7 @@ export default function SiteSettingPage() {
     {
       key: 'feature',
       label: '功能设置',
+      forceRender: true,
       children: (
         <Card>
           <Form form={featureForm} layout="vertical" style={{ maxWidth: 600 }}>
@@ -182,7 +164,11 @@ export default function SiteSettingPage() {
               <Switch checkedChildren="开启" unCheckedChildren="关闭" />
             </Form.Item>
 
-            <Form.Item name="posts_per_page" label="每页文章数">
+            <Form.Item
+              name="posts_per_page"
+              label="每页文章数"
+              rules={[{ required: true, message: '请输入每页文章数' }]}
+            >
               <InputNumber min={1} max={100} style={{ width: 160 }} />
             </Form.Item>
           </Form>
