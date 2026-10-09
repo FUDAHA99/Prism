@@ -217,6 +217,49 @@ backend 启动日志和例行部署都会提示，关闭方法见 `docs/deploy.m
 `prism_nginx_logs` 卷不持久化日志；helmet 与 nginx 安全头重复；漫画章节上传无并发上限；上传文件不落盘（媒体功能不可用）；
 nginx 镜像未锁版本；前端「页面用到的接口」对照表为手写。
 
+### 批次 2 / 3A —— 交叉核查后的修订方案（2026-10-09）
+
+第五节（批次 2）与第六节 3A 原文写于两个月前，动手前用 4 个只读代理（backend / frontend / portal / 构建与 CI）
+逐个包对照当前代码核实，并在一次性容器里实测了镜像构建、bcrypt 6、better-sqlite3 预编译包、typeorm 升级后的建表差异。
+**以本节为准**，第五、六节原文仅作背景。
+
+**原文照做会出事的两处**
+
+- **前端构建会被打坏**：`echarts-for-react` 的产物 `import` 了 `tslib`，自己却没声明这个依赖，一直靠 Storybook、
+  pro-components、react-dropzone 间接装进来。照原文删掉这三者后 `vite build` 报 `Could not resolve "tslib"`（tsc 和 vitest 照样能过）。
+  → 先单独提交显式声明 `tslib`，再删。
+- **部署会挂在 docker build**：原文的 `npm update` 会把 `better-sqlite3` 从 12.9.0 抬到 12.11.1，而 12.10.0 起的版本
+  只有 Node 22 的预编译包，`node:20-alpine` 里没有 python / 编译工具，回落源码编译直接失败；CI 跑在 ubuntu 上照样变绿。
+  → `npm update` 之前先 `npm i better-sqlite3@12.9.0 --save-exact`，升 Node 22 之后再解除。
+
+**其他更正**
+
+- backend 零引用的不止原文 6 个：还有 `uuid`（媒体上传已改用 `crypto.randomUUID`）、`passport-local`、`@nestjs/mapped-types`，
+  以及只注册了空调度器的 `@nestjs/schedule`（全仓零 `@Cron`；以后要定时任务装 `^6` 即可）。
+- `.env.example` 的 PostgreSQL 残留已在 1-E 修过；`dotenv` 只有 `migrate-sqlite-to-mysql.js` 是无保护的 require，声明 `^16.6.1`（不能用 17.x，默认打印注入日志）。
+- `database.module.ts` 的 SQLite 分支**从来没跑通过**（`NovelChapter.content` 是 longtext），`DB_TYPE` 白名单只留 mysql / mariadb 并删掉该分支；`better-sqlite3` 仍保留给 12 个测试夹具与迁移脚本。
+- `uuid` 那条公告不必等 Nest 11：删 `@nestjs/schedule` + typeorm 升级把 uuid 带到 11.1.1 即清掉。
+- 「bcrypt 6 根除唯一 CRITICAL」不准确：backend 有 3 个 critical（tar、handlebars、proxy-addr），`npm update` + bcrypt 6 一起才归零。
+  bcrypt 6 的 npm 包自带 musl 预编译，镜像构建不再需要从 github.com 下载；旧哈希、两个方向的回滚、真实 MySQL 登录均已验证。
+- `@nestjs/*` 10.x 没有补丁可升（10.4.22 即最后一版）；实际变化是 typeorm 0.3.31（含一条 SQL 注入修复）、mysql2 3.24.5、proxy-addr 2.0.8 等。
+- frontend：vitest 现在有 16 个文件 393 个用例，**必须保留**；`@vitest/ui`、`@playwright/test` 与三个本来就坏的测试脚本删除；
+  另有 `vite-plugin-pwa`、`vite-plugin-compression` 从未注册；tailwind 与 `react-hot-toast` 在产物里不起作用。axios 目标改为 `^1.20.0`（1.19 仍剩 10 条）。
+- portal：next 14.2.35 已在 1-C 完成；postcss 用 `"overrides": {"postcss": "$postcss"}` 统一掉 next 内嵌的 8.4.31（写字面量范围会 EOVERRIDE），生产依赖的 audit 只剩 next 一项。
+- 审计门禁不能用 `--audit-level`（next 14 的 critical 没有修复版本，会永远红），改为**按 GHSA 编号登记、带到期日的例外清单**，放在独立 workflow（放进 deploy.yml 的定时触发会真的去部署）。
+- npmmirror 陷阱的准确描述：`npm audit` 走 npmmirror 会报错退出；真正不出声的是 `npm install/ci` 不打印漏洞、并把 npmmirror 地址写进 lock（backend 现有 4 条）。
+
+**提交顺序**：docs → backend lock 源修正 → backend 删 9 个零引用依赖并声明 dotenv → 删 database.config 与 SQLite 分支、DB_TYPE 白名单 →
+删 `@nestjs/schedule` → 锁 better-sqlite3 后范围内升级 → bcrypt 6 → frontend 先加 tslib → 删 Storybook → 删 react-query v3 →
+删 13 个零引用依赖 → 删未接入的 devDependencies 与坏脚本 → 删 tailwind / react-hot-toast → 前端安全补丁 →
+portal postcss 与 override → portal 构建期依赖刷新 → 新增依赖审计 workflow 与例外清单、README 说明 → docs 收尾。
+每个触及 backend 运行时依赖的提交都要在一次性容器里实际构建生产镜像；bcrypt 6 之后做一次跨版本登录冒烟（旧哈希、回滚）。
+
+**预期**（2026-10-09 公告库）：三端 audit 177 → 约 91，生产依赖 39 → 约 14，critical 10 → 3（剩 vitest/tinypool 在开发依赖、
+next 14 在生产但已有缓解）；backend 生产镜像 635MB → 约 403MB。
+
+**本批不做**：NestJS 11、Next 16 / React 19、vite 6 + vitest 4、react-router 7（登记例外）、tailwind 4、Node 22（建议作为下一个独立 PR，
+Node 20 已停止维护）、`@nestjs/swagger` 去留（87 个文件在用装饰器但从未挂载文档，需单独决策）、任何 `npm audit fix` / 全量 `npm update`。
+
 **其他已记录、未排期**：JSON 请求体 100kb 上限导致超长章节无法保存（413）；`prism_nginx_logs` 卷里只有指向
 stdout 的符号链接，实际不持久化日志；helmet 与 nginx 安全头重复、nginx 的 Referrer-Policy 覆盖了 helmet 的
 `no-referrer`；漫画章节上传无并发上限且页序按完成顺序；上传字节不落盘（媒体功能不可用）；frontend 的
