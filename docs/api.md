@@ -1010,4 +1010,45 @@ javascript: / data: / vbscript: / file: 等其他协议不入库（影视同时�
 
 ---
 
+## 附：门户缓存窗口（下架 / 撤回发布后多久从门户消失）
+
+后端对游客的接口只返回已发布、未删除（且已到发布时间）的数据，状态一变，直接调 API 立即生效（详情 / 单章 `404`、
+列表里不再出现）。但门户（Next.js 14）在服务端缓存了这些接口的结果（`portal/lib/api.ts`），缓存期内门户页面照旧
+按旧结果渲染：
+
+| 门户取数 | 缓存 | 接口 |
+|----------|------|------|
+| 列表、分类、标签、站点配置 | 30 秒（fetch 数据缓存） | `GET /contents`、`/movies`、`/novels`、`/comics`、`/categories`、`/tags`、`/site-settings/public` |
+| 章节目录 | 60 秒（fetch 数据缓存） | `/novels/:id/chapters`、`/comics/:id/chapters` |
+| 文章详情 | 30 秒（`unstable_cache`，含 404） | `/contents/slug/:slug` |
+| 影视 / 小说 / 漫画详情、单章 | 60 秒（`unstable_cache`，含 404） | `/movies/slug/:slug`、`/novels/slug/:slug`、`/comics/slug/:slug`、`/novels/chapters/:chapterId`、`/comics/chapters/:chapterId` |
+| 文章评论 | 不缓存 | `/comments/public`（浏览器直接请求） |
+
+单条数据不用 fetch 的数据缓存，是因为 Next 14 只把状态码 200 的响应写进缓存：下架后接口改回 `404`，过期后的
+后台刷新拿到 404 不会覆盖旧条目，旧条目就一直以「过期但可用」的身份返回，已下架的详情与章节在门户上**无限期**
+可见（此前单章 300 秒、详情 60 秒的设置实际都是这样）。现在单条数据由 `unstable_cache` 缓存函数结果，`404`
+记为「不存在」一并缓存；5xx、网络错误不写缓存（首次加载时页面按不存在处理、下次再试；后台刷新失败时保留旧值，
+Next 在服务端日志里打一条 `revalidating cache with key ...`）。单章从 300 秒缩短到 60 秒。
+
+因此在后台下架、撤回发布、删除，或把章节改成未发布之后：
+
+- 门户页面最多再显示约 60 秒（文章详情与列表约 30 秒），从缓存写入时算起；
+- 缓存过期后的**第一次**请求仍拿到旧内容，同时在后台刷新，之后的请求才是新结果（stale-while-revalidate）。页面
+  长时间没人访问时旧缓存一直留着，所以「过期后的第一位访客」仍可能看到旧内容；
+- 已经打开过页面的浏览器在站内跳转时，还可能用 Next 客户端路由缓存里的页面（14.2 对动态页默认 30 秒），刷新页面即失效；
+- 缓存落在 portal 进程的 `.next/cache/fetch-cache`（容器里是 `/app/.next/cache/fetch-cache`），只重启 portal **不会**
+  清空；必须立刻下线时，删掉这个目录再重启 portal，或重建 portal 容器。
+
+> **TODO（正确做法：按标签的按需失效，暂未实现）**
+> 1. 门户取数带上标签：fetch 用 `next: { revalidate, tags: [...] }`，`unstable_cache` 用 `{ revalidate, tags: [...] }`，
+>    例如 `novel:<id>`、`novel-chapter:<chapterId>`、`novels:list`；
+> 2. 门户新增一个只给后端调用的 Route Handler（如 `POST /api/revalidate`），用共享密钥校验、只在内网可达（nginx 不对外
+>    转发），里面调用 `next/cache` 的 `revalidateTag(tag)`（Next 14 的签名只有一个参数）；
+> 3. 后端在发布、撤回发布、删除、改 slug、章节 `isPublished` 变更、采集更新等写操作成功后，异步调用这个接口
+>    （失败只记日志，不影响后台操作）；
+> 4. 定时发布「到点后出现」没有写事件可挂，仍靠列表的短 `revalidate`（或定时任务补调）；
+> 5. 按需失效上线后，详情与单章的缓存时间可以再放长以减轻后端压力。
+
+---
+
 *最后更新：2026-04-25*
