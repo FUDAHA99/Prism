@@ -500,11 +500,9 @@ describe('影视模块 HTTP', () => {
       const res = await get(`/movies/slug/${slugs.published}`, 'anonymous').expect(200);
       expect(Object.keys(res.body).sort()).toEqual(PUBLIC_DETAIL_KEYS);
       const sources = res.body.sources as NonNullable<PublicMovie['sources']>;
-      // 线路按 sortOrder、剧集按集数排序（播放页按下标取 /play/:srcIdx/:ep）
-      expect(sources.map((s) => [s.name, s.kind, s.player])).toEqual([
-        ['ckm3u8', 'play', 'm3u8'],
-        ['下载线路', 'download', null],
-      ]);
+      // 线路按 sortOrder、剧集按集数排序（播放页按下标取 /play/:srcIdx/:ep）；
+      // 「下载线路」只有 magnet 地址，过滤后一集不剩，整条不出现在公开视图
+      expect(sources.map((s) => [s.name, s.kind, s.player])).toEqual([['ckm3u8', 'play', 'm3u8']]);
       for (const src of sources) {
         expect(Object.keys(src).sort()).toEqual(PUBLIC_SOURCE_KEYS);
         expect(src.movieId).toBe(movieIds.published);
@@ -567,6 +565,26 @@ describe('影视模块 HTTP', () => {
       const staff = await get(`/movies/${id}`, 'editor').expect(200);
       expect(staff.body.sources[0].episodes).toHaveLength(urls.length);
       // 不影响后面按「已发布影视」计数的用例
+      await ds.getRepository(MovieSource).delete({ movieId: id });
+      await movies.delete(id);
+    });
+
+    it('第一条线路只有下载地址时整条略去，可播放的线路排到下标 0（门户「立即播放」取 sources[0].episodes[0]）', async () => {
+      const slug = 'download-first-line';
+      const id = (
+        await movies.save({ title: '下载线路在前', slug, status: MovieStatus.PUBLISHED, publishedAt: new Date('2026-01-01T00:00:00Z') })
+      ).id;
+      const dl = await ds.getRepository(MovieSource).save({ movieId: id, name: '下载', kind: MovieSourceKind.DOWNLOAD, sortOrder: 0 });
+      await ds.getRepository(MovieEpisode).save({ sourceId: dl.id, title: '全集', episodeNumber: 1, url: 'magnet:?xt=urn:btih:x', sortOrder: 0 });
+      const play = await ds.getRepository(MovieSource).save({ movieId: id, name: '播放', kind: MovieSourceKind.PLAY, sortOrder: 1 });
+      await ds.getRepository(MovieEpisode).save({ sourceId: play.id, title: '第1集', episodeNumber: 1, url: 'https://cdn.example.com/1.m3u8', sortOrder: 0 });
+
+      const res = await get(`/movies/slug/${slug}`, 'anonymous').expect(200);
+      expect(res.body.sources.map((s: { name: string }) => s.name)).toEqual(['播放']);
+      expect(res.body.sources[0].episodes[0].url).toBe('https://cdn.example.com/1.m3u8');
+      // 后台视图保留全部线路
+      expect((await get(`/movies/${id}`, 'editor').expect(200)).body.sources).toHaveLength(2);
+
       await ds.getRepository(MovieSource).delete({ movieId: id });
       await movies.delete(id);
     });

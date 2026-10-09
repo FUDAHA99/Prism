@@ -220,7 +220,11 @@ export function toPublicMovie(m: Movie): PublicMovie {
     createdAt: m.createdAt,
     updatedAt: m.updatedAt,
   };
-  if (Array.isArray(m.sources)) out.sources = m.sources.map(toPublicSource);
+  // 过滤后一集都不剩的线路（只有 magnet / thunder / ed2k 等下载地址）整条不给：门户的「立即播放」与续播默认取
+  // sources[0].episodes[0]，第一条是空线路时详情页就没有播放按钮，线路标签还会链到 404（复审 low）
+  if (Array.isArray(m.sources)) {
+    out.sources = m.sources.map(toPublicSource).filter((s) => s.episodes.length > 0);
+  }
   return out;
 }
 
