@@ -26,6 +26,7 @@ import {
   NICKNAME_TAKEN_MESSAGE,
   USERNAME_TAKEN_AS_NICKNAME_MESSAGE,
   isDisplayNameTaken,
+  isNicknameChange,
 } from './display-name';
 import { UpdateProfileDto } from '../auth/dto/update-profile.dto';
 
@@ -285,11 +286,14 @@ export class UserService {
       await this.assertNameAvailable(updateUserDto.username, USERNAME_TAKEN_AS_NICKNAME_MESSAGE, user.id);
     }
 
-    // 只在昵称真的改了时查重：后台编辑弹窗每次都原样回传昵称，存量数据里已有的重名不能挡住改邮箱、改状态。
+    // 昵称只在真的改了时查重、写库：两边都按规范化后的写法比（见 isNicknameChange）—— 存量数据里已有的重名、
+    // 非规范写法（全角仿冒等）原样回传时，不能挡住改邮箱、改状态，也不被悄悄改写。
     // 与库里的当前值比（不用上面 findOne 的 5 分钟缓存：缓存里的旧昵称会让没改的提交被当成改了）
-    if (typeof updateUserDto.nickname === 'string') {
+    let nicknameChanged = false;
+    if (updateUserDto.nickname !== undefined) {
       const stored = await this.userRepository.findOne({ select: { id: true, nickname: true }, where: { id: user.id } });
-      if (updateUserDto.nickname !== stored?.nickname) {
+      nicknameChanged = isNicknameChange(stored?.nickname, updateUserDto.nickname);
+      if (nicknameChanged && typeof updateUserDto.nickname === 'string') {
         await this.assertNameAvailable(updateUserDto.nickname, NICKNAME_TAKEN_MESSAGE, user.id);
       }
     }
@@ -298,7 +302,7 @@ export class UserService {
     const updateData: Partial<User> = {};
     if (typeof updateUserDto.username === 'string') updateData.username = updateUserDto.username;
     if (typeof updateUserDto.email === 'string') updateData.email = updateUserDto.email;
-    if (updateUserDto.nickname !== undefined) updateData.nickname = updateUserDto.nickname;
+    if (nicknameChanged) updateData.nickname = updateUserDto.nickname;
     if (updateUserDto.avatarUrl !== undefined) updateData.avatarUrl = updateUserDto.avatarUrl;
     if (typeof updateUserDto.isActive === 'boolean') updateData.isActive = updateUserDto.isActive;
     if (updateUserDto.password) {
@@ -350,12 +354,14 @@ export class UserService {
       throw new NotFoundException('用户不存在');
     }
 
-    if (typeof dto.nickname === 'string' && dto.nickname !== user.nickname) {
+    // 与后台编辑同一条判断：按规范化后的写法比，原样提交存量的非规范昵称不算改（不查重、不写库）
+    const nicknameChanged = dto.nickname !== undefined && isNicknameChange(user.nickname, dto.nickname);
+    if (nicknameChanged && typeof dto.nickname === 'string') {
       await this.assertNameAvailable(dto.nickname, NICKNAME_TAKEN_MESSAGE, user.id);
     }
 
     const patch: Partial<User> = {};
-    if (dto.nickname !== undefined) patch.nickname = dto.nickname;
+    if (nicknameChanged) patch.nickname = dto.nickname;
     if (dto.avatarUrl !== undefined) patch.avatarUrl = dto.avatarUrl;
     const changed = changedAuditFields(user, patch, PROFILE_FIELDS);
     if (changed.length === 0) {

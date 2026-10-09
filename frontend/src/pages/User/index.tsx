@@ -22,6 +22,7 @@ import PageHeader from '../../components/common/PageHeader'
 import { QueryErrorSwitch } from '../../components/common/QueryErrorResult'
 import { formatDate } from '../../utils'
 import { ASCII_EMAIL_RULE } from '../../utils/email'
+import { buildUserEditPayload, type UserEditFormValues } from '../../utils/user-edit'
 import type { Role, User } from '../../types'
 import CreateUserModal from './CreateUserModal'
 
@@ -31,13 +32,6 @@ function roleColor(name: string): string {
   let hash = 0
   for (let i = 0; i < name.length; i++) hash = (hash + name.charCodeAt(i)) % ROLE_COLORS.length
   return ROLE_COLORS[hash]
-}
-
-interface EditFormValues {
-  nickname: string
-  email: string
-  isActive: boolean
-  roleNames: string[]
 }
 
 export default function UserPage() {
@@ -50,7 +44,7 @@ export default function UserPage() {
   // 每次打开新建弹窗换一个 key：整个弹窗（含表单状态）重新挂载，不残留上一次填的值或错误提示 ——
   // 不依赖关闭动画结束后的销毁（动画没走完就再次打开时，destroyOnHidden 还没来得及清）
   const [createKey, setCreateKey] = useState(0)
-  const [form] = Form.useForm<EditFormValues>()
+  const [form] = Form.useForm<UserEditFormValues>()
 
   const queryClient = useQueryClient()
 
@@ -69,20 +63,16 @@ export default function UserPage() {
       id,
       values,
       originalRoles,
-      originalEmail,
+      original,
     }: {
       id: string
-      values: EditFormValues
+      values: UserEditFormValues
       originalRoles: string[]
-      originalEmail: string
+      original: Pick<User, 'nickname' | 'email'>
     }) => {
-      // 邮箱没改就不发：存量账号的邮箱可能是非 ASCII（后端已不再接受），带着原值提交会被 400 挡住，
-      // 管理员就没法停用 / 降权这类账号了
-      await updateUser(id, {
-        nickname: values.nickname,
-        ...(values.email !== originalEmail ? { email: values.email } : {}),
-        isActive: values.isActive,
-      })
+      // 昵称、邮箱没改就不发：存量账号的昵称（如全角仿冒管理员昵称）、邮箱（非 ASCII）可能不符合现在的规则，
+      // 带着原值提交会被 409 / 400 挡住，管理员就没法停用 / 降权这类账号了（见 utils/user-edit.ts）
+      await updateUser(id, buildUserEditPayload(original, values))
 
       const allRoles: Role[] = rolesData ?? []
       const newRoleIds = allRoles.filter((r) => values.roleNames.includes(r.name)).map((r) => r.id)
@@ -137,7 +127,7 @@ export default function UserPage() {
         id: editingUser.id,
         values,
         originalRoles: editingUser.roles,
-        originalEmail: editingUser.email,
+        original: { nickname: editingUser.nickname, email: editingUser.email },
       })
     })
   }

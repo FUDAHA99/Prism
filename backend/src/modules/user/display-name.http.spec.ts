@@ -1,6 +1,7 @@
 import { Repository } from 'typeorm';
 import { UserController } from './user.controller';
 import { User } from './entities/user.entity';
+import { Role } from '../role/entities/role.entity';
 import { NICKNAME_TAKEN_MESSAGE, USERNAME_TAKEN_AS_NICKNAME_MESSAGE } from './display-name';
 import { AuthController } from '../auth/auth.controller';
 import { SiteSetting } from '../site-setting/entities/site-setting.entity';
@@ -165,6 +166,61 @@ describe('显示名唯一：注册 / 后台新建 / 后台编辑', () => {
       await users.update(h.ids.plain, { nickname: 'plainx' });
       await h.patch(`/users/${h.ids.plain}`, 'admin', { username: 'plainx' }).expect(200);
       expect((await row(h.ids.plain)).username).toBe('plainx');
+    });
+
+    /**
+     * 1-F-3 复审 medium：规范化上线之前写入的存量昵称可能是全角仿冒的管理员昵称（当时允许）。编辑弹窗原样回传它时，
+     * 此前拿规范化之后的提交值（'SiteAdmin'）与库里未规范化的原值比，被当成「改了」去查重 → 409，
+     * 而查重在改启用状态之前：管理员没法通过编辑弹窗停用或降权这个仿冒账号，看到的错误还与操作无关。
+     * 现在两边都按规范化后的写法比较，没改就不查重、也不写库（不会被改写成与管理员一模一样的 'SiteAdmin'）。
+     */
+    describe('存量账号的全角仿冒昵称（规范化后与管理员昵称相同）', () => {
+      const IMITATION = 'ＳｉｔｅＡｄｍｉｎ';
+      let legacyId: string;
+      let editorRoleId: string;
+
+      beforeEach(async () => {
+        await users.update(h.ids.admin, { nickname: 'SiteAdmin' });
+        const legacy = await users.save({
+          username: 'legacy1',
+          email: 'legacy1@cms.test',
+          passwordHash: 'x',
+          nickname: IMITATION,
+          isActive: true,
+        } as Partial<User>);
+        legacyId = legacy.id;
+        editorRoleId = (await h.ds.getRepository(Role).findOneByOrFail({ name: 'editor' })).id;
+        await h.ds.query('INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)', [legacyId, editorRoleId]);
+      });
+
+      afterEach(async () => {
+        await h.ds.query('DELETE FROM user_roles WHERE user_id = ?', [legacyId]);
+        await users.delete(legacyId);
+        await users.update(h.ids.admin, { nickname: null } as Partial<User>);
+      });
+
+      it('编辑弹窗的停用 + 降权（昵称没改就不提交）：PATCH 200、remove-roles 201，昵称原样不动', async () => {
+        await h.patch(`/users/${legacyId}`, 'admin', { isActive: false }).expect(200);
+        const demoted = await h.post(`/users/${legacyId}/remove-roles`, 'admin', { roleIds: [editorRoleId] }).expect(201);
+        expect(demoted.body.data.roles).toEqual([]);
+        expect(await row(legacyId)).toMatchObject({ nickname: IMITATION, isActive: false });
+      });
+
+      it('旧客户端原样回传存量昵称 + 停用 → 200：不查重、昵称不被改写成管理员的规范写法', async () => {
+        await h.patch(`/users/${legacyId}`, 'admin', { nickname: IMITATION, isActive: false }).expect(200);
+        expect(await row(legacyId)).toMatchObject({ nickname: IMITATION, isActive: false });
+        // 规范写法本身也算「没改」（同一个显示名）
+        await h.patch(`/users/${legacyId}`, 'admin', { nickname: 'SiteAdmin' }).expect(200);
+        expect((await row(legacyId)).nickname).toBe(IMITATION);
+      });
+
+      it('真的改了昵称照样查重：改成他人的名字 409；改成不冲突的名字 200，存规范化后的值', async () => {
+        const taken = await h.patch(`/users/${legacyId}`, 'admin', { nickname: 'chief', isActive: false }).expect(409);
+        expect(taken.body.message).toBe(NICKNAME_TAKEN_MESSAGE);
+        expect(await row(legacyId)).toMatchObject({ nickname: IMITATION, isActive: true });
+        await h.patch(`/users/${legacyId}`, 'admin', { nickname: ' 旧账号​ ' }).expect(200);
+        expect((await row(legacyId)).nickname).toBe('旧账号');
+      });
     });
   });
 });

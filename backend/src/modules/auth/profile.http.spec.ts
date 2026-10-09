@@ -164,6 +164,24 @@ describe('PATCH /auth/me（本人修改资料）', () => {
       }
     });
 
+    it('存量的非规范昵称（全角仿冒管理员昵称）原样提交不算改：不查重、不改写，只改头像照常 200', async () => {
+      await users.update(h.ids.admin, { nickname: 'SiteAdmin' });
+      await users.update(h.ids.plain, { nickname: 'ＳｉｔｅＡｄｍｉｎ' });
+      try {
+        await patchMe('plain', { nickname: 'ＳｉｔｅＡｄｍｉｎ', avatarUrl: '/uploads/legacy.png' }).expect(200);
+        await patchMe('plain', { nickname: 'SiteAdmin' }).expect(200);
+        expect(await row(h.ids.plain)).toMatchObject({ nickname: 'ＳｉｔｅＡｄｍｉｎ', avatarUrl: '/uploads/legacy.png' });
+        // 只记真正变了的头像
+        const updates = await audits.findBy({ action: 'USER_UPDATE', resourceId: h.ids.plain });
+        expect(updates.map((a) => Object.keys(a.newValues ?? {}).sort())).toEqual([['avatarUrl', 'via']]);
+        // 真的换一个名字照样查重
+        const res = await patchMe('plain', { nickname: 'admin' }).expect(409);
+        expect(res.body.message).toBe(NICKNAME_TAKEN_MESSAGE);
+      } finally {
+        await users.update(h.ids.admin, { nickname: null } as Partial<User>);
+      }
+    });
+
     it('已删除（软删除）账号的名字不再占用', async () => {
       const gone = await users.save({
         username: 'gone_user',

@@ -23,6 +23,26 @@ export function normalizeDisplayName(raw: string): string {
 }
 
 /**
+ * 库里的昵称按显示名看是什么：规范化之后的写法；null、空串、纯空白、只有不可见字符都算「没有昵称」（null）。
+ * 存量数据早于规范化（1-F-3 之前），可能是全角、夹带零宽字符等非规范写法。
+ */
+export function storedNicknameAsDisplayName(stored: string | null | undefined): string | null {
+  if (typeof stored !== 'string') return null;
+  const normalized = normalizeDisplayName(stored);
+  return normalized === '' ? null : normalized;
+}
+
+/**
+ * 编辑提交的昵称（经 nicknameUpdateInput：已规范化的字符串，或 null 表示清空）相对库里的当前值是否真的变了。
+ * 两边都按规范化后的写法比：后台编辑弹窗、旧客户端原样回传存量的非规范昵称时不算改 —— 不查重、也不写库。
+ * 否则一个全角仿冒管理员昵称的存量账号，管理员连停用 / 降权都做不了（规范化后与管理员昵称相同，409），
+ * 写库还会把它改成与管理员一模一样的规范写法。
+ */
+export function isNicknameChange(stored: string | null | undefined, submitted: string | null): boolean {
+  return storedNicknameAsDisplayName(stored) !== submitted;
+}
+
+/**
  * name 是否已被某个未删除账号用作用户名或昵称（exceptUserId 指定的账号本身除外：改自己的昵称、
  * 把昵称改成自己的用户名都不算冲突）。
  *
