@@ -308,8 +308,11 @@ export class ContentService {
     const patch = pickEditable(dto);
     const requestedAt = dto.publishedAt ? new Date(dto.publishedAt) : undefined;
     if (dto.status === ContentStatus.PUBLISHED) {
-      // 编辑页「保存并发布」：与 POST /:id/publish 同样三列一起写；已有发布时间的（重新保存已发布文章）保留原值
-      Object.assign(patch, publishedState(requestedAt ?? content.publishedAt ?? this.publishNow()));
+      // 编辑页「保存并发布」：与 POST /:id/publish 同样三列一起写；已有发布时间的（重新保存已发布文章）保留原值。
+      // 但原值是未来时间（定时发布）且这次没带新时间时，按「立即发布」处理：编辑页不回填定时时间，
+      // 沿用原值的话文章继续对游客隐藏，界面却提示更新成功、列表显示已发布
+      const kept = content.publishedAt && content.publishedAt <= this.clock.now() ? content.publishedAt : undefined;
+      Object.assign(patch, publishedState(requestedAt ?? kept ?? this.publishNow()));
     } else if (requestedAt) {
       patch.publishedAt = requestedAt;
     }

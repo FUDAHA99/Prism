@@ -511,6 +511,25 @@ describe('内容模块 HTTP', () => {
       );
       await get('/contents/slug/scheduled-article', 'anonymous').expect(200);
     });
+
+    it('编辑页「立即发布」不带时间（编辑页不回填定时）：定时作废、发布时间改为现在，游客马上可见（复审 medium）', async () => {
+      await contents.update(scheduledId, { publishedAt: new Date(DUE) }); // 上一个用例已把它发布了，恢复成定时
+      setNow(DUE, -3600 * 1000);
+      await get('/contents/slug/scheduled-article', 'anonymous').expect(404);
+      await patch(`/contents/${scheduledId}`, 'admin', { status: 'published' }).expect(200);
+      expect((await contents.findOneByOrFail({ id: scheduledId })).publishedAt!.toISOString()).toBe(
+        new Date(new Date(DUE).getTime() - 3600 * 1000).toISOString(),
+      );
+      await get('/contents/slug/scheduled-article', 'anonymous').expect(200);
+    });
+
+    it('重新保存已发布（发布时间在过去）的文章：保留原发布时间', async () => {
+      const past = '2026-01-02T03:04:05.000Z';
+      await contents.update(scheduledId, { publishedAt: new Date(past) });
+      setNow(DUE);
+      await patch(`/contents/${scheduledId}`, 'admin', { status: 'published' }).expect(200);
+      expect((await contents.findOneByOrFail({ id: scheduledId })).publishedAt!.toISOString()).toBe(past);
+    });
   });
 
   describe('GET /contents/:id（后台编辑页）', () => {
