@@ -108,6 +108,19 @@ CACHE_TTL=300
 - 测试的内存夹具：spec 里 `TypeOrmModule` 直接配 `type: 'better-sqlite3'`，不经过 `DatabaseModule`；
 - `scripts/migrate-sqlite-to-mysql.js`：把早期的 SQLite 开发库迁到 MySQL。
 
+#### better-sqlite3 锁定在 12.9.0（不要改回 `^`）
+
+`backend/package.json` 里 `better-sqlite3` 故意写成精确版本 `"12.9.0"`（JSON 不能写注释，原因记在这里）：
+
+- 生产镜像基于 `node:20-alpine`，里面没有 python / make / g++，原生模块只能用预编译包。
+- better-sqlite3 从 12.10.0 起的 GitHub release 只提供 Node 22 及以上（ABI v127 起）的预编译包，没有 Node 20（v115）的；
+  npm 上的 `engines` 仍写着支持 20.x，npm 不会给出任何提示。
+- 写成 `^12.9.0` 的话，一次 `npm update` 就会抬到 12.10+：`docker build` 里 `prebuild-install` 找不到预编译包，
+  回落 node-gyp 源码编译，因为没有 Python 而失败。CI 跑在 ubuntu 上，有编译工具链，照样是绿的，问题要到部署时才暴露。
+- 解除条件：三个 Dockerfile 和 CI 都升到 Node 22 之后，才能放开锁定或升 13.x（13.x 要求 Node ≥ 22）。
+- 验证原生模块要用 `new (require('better-sqlite3'))(':memory:')`：它到 `new Database()` 时才加载 `.node` 文件，
+  只 `require('better-sqlite3')` 证明不了预编译包可用。
+
 ### 查看数据库
 
 ```bash
