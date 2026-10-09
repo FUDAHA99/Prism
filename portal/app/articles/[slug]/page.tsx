@@ -6,6 +6,7 @@ import dayjs from 'dayjs'
 import MarkdownView from '@/components/MarkdownView'
 import CommentSection from '@/components/CommentSection'
 import { getContentBySlug, getSiteConfig } from '@/lib/api'
+import { safeMediaSrc } from '@/lib/safe-url'
 
 export const revalidate = 30
 
@@ -35,6 +36,7 @@ export default async function ArticleDetailPage({ params }: Props) {
 
   const enableComment = config?.enableComment ?? true
   const needAudit = config?.commentAudit ?? true
+  const coverSrc = safeMediaSrc(article.featuredImageUrl)
 
   return (
     <article className="max-w-3xl mx-auto px-4 py-8">
@@ -93,10 +95,10 @@ export default async function ArticleDetailPage({ params }: Props) {
       </header>
 
       {/* 封面图 */}
-      {article.featuredImageUrl && (
+      {coverSrc && (
         // eslint-disable-next-line @next/next/no-img-element
         <img
-          src={article.featuredImageUrl}
+          src={coverSrc}
           alt={article.title}
           className="w-full max-h-[420px] object-cover rounded-lg mb-6 shadow-sm"
         />

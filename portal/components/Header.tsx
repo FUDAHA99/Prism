@@ -1,5 +1,6 @@
 import Link from 'next/link'
 import type { Category, SiteConfig } from '@/lib/types'
+import { safeMediaSrc } from '@/lib/safe-url'
 
 interface Props {
   config: SiteConfig
@@ -9,14 +10,15 @@ interface Props {
 export default function Header({ config, categories }: Props) {
   // 仅展示前 6 个顶级分类，避免菜单溢出
   const topCats = categories.filter((c) => !c.parentId).slice(0, 6)
+  const logoSrc = safeMediaSrc(config.logo)
 
   return (
     <header className="bg-white border-b border-gray-200 sticky top-0 z-50">
       <div className="max-w-6xl mx-auto px-4 h-16 flex items-center justify-between">
         <Link href="/" className="flex items-center gap-2">
-          {config.logo ? (
+          {logoSrc ? (
             // eslint-disable-next-line @next/next/no-img-element
-            <img src={config.logo} alt="logo" className="h-8 w-8 rounded" />
+            <img src={logoSrc} alt="logo" className="h-8 w-8 rounded" />
           ) : (
             <span className="h-8 w-8 rounded bg-brand-600 text-white flex items-center justify-center font-bold">
               {config.siteName.charAt(0)}

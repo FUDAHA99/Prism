@@ -1,15 +1,17 @@
 import Link from 'next/link'
 import dayjs from 'dayjs'
 import type { Content } from '@/lib/types'
+import { safeMediaSrc } from '@/lib/safe-url'
 
 export default function ArticleCard({ article }: { article: Content }) {
+  const coverSrc = safeMediaSrc(article.featuredImageUrl)
   return (
     <article className="bg-white rounded-lg shadow-sm hover:shadow-md transition p-5">
-      {article.featuredImageUrl && (
+      {coverSrc && (
         <Link href={`/articles/${article.slug}`}>
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
-            src={article.featuredImageUrl}
+            src={coverSrc}
             alt={article.title}
             className="w-full h-48 object-cover rounded mb-4"
           />

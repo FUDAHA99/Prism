@@ -7,6 +7,7 @@ import { getMovieBySlug, getMovies } from '@/lib/api'
 import PosterCard from '@/components/PosterCard'
 import ResumeButton from '@/components/ResumeButton'
 import { friendlySourceName, movieTypeLabel } from '@/lib/movie-utils'
+import { safeMediaSrc } from '@/lib/safe-url'
 
 interface Props {
   params: { slug: string }
@@ -30,6 +31,7 @@ export default async function MovieDetailPage({ params }: Props) {
     .then((r) => r.data.filter((x) => x.id !== movie.id).slice(0, 6))
     .catch(() => [])
 
+  const posterSrc = safeMediaSrc(movie.posterUrl)
   const sources = movie.sources ?? []
   const firstSource = sources[0]
   const firstEpisode = firstSource?.episodes?.[0]
@@ -40,10 +42,10 @@ export default async function MovieDetailPage({ params }: Props) {
       <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
         <div className="md:flex">
           <div className="md:w-64 md:shrink-0 bg-gray-100">
-            {movie.posterUrl ? (
+            {posterSrc ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
-                src={movie.posterUrl}
+                src={posterSrc}
                 alt={movie.title}
                 className="w-full h-full object-cover aspect-[3/4]"
               />

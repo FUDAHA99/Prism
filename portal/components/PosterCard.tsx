@@ -1,4 +1,5 @@
 import Link from 'next/link'
+import { safeMediaSrc } from '@/lib/safe-url'
 
 interface Props {
   href: string
@@ -18,6 +19,7 @@ export default function PosterCard({
   const titleCls = size === 'sm' ? 'text-sm' : 'text-base'
 
   const hasScore = score != null && Number(score) > 0
+  const posterSrc = safeMediaSrc(posterUrl)
 
   return (
     <Link
@@ -25,10 +27,10 @@ export default function PosterCard({
       className="group block rounded-lg overflow-hidden bg-gray-100 shadow-sm hover:shadow-lg transition"
     >
       <div className={`relative w-full ${aspect} bg-gray-200 overflow-hidden`}>
-        {posterUrl ? (
+        {posterSrc ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img
-            src={posterUrl}
+            src={posterSrc}
             alt={title}
             className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
             loading="lazy"

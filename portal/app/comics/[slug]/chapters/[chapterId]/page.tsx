@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import type { Metadata } from 'next'
 import { getComicBySlug, getComicChapters, getComicChapter } from '@/lib/api'
+import { safeMediaSrc } from '@/lib/safe-url'
 
 interface Props { params: { slug: string; chapterId: string } }
 
@@ -28,7 +29,8 @@ export default async function ComicChapterPage({ params }: Props) {
   const prev = idx > 0 ? chapters[idx - 1] : null
   const next = idx >= 0 && idx < chapters.length - 1 ? chapters[idx + 1] : null
 
-  const pages = chapter.pageUrls ?? []
+  // 页面图地址不合格的（非 http(s) / 站内路径）不渲染成 <img>，占位保留页序
+  const pages = (chapter.pageUrls ?? []).map((url) => safeMediaSrc(url))
 
   return (
     <div className="max-w-3xl mx-auto px-4 py-6">
@@ -49,14 +51,18 @@ export default async function ComicChapterPage({ params }: Props) {
         {pages.length > 0 ? (
           pages.map((url, i) => (
             <div key={i} className="comic-page-wrap">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={url}
-                alt={`${chapter.title} 第${i + 1}页`}
-                loading="lazy"
-                decoding="async"
-                className="w-full h-auto block"
-              />
+              {url ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={url}
+                  alt={`${chapter.title} 第${i + 1}页`}
+                  loading="lazy"
+                  decoding="async"
+                  className="w-full h-auto block"
+                />
+              ) : (
+                <div className="py-8 text-center text-gray-500 text-sm">第 {i + 1} 页图片地址无效</div>
+              )}
             </div>
           ))
         ) : (

@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
+import { safeExternalHref, safeMediaSrc } from '@/lib/safe-url'
 
 interface Props {
   src: string
@@ -17,6 +18,8 @@ interface Props {
  *  - .m3u8 用 hls.js 播放（不支持原生 HLS 的浏览器，主要是非 Safari）
  *  - Safari / iOS 直接 <video src=…m3u8>，原生支持
  *  - 其他扩展名走原生 video
+ *  - 地址只认 http(s) 与以 / 开头的（safeMediaSrc），其他协议直接显示「无法播放」、不交给 video / hls.js；
+ *    播放失败时的「用外部播放器打开」链接只在 http(s) 绝对地址时渲染（safeExternalHref）
  */
 export default function HlsPlayer({
   src,
@@ -31,15 +34,23 @@ export default function HlsPlayer({
   // 用 ref 存 callback，避免 effect 重跑
   const onTimeUpdateRef = useRef(onTimeUpdate)
   onTimeUpdateRef.current = onTimeUpdate
+  const playSrc = safeMediaSrc(src)
+  const externalHref = safeExternalHref(playSrc)
 
   useEffect(() => {
     const video = videoRef.current
-    if (!video || !src) return
+    if (!video) return
+    if (!playSrc) {
+      setError('播放地址无效')
+      setLoading(false)
+      return
+    }
+    const url = playSrc
 
     setError(null)
     setLoading(true)
 
-    const isHls = /\.m3u8(\?|$)/i.test(src)
+    const isHls = /\.m3u8(\?|$)/i.test(url)
     let hls: any = null
     let cancelled = false
 
@@ -73,7 +84,7 @@ export default function HlsPlayer({
         if (cancelled) return
         if (Hls.isSupported()) {
           hls = new Hls({ enableWorker: true, lowLatencyMode: false })
-          hls.loadSource(src)
+          hls.loadSource(url)
           hls.attachMedia(video)
           hls.on(Hls.Events.ERROR, (_evt: any, data: any) => {
             if (data.fatal) {
@@ -92,12 +103,12 @@ export default function HlsPlayer({
       })
     } else {
       // 原生支持
-      video.src = src
+      video.src = url
       if (autoPlay) video.play().catch(() => {})
     }
 
     return cleanup
-  }, [src, autoPlay, initialTime])
+  }, [playSrc, autoPlay, initialTime])
 
   return (
     <div className="relative w-full bg-black aspect-video rounded overflow-hidden">
@@ -105,7 +116,7 @@ export default function HlsPlayer({
         ref={videoRef}
         controls
         playsInline
-        poster={poster ?? undefined}
+        poster={safeMediaSrc(poster)}
         className="absolute inset-0 w-full h-full"
       />
       {loading && !error && (
@@ -117,10 +128,12 @@ export default function HlsPlayer({
         <div className="absolute inset-0 flex flex-col items-center justify-center text-white/90 text-sm bg-black/70 px-6 text-center">
           <div className="text-base font-semibold mb-1">⚠️ 无法播放</div>
           <div className="text-xs opacity-80 break-all">{error}</div>
-          <a href={src} target="_blank" rel="noreferrer"
-             className="mt-3 px-3 py-1 rounded bg-brand-600 hover:bg-brand-700 text-xs">
-            尝试用外部播放器打开
-          </a>
+          {externalHref && (
+            <a href={externalHref} target="_blank" rel="noopener noreferrer"
+               className="mt-3 px-3 py-1 rounded bg-brand-600 hover:bg-brand-700 text-xs">
+              尝试用外部播放器打开
+            </a>
+          )}
         </div>
       )}
     </div>

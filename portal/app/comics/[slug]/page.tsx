@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import type { Metadata } from 'next'
 import { getComicBySlug, getComicChapters } from '@/lib/api'
+import { safeMediaSrc } from '@/lib/safe-url'
 
 interface Props { params: { slug: string } }
 
@@ -18,14 +19,15 @@ export default async function ComicDetailPage({ params }: Props) {
   if (!comic) notFound()
 
   const chapters = await getComicChapters(comic.id)
+  const coverSrc = safeMediaSrc(comic.coverUrl)
 
   return (
     <div className="max-w-6xl mx-auto px-4 py-6">
       <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden md:flex">
         <div className="md:w-56 md:shrink-0 bg-gray-100">
-          {comic.coverUrl ? (
+          {coverSrc ? (
             // eslint-disable-next-line @next/next/no-img-element
-            <img src={comic.coverUrl} alt={comic.title}
+            <img src={coverSrc} alt={comic.title}
               className="w-full md:h-full object-cover aspect-[3/4]" />
           ) : (
             <div className="w-full aspect-[3/4] flex items-center justify-center text-gray-400">无封面</div>

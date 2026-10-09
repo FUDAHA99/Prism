@@ -3,16 +3,18 @@ import type { Metadata } from 'next'
 import Header from '@/components/Header'
 import Footer from '@/components/Footer'
 import { getCategories, getSiteConfig } from '@/lib/api'
+import { safeMediaSrc } from '@/lib/safe-url'
 
 export async function generateMetadata(): Promise<Metadata> {
   const config = await getSiteConfig().catch(() => null)
+  const favicon = safeMediaSrc(config?.favicon)
   return {
     title: {
       default: config?.siteName || 'Prism',
       template: `%s | ${config?.siteName || 'Prism'}`,
     },
     description: config?.description || '一个内容平台',
-    icons: config?.favicon ? [{ rel: 'icon', url: config.favicon }] : undefined,
+    icons: favicon ? [{ rel: 'icon', url: favicon }] : undefined,
   }
 }
 
