@@ -13,6 +13,7 @@ import { ApiOperation, ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { MenuService } from './menu.service';
 import { CreateMenuDto, UpdateMenuDto } from './dto/menu.dto';
 import { Access } from '../../common/authz/access.decorator';
+import { ParseLowercaseUuidPipe } from '../../common/pipes/parse-lowercase-uuid.pipe';
 
 @ApiTags('导航菜单')
 @ApiBearerAuth()
@@ -35,14 +36,14 @@ export class MenuController {
 
   @Patch(':id')
   @ApiOperation({ summary: '更新菜单项' })
-  async update(@Param('id') id: string, @Body() dto: UpdateMenuDto) {
+  async update(@Param('id', ParseLowercaseUuidPipe) id: string, @Body() dto: UpdateMenuDto) {
     return this.menuService.update(id, dto);
   }
 
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: '删除菜单项' })
-  async remove(@Param('id') id: string) {
+  async remove(@Param('id', ParseLowercaseUuidPipe) id: string) {
     await this.menuService.remove(id);
   }
 }

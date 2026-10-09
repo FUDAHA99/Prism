@@ -14,6 +14,7 @@ import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagg
 import { CategoryService } from './category.service';
 import { CreateCategoryDto, UpdateCategoryDto } from './dto/category.dto';
 import { Access } from '../../common/authz/access.decorator';
+import { ParseLowercaseUuidPipe } from '../../common/pipes/parse-lowercase-uuid.pipe';
 
 @ApiTags('分类管理')
 @Controller('categories')
@@ -33,7 +34,7 @@ export class CategoryController {
   @ApiOperation({ summary: '获取分类详情' })
   @ApiResponse({ status: 200, description: '获取成功' })
   @ApiResponse({ status: 404, description: '分类不存在' })
-  async findOne(@Param('id') id: string) {
+  async findOne(@Param('id', ParseLowercaseUuidPipe) id: string) {
     return this.categoryService.findOne(id);
   }
 
@@ -56,7 +57,7 @@ export class CategoryController {
   @ApiResponse({ status: 400, description: '参数不合法 / 父分类不存在或会形成环' })
   @ApiResponse({ status: 404, description: '分类不存在' })
   @ApiResponse({ status: 409, description: 'slug 已存在' })
-  async update(@Param('id') id: string, @Body() dto: UpdateCategoryDto) {
+  async update(@Param('id', ParseLowercaseUuidPipe) id: string, @Body() dto: UpdateCategoryDto) {
     return this.categoryService.update(id, dto);
   }
 
@@ -67,7 +68,7 @@ export class CategoryController {
   @ApiOperation({ summary: '删除分类' })
   @ApiResponse({ status: 204, description: '删除成功' })
   @ApiResponse({ status: 409, description: '存在子分类，无法删除' })
-  async remove(@Param('id') id: string) {
+  async remove(@Param('id', ParseLowercaseUuidPipe) id: string) {
     await this.categoryService.remove(id);
   }
 }

@@ -3,6 +3,7 @@ import { Transform } from 'class-transformer';
 import { IsBoolean, IsIn, IsInt, IsNotEmpty, IsOptional, IsString, IsUUID, Matches, Max, MaxLength, Min } from 'class-validator';
 import { CONTENT_IMAGE_URL_PATTERN } from '../../content/dto/create-content.dto';
 import { INT_MAX, INT_MIN, rawValue, unlessUndefined } from '../../movie/dto/movie-dto.helpers';
+import { toLowerUuid } from '../../../common/utils/uuid-case';
 import { MenuTarget } from '../entities/menu.entity';
 
 /**
@@ -51,7 +52,9 @@ export abstract class MenuOptionalFieldsDto {
   @IsBoolean()
   isActive?: boolean;
 
+  /** 转成小写再交给服务：成环检查在 JS 里比较 ID（区分大小写），库的排序规则却不区分（见 uuid-case） */
   @ApiPropertyOptional({ description: '父菜单 ID；null 表示顶级菜单', nullable: true })
+  @Transform(toLowerUuid)
   @IsOptional()
   @IsUUID('loose', { message: 'parentId 必须是菜单 ID' })
   parentId?: string | null;

@@ -8,6 +8,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Category } from './entities/category.entity';
 import { CreateCategoryDto, UpdateCategoryDto } from './dto/category.dto';
+import { lowerUuid } from '../../common/utils/uuid-case';
 
 /** 沿父链向上找环时最多走几层：分类树不会这么深，走到上限还没到顶说明库里已经有环，按出错处理 */
 const MAX_CATEGORY_DEPTH = 100;
@@ -43,7 +44,7 @@ export class CategoryService {
    */
   async create(dto: CreateCategoryDto): Promise<Category> {
     await this.assertSlugFree(dto.slug);
-    const parentId = dto.parentId ?? null;
+    const parentId = lowerUuid(dto.parentId) ?? null;
     if (parentId) {
       await this.assertParentUsable(parentId, null);
     }
@@ -66,14 +67,15 @@ export class CategoryService {
     if (dto.slug !== undefined) patch.slug = dto.slug;
     if (dto.description !== undefined) patch.description = dto.description;
     // null 表示改为顶级分类；此前 null 被 if (dto.parentId) 跳过检查后原样写入，'' 则写进 uuid 列
-    if (dto.parentId !== undefined) patch.parentId = dto.parentId;
+    if (dto.parentId !== undefined) patch.parentId = lowerUuid(dto.parentId);
     if (dto.sortOrder !== undefined) patch.sortOrder = dto.sortOrder ?? 0;
 
     if (patch.slug !== undefined && patch.slug !== current.slug) {
       await this.assertSlugFree(patch.slug, id);
     }
     if (patch.parentId) {
-      await this.assertParentUsable(patch.parentId, id);
+      // 自身 ID 取库里的写法，不取路径参数：路径里写成大写时（生产库照样能查到这一行）成环检查也不会被绕过
+      await this.assertParentUsable(patch.parentId, current.id);
     }
 
     if (Object.keys(patch).length > 0) {
@@ -103,7 +105,10 @@ export class CategoryService {
    * 父分类必须存在，且不能是自己或自己的子孙（否则形成环：门户导航、按父级取子分类都会死循环或丢数据）。
    * 沿 parentId 列向上走（实体上的 parent / children 关系映射的是另一列，这里不用它）。
    */
-  private async assertParentUsable(parentId: string, selfId: string | null): Promise<void> {
+  private async assertParentUsable(rawParentId: string, rawSelfId: string | null): Promise<void> {
+    // 一律按小写比较：库的排序规则不区分大小写，JS 的 === 区分（见 uuid-case）
+    const parentId = lowerUuid(rawParentId);
+    const selfId = lowerUuid(rawSelfId);
     if (selfId && parentId === selfId) {
       throw new BadRequestException('不能把分类设为自己的父分类');
     }
@@ -120,10 +125,10 @@ export class CategoryService {
         if (cursor === parentId) throw new BadRequestException('父分类不存在');
         return; // 祖先链上有已删除的分类：链到此为止，不构成环
       }
-      if (selfId && node.parentId === selfId) {
+      if (selfId && lowerUuid(node.parentId) === selfId) {
         throw new BadRequestException('不能把分类移到它自己的子分类下');
       }
-      cursor = node.parentId ?? null;
+      cursor = lowerUuid(node.parentId) ?? null;
     }
   }
 }

@@ -1,7 +1,9 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Transform } from 'class-transformer';
 import { IsByteLength, IsInt, IsNotEmpty, IsOptional, IsString, IsUUID, Matches, Max, MaxLength, Min } from 'class-validator';
 import { TEXT_COLUMN_MAX_BYTES } from '../../content/dto/create-content.dto';
 import { INT_MAX, INT_MIN, unlessUndefined } from '../../movie/dto/movie-dto.helpers';
+import { toLowerUuid } from '../../../common/utils/uuid-case';
 
 /** 与后台分类页的 Slug 校验一致（frontend/src/pages/Category/index.tsx）；门户分类页按它拼 /category/:slug */
 export const CATEGORY_SLUG_PATTERN = /^[a-z0-9-]+$/;
@@ -19,8 +21,12 @@ export abstract class CategoryOptionalFieldsDto {
   @IsByteLength(0, TEXT_COLUMN_MAX_BYTES, { message: '描述不能超过 65535 字节' })
   description?: string | null;
 
-  /** 'loose' 只校验 8-4-4-4-12 的十六进制格式，不挑 UUID 版本：库里的 ID 不一定都是 v4 */
+  /**
+   * 'loose' 只校验 8-4-4-4-12 的十六进制格式，不挑 UUID 版本：库里的 ID 不一定都是 v4。
+   * 转成小写再交给服务：成环检查在 JS 里比较 ID（区分大小写），库的排序规则却不区分（见 uuid-case）。
+   */
   @ApiPropertyOptional({ description: '父分类 ID；null 表示顶级分类', nullable: true })
+  @Transform(toLowerUuid)
   @IsOptional()
   @IsUUID('loose', { message: 'parentId 必须是分类 ID' })
   parentId?: string | null;

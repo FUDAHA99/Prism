@@ -177,6 +177,51 @@ describe('导航菜单接口 HTTP', () => {
       expect(res.body.message).toBe('不能把菜单移到它自己的子菜单下');
       expect((await repo.findOneByOrFail({ id: root.id })).parentId).toBeNull();
     });
+
+    it('大写的 ID：设自己为父 / 路径用大写把自己挂到子菜单下 → 400；合法的大写父菜单按小写存', async () => {
+      const root = await make('upper-root');
+      const child = await make('upper-child', root.id);
+      let res = await h.patch(`/menus/${root.id}`, 'admin', { parentId: root.id.toUpperCase() }).expect(400);
+      expect(res.body.message).toBe('不能把菜单设为自己的父菜单');
+      res = await h.patch(`/menus/${root.id.toUpperCase()}`, 'admin', { parentId: child.id }).expect(400);
+      expect(res.body.message).toBe('不能把菜单移到它自己的子菜单下');
+      expect((await repo.findOneByOrFail({ id: root.id })).parentId).toBeNull();
+
+      const created = await h.post('/menus', 'admin', createForm({ name: 'upper-new', parentId: child.id.toUpperCase() })).expect(201);
+      expect((await repo.findOneByOrFail({ id: created.body.data.id })).parentId).toBe(child.id);
+    });
+
+    it('路径里的 id 不是 UUID → 400', async () => {
+      for (const res of [
+        await h.patch('/menus/not-a-uuid', 'admin', { name: 'x' }).expect(400),
+        await h.del('/menus/123', 'admin').expect(400),
+      ]) {
+        expect(res.body.message).toBe('路径里的 id 必须是 UUID');
+      }
+    });
+
+    it('库的排序规则不区分大小写时（模拟生产 MySQL）：成环检查同样拦得住', async () => {
+      const rows = new Map<string, Menu>();
+      const put = (m: Partial<Menu>) => rows.set(m.id!.toLowerCase(), { ...m } as Menu);
+      const ci = {
+        findOne: async ({ where }: { where: { id: string } }) => {
+          const row = rows.get(String(where.id).toLowerCase());
+          return row ? { ...row } : null;
+        },
+        update: jest.fn(),
+      };
+      const ciService = new MenuService(ci as never);
+      const a = 'aaaaaaaa-0000-4000-8000-000000000001';
+      const b = 'bbbbbbbb-0000-4000-8000-000000000002';
+      put({ id: a, name: 'A', parentId: null });
+      put({ id: b, name: 'B', parentId: a });
+
+      await expect(ciService.update(a, { parentId: a.toUpperCase() })).rejects.toThrow('不能把菜单设为自己的父菜单');
+      await expect(ciService.update(a.toUpperCase(), { parentId: b })).rejects.toThrow('不能把菜单移到它自己的子菜单下');
+      put({ id: b, name: 'B', parentId: a.toUpperCase() });
+      await expect(ciService.update(a, { parentId: b })).rejects.toThrow('不能把菜单移到它自己的子菜单下');
+      expect(ci.update).not.toHaveBeenCalled();
+    });
   });
 
   it('仅 admin：editor / 无角色用户 403、游客 401', async () => {

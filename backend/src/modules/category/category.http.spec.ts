@@ -201,6 +201,60 @@ describe('分类接口 HTTP', () => {
       await h.patch(`/categories/${b.id}`, 'admin', { parentId: a.id }).expect(200);
       expect((await repo.findOneByOrFail({ id: b.id })).parentId).toBe(a.id);
     });
+
+    it('大写的 ID：设自己为父 / 路径用大写把自己挂到子分类下 → 400；合法的大写父分类按小写存', async () => {
+      const root = await make('upper-root');
+      const child = await make('upper-child', root.id);
+      // 生产库（utf8mb4_unicode_ci）把大写的自己当成同一行；此前 JS 的 === 认为不是自己，检查被绕过、形成自环
+      let res = await h.patch(`/categories/${root.id}`, 'admin', { parentId: root.id.toUpperCase() }).expect(400);
+      expect(res.body.message).toBe('不能把分类设为自己的父分类');
+      // 路径里的大写 ID 被转成小写，成环检查用的是库里的写法
+      res = await h.patch(`/categories/${root.id.toUpperCase()}`, 'admin', { parentId: child.id }).expect(400);
+      expect(res.body.message).toBe('不能把分类移到它自己的子分类下');
+      expect((await repo.findOneByOrFail({ id: root.id })).parentId).toBeNull();
+
+      const created = await h.post('/categories', 'admin', createForm('upper-new', { parentId: child.id.toUpperCase() })).expect(201);
+      expect((await repo.findOneByOrFail({ id: created.body.data.id })).parentId).toBe(child.id);
+      await h.patch(`/categories/${created.body.data.id.toUpperCase()}`, 'admin', { parentId: root.id.toUpperCase() }).expect(200);
+      expect((await repo.findOneByOrFail({ id: created.body.data.id })).parentId).toBe(root.id);
+    });
+
+    it.each<[string, () => unknown]>([
+      ['GET', () => h.get('/categories/not-a-uuid', 'anonymous')],
+      ['PATCH', () => h.patch('/categories/not-a-uuid', 'admin', { name: 'x' })],
+      ['DELETE', () => h.del('/categories/123', 'admin')],
+    ])('%s 路径里的 id 不是 UUID → 400', async (_method, call) => {
+      const res = await (call() as ReturnType<HttpHarness['get']>).expect(400);
+      expect(res.body.message).toBe('路径里的 id 必须是 UUID');
+    });
+
+    it('库的排序规则不区分大小写时（模拟生产 MySQL）：成环检查同样拦得住', async () => {
+      // 只按小写键查找的内存仓库：与 utf8mb4_unicode_ci 下 WHERE id = '大写' 命中小写行的行为一致
+      const rows = new Map<string, Category>();
+      const put = (c: Partial<Category>) => rows.set(c.id!.toLowerCase(), { ...c } as Category);
+      const ci = {
+        findOne: async ({ where }: { where: { id?: string; slug?: string } }) => {
+          if (where.id !== undefined) {
+            const row = rows.get(String(where.id).toLowerCase());
+            return row ? { ...row, children: [] } : null;
+          }
+          return null;
+        },
+        update: jest.fn(),
+      };
+      const ciService = new CategoryService(ci as never);
+      const a = 'aaaaaaaa-0000-4000-8000-000000000001';
+      const b = 'bbbbbbbb-0000-4000-8000-000000000002';
+      put({ id: a, name: 'A', slug: 'a', parentId: null });
+      put({ id: b, name: 'B', slug: 'b', parentId: a });
+
+      await expect(ciService.update(a, { parentId: a.toUpperCase() })).rejects.toThrow('不能把分类设为自己的父分类');
+      await expect(ciService.update(a.toUpperCase(), { parentId: b })).rejects.toThrow('不能把分类移到它自己的子分类下');
+      // 库里存的是大写父 ID（历史数据）时，沿父链比较同样按小写
+      put({ id: b, name: 'B', slug: 'b', parentId: a.toUpperCase() });
+      await expect(ciService.update(a, { parentId: b })).rejects.toThrow('不能把分类移到它自己的子分类下');
+      expect(ci.update).not.toHaveBeenCalled();
+    });
   });
 
   describe('访问控制与公开读', () => {
