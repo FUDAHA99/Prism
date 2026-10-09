@@ -363,7 +363,8 @@ export class UserService {
     roleIds: string[],
     currentUserId?: string,
   ): Promise<SafeUser> {
-    await this.findOne(id);
+    // 之后一律用库里的 id（大小写规范的那份）：缓存键、写 user_roles 都不受调用方大小写影响
+    id = (await this.findOne(id)).id;
     await this.roleService.assignRolesToUser(id, roleIds);
     await this.clearUserCache(id);
 
@@ -385,7 +386,8 @@ export class UserService {
     roleIds: string[],
     currentUserId?: string,
   ): Promise<SafeUser> {
-    await this.findOne(id);
+    // 自我保护按库里的 id 比较：路径里的大写 id 在 unicode_ci 下查到的是同一个人（复审 low）
+    id = (await this.findOne(id)).id;
 
     // 角色变更即时生效：管理员给自己去掉 admin，下一个请求起就进不了任何管理接口，
     // 而能把 admin 加回来的只有管理员自己。与「不能删除 / 禁用自己」同理，拒绝自我降权

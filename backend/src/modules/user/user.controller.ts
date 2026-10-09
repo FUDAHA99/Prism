@@ -23,6 +23,9 @@ import { UserRoleIdsDto } from './dto/user-role-ids.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthUser } from '../auth/interfaces/auth.interface';
 import { Access } from '../../common/authz/access.decorator';
+// :id 统一校验并转小写：库是 utf8mb4_unicode_ci，大写 id 能查到同一个用户，
+// 而「不能移除自己的管理员角色」等自我保护按字符串比较 currentUser.id，大写即可绕过
+import { ParseLowercaseUuidPipe } from '../../common/pipes/parse-lowercase-uuid.pipe';
 
 @ApiTags('用户管理')
 @Access('admin')
@@ -57,7 +60,7 @@ export class UserController {
   @ApiOperation({ summary: '获取用户详情' })
   @ApiResponse({ status: 200, description: '获取成功' })
   @ApiResponse({ status: 404, description: '用户不存在' })
-  async findOne(@Param('id') id: string) {
+  async findOne(@Param('id', ParseLowercaseUuidPipe) id: string) {
     return this.userService.findOne(id);
   }
 
@@ -67,7 +70,7 @@ export class UserController {
   @ApiResponse({ status: 404, description: '用户不存在' })
   @ApiResponse({ status: 409, description: '邮箱或用户名冲突' })
   async update(
-    @Param('id') id: string,
+    @Param('id', ParseLowercaseUuidPipe) id: string,
     @Body() updateUserDto: UpdateUserDto,
     @CurrentUser() currentUser: AuthUser,
   ) {
@@ -81,7 +84,7 @@ export class UserController {
   @ApiResponse({ status: 404, description: '用户不存在' })
   @ApiResponse({ status: 400, description: '不能删除自己的账户' })
   async remove(
-    @Param('id') id: string,
+    @Param('id', ParseLowercaseUuidPipe) id: string,
     @CurrentUser() currentUser: AuthUser,
   ) {
     await this.userService.remove(id, currentUser.id);
@@ -93,7 +96,7 @@ export class UserController {
   @ApiResponse({ status: 404, description: '用户不存在' })
   @ApiResponse({ status: 400, description: '不能禁用自己的账户 / isActive 不是布尔' })
   async toggleStatus(
-    @Param('id') id: string,
+    @Param('id', ParseLowercaseUuidPipe) id: string,
     @Body() dto: UpdateUserStatusDto,
     @CurrentUser() currentUser: AuthUser,
   ) {
@@ -106,7 +109,7 @@ export class UserController {
   @ApiResponse({ status: 400, description: 'roleIds 校验失败' })
   @ApiResponse({ status: 404, description: '用户或部分角色不存在' })
   async assignRoles(
-    @Param('id') id: string,
+    @Param('id', ParseLowercaseUuidPipe) id: string,
     @Body() dto: UserRoleIdsDto,
     @CurrentUser() currentUser: AuthUser,
   ) {
@@ -119,7 +122,7 @@ export class UserController {
   @ApiResponse({ status: 400, description: 'roleIds 校验失败，或移除自己的管理员角色' })
   @ApiResponse({ status: 404, description: '用户不存在' })
   async removeRoles(
-    @Param('id') id: string,
+    @Param('id', ParseLowercaseUuidPipe) id: string,
     @Body() dto: UserRoleIdsDto,
     @CurrentUser() currentUser: AuthUser,
   ) {

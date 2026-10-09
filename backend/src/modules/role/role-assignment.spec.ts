@@ -230,6 +230,16 @@ describe('角色分配：MySQL 安全 SQL、前后端路由一致、改角色立
       await asAdmin(http().get('/users')).expect(200);
     });
 
+    it('路径里写成大写的自己的 id 同样拒绝（MySQL unicode_ci 下大写 id 查到的是同一个人）', async () => {
+      const res = await removeRoles(adminId.toUpperCase(), [adminRole.id]).expect(400);
+      expect(res.body.message).toBe('不能移除自己的管理员角色');
+      await asAdmin(http().get('/users')).expect(200);
+    });
+
+    it('非 UUID 的 :id → 400', async () => {
+      await asAdmin(http().get('/users/not-a-uuid')).expect(400);
+    });
+
     it('非 admin（editor）不能分配角色', async () => {
       await assign(otherId, [editorRole.id]).expect(201);
       await asOther(http().post(`/users/${otherId}/assign-roles`)).send({ roleIds: [adminRole.id] }).expect(403);
