@@ -250,7 +250,7 @@ message.success('ok')
 
 | 模块 | 路径前缀 | 说明 |
 |------|----------|------|
-| AuthModule | `/auth` | 登录、注册、Token 刷新、登出、改密 |
+| AuthModule | `/auth` | 登录、注册、Token 刷新、登出、改密、本人资料（`GET` / `PATCH /auth/me`） |
 | ContentModule | `/contents` | 内容 CRUD、发布、搜索、分页 |
 | CategoryModule | `/categories` | 分类 CRUD、树形结构 |
 | TagModule | `/tags` | 标签 CRUD |

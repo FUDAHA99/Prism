@@ -6,6 +6,7 @@ import { CreateCommentDto, COMMENT_GUEST_NAME_MAX } from './dto/create-comment.d
 import { QueryCommentDto } from './dto/query-comment.dto';
 import { Content, ContentStatus } from '../content/entities/content.entity';
 import { User } from '../user/entities/user.entity';
+import { isDisplayNameTaken, normalizeDisplayName } from '../user/display-name';
 import { SiteSettingService } from '../site-setting/site-setting.service';
 import { Viewer } from '../../common/authz/viewer';
 import { publishedDue } from '../../common/authz/publish-window';
@@ -86,14 +87,10 @@ function truncateChars(value: string, max: number): string {
 export const GUEST_NAME_TAKEN_MESSAGE = '这个昵称已被注册用户使用，请换一个昵称';
 
 /**
- * 游客昵称规范化：NFKC（全角、兼容字符折叠成常规写法），去掉不可见的格式 / 可忽略字符，再 trim。
- * utf8mb4_unicode_ci 并不忽略零宽字符、双向控制符、韩文填充符、盲文空格等，夹带它们的名字
- * 显示起来与注册用户一模一样，却能通过「与注册用户重名」检查（1-F-2 复审 low）。存库的也是规范化后的值。
+ * 游客昵称规范化：与注册用户的昵称同一个规范化（user/display-name.ts）—— NFKC、去掉不可见的格式 / 可忽略字符、
+ * trim。夹带零宽字符、双向控制符的名字显示起来与注册用户一模一样，规范化之后才做重名检查（1-F-2 复审 low）。
  */
-const INVISIBLE_IN_NAMES = /[\p{Cf}\p{Default_Ignorable_Code_Point}ᅟᅠㅤﾠ⠀]/gu;
-export function normalizeGuestName(raw: string): string {
-  return raw.normalize('NFKC').replace(INVISIBLE_IN_NAMES, '').trim();
-}
+export const normalizeGuestName = normalizeDisplayName;
 
 /** 公开视图：逐字段构造，不出 guestEmail / ipAddress / userId（userId 只用来算 isRegistered） */
 function toPublicComment(c: Comment): PublicComment {
@@ -301,12 +298,9 @@ export class CommentService {
   private async guestNameOf(raw: string | null | undefined): Promise<string | undefined> {
     const name = typeof raw === 'string' ? normalizeGuestName(raw) : '';
     if (!name) return undefined;
-    const taken = await this.userRepository
-      .createQueryBuilder('user')
-      .select('user.id')
-      .where('(user.username = :name OR user.nickname = :name)', { name })
-      .getExists();
-    if (taken) throw new BadRequestException(GUEST_NAME_TAKEN_MESSAGE);
+    if (await isDisplayNameTaken(this.userRepository, name)) {
+      throw new BadRequestException(GUEST_NAME_TAKEN_MESSAGE);
+    }
     return truncateChars(name, COMMENT_GUEST_NAME_MAX);
   }
 

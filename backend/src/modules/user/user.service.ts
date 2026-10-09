@@ -22,9 +22,24 @@ import { AuthIdentity, SafeUser, toSafeUser } from './user-fields';
 import { clearChangePasswordFailures, revokeAllSessions } from '../auth/login-attempts';
 import { ADMIN_ROLES } from '../../common/authz/access.decorator';
 import { userCacheKey } from './user-cache';
+import {
+  NICKNAME_TAKEN_MESSAGE,
+  USERNAME_TAKEN_AS_NICKNAME_MESSAGE,
+  isDisplayNameTaken,
+} from './display-name';
+import { UpdateProfileDto } from '../auth/dto/update-profile.dto';
 
 /** USER_UPDATE 审计允许记录值的字段（资料类，不含任何凭据） */
 const USER_AUDIT_FIELDS = ['username', 'email', 'nickname', 'avatarUrl', 'isActive'] as const;
+
+/** 本人修改资料（PATCH /auth/me）能改、审计能记录的字段 */
+const PROFILE_FIELDS = ['nickname', 'avatarUrl'] as const;
+
+/** 审计里的来源信息（本人修改资料时取自请求；后台接口沿用 'system'） */
+export interface RequestInfo {
+  ip?: string | null;
+  userAgent?: string | null;
+}
 
 @Injectable()
 export class UserService {
@@ -50,6 +65,12 @@ export class UserService {
     const existingUsername = await this.findByUsername(username);
     if (existingUsername) {
       throw new ConflictException('该用户名已被使用');
+    }
+
+    // 显示名一个名字只属于一个账号（见 display-name.ts）：没有昵称时门户显示用户名，所以用户名也不能是别人的昵称
+    await this.assertNameAvailable(username, USERNAME_TAKEN_AS_NICKNAME_MESSAGE);
+    if (typeof createUserDto.nickname === 'string') {
+      await this.assertNameAvailable(createUserDto.nickname, NICKNAME_TAKEN_MESSAGE);
     }
 
     const passwordHash = await this.hashPassword(createUserDto.password);
@@ -261,6 +282,16 @@ export class UserService {
       if (existingUsername && existingUsername.id !== id) {
         throw new ConflictException('该用户名已被其他用户使用');
       }
+      await this.assertNameAvailable(updateUserDto.username, USERNAME_TAKEN_AS_NICKNAME_MESSAGE, user.id);
+    }
+
+    // 只在昵称真的改了时查重：后台编辑弹窗每次都原样回传昵称，存量数据里已有的重名不能挡住改邮箱、改状态。
+    // 与库里的当前值比（不用上面 findOne 的 5 分钟缓存：缓存里的旧昵称会让没改的提交被当成改了）
+    if (typeof updateUserDto.nickname === 'string') {
+      const stored = await this.userRepository.findOne({ select: { id: true, nickname: true }, where: { id: user.id } });
+      if (updateUserDto.nickname !== stored?.nickname) {
+        await this.assertNameAvailable(updateUserDto.nickname, NICKNAME_TAKEN_MESSAGE, user.id);
+      }
     }
 
     // username / email / isActive 是 NOT NULL 列：只认真正的字符串 / 布尔（null 视为不改）；nickname / avatarUrl 可以清空
@@ -303,6 +334,49 @@ export class UserService {
     });
 
     return this.findOne(id);
+  }
+
+  /**
+   * 本人修改资料（PATCH /auth/me，任意已登录用户）：只写昵称与头像 —— UpdateProfileDto 之外的字段（邮箱、
+   * 用户名、角色、启用状态、密码）在 ValidationPipe 就被 400 挡下，这里也只从 dto 里取这两个字段。
+   * 昵称与后台编辑同一条查重规则（不能与其他账号的用户名或昵称相同，按库的排序规则比较），只在真的改了时查。
+   *
+   * 读库取当前值（不读 user:<id> 缓存），写完清缓存；审计记 USER_UPDATE（操作人与被改的是同一人），
+   * 只记真正变了的字段。
+   */
+  async updateProfile(id: string, dto: UpdateProfileDto, requestInfo: RequestInfo = {}): Promise<void> {
+    const user = await this.userRepository.findOne({ where: { id, deletedAt: IsNull() } });
+    if (!user) {
+      throw new NotFoundException('用户不存在');
+    }
+
+    if (typeof dto.nickname === 'string' && dto.nickname !== user.nickname) {
+      await this.assertNameAvailable(dto.nickname, NICKNAME_TAKEN_MESSAGE, user.id);
+    }
+
+    const patch: Partial<User> = {};
+    if (dto.nickname !== undefined) patch.nickname = dto.nickname;
+    if (dto.avatarUrl !== undefined) patch.avatarUrl = dto.avatarUrl;
+    const changed = changedAuditFields(user, patch, PROFILE_FIELDS);
+    if (changed.length === 0) {
+      return;
+    }
+
+    const updateData: Partial<User> = {};
+    for (const field of changed) updateData[field] = patch[field];
+    await this.userRepository.update(user.id, updateData);
+    await this.clearUserCache(user.id);
+
+    await this.auditService.log({
+      userId: user.id,
+      action: 'USER_UPDATE',
+      resourceType: 'user',
+      resourceId: user.id,
+      ipAddress: requestInfo.ip ?? 'unknown',
+      userAgent: requestInfo.userAgent ?? 'unknown',
+      oldValues: pickAuditFields(user, changed),
+      newValues: { ...pickAuditFields(updateData, changed), via: 'profile' },
+    });
   }
 
   async remove(id: string, currentUserId?: string): Promise<void> {
@@ -412,6 +486,13 @@ export class UserService {
     });
 
     return this.findOne(id);
+  }
+
+  /** name 已被其他未删除账号用作用户名或昵称时 409（exceptUserId 为本人时自己的名字不算冲突） */
+  private async assertNameAvailable(name: string, message: string, exceptUserId?: string): Promise<void> {
+    if (await isDisplayNameTaken(this.userRepository, name, exceptUserId)) {
+      throw new ConflictException(message);
+    }
   }
 
   private async hashPassword(password: string): Promise<string> {

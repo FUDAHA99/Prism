@@ -41,6 +41,7 @@ import { AuthIdentity, SafeUser, toSafeUser } from '../user/user-fields';
 import { User } from '../user/entities/user.entity';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
+import { UpdateProfileDto } from './dto/update-profile.dto';
 import {
   JwtPayload,
   AuthTokens,
@@ -193,6 +194,23 @@ export class AuthService {
       },
       tokens,
     };
+  }
+
+  /**
+   * 本人修改资料（PATCH /auth/me）：只改昵称与头像（规则见 UserService.updateProfile），
+   * 返回与 GET /auth/me 同形状的当前用户（直接查库，角色与权限码也是库里的当前值），后台据此刷新登录态里的资料。
+   */
+  async updateProfile(
+    userId: string,
+    dto: UpdateProfileDto,
+    requestInfo: LoginAttemptData,
+  ): Promise<AuthIdentity> {
+    await this.userService.updateProfile(userId, dto, requestInfo);
+    const user = await this.findActiveUser(userId);
+    if (!user) {
+      throw new UnauthorizedException('用户不存在或已被禁用');
+    }
+    return user;
   }
 
   /**

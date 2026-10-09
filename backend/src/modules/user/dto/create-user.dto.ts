@@ -10,6 +10,7 @@ import { ApiProperty } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import { IsAccountEmail } from '../../auth/dto/account-email.decorator';
 import { rawValue } from '../../movie/dto/movie-dto.helpers';
+import { nicknameCreateInput } from '../display-name';
 
 /** 用户名：字母、数字、下划线、连字符；入库前去空白并转小写（新建与编辑同一规则） */
 export const USERNAME_PATTERN = /^[a-zA-Z0-9_-]+$/;
@@ -55,11 +56,16 @@ export class CreateUserDto {
   @IsString({ message: '密码必须是字符串' })
   password: string;
 
+  /**
+   * 先规范化（NFKC、去不可见字符、trim，见 user/display-name.ts）再校验长度；
+   * 不能与其他账号的用户名或昵称相同（UserService.create，409）
+   */
   @ApiProperty({
     example: '管理员',
-    description: '用户昵称',
+    description: '用户昵称（2–100 个字符；不能与其他用户的用户名或昵称相同）',
     required: false,
   })
+  @Transform(nicknameCreateInput)
   @IsString({ message: '昵称必须是字符串' })
   @MinLength(2, { message: '昵称长度不能少于2个字符' })
   @MaxLength(100, { message: '昵称长度不能超过100个字符' })

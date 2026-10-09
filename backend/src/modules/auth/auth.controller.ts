@@ -6,6 +6,7 @@ import {
   HttpCode,
   HttpStatus,
   Get,
+  Patch,
   UseInterceptors,
   ClassSerializerInterceptor,
 } from '@nestjs/common';
@@ -17,6 +18,7 @@ import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { LogoutDto, RefreshTokenDto } from './dto/refresh-token.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
+import { UpdateProfileDto } from './dto/update-profile.dto';
 import { LoginResponse, AuthUser } from './interfaces/auth.interface';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Access } from '../../common/authz/access.decorator';
@@ -206,6 +208,29 @@ export class AuthController {
     @CurrentUser() user: AuthUser,
   ): Promise<AuthUser> {
     return user;
+  }
+
+  @Patch('me')
+  @Access('authenticated')
+  @ApiBearerAuth()
+  @ApiOperation({ summary: '修改本人资料（只能改昵称与头像）' })
+  @ApiResponse({ status: 200, description: '修改成功，返回当前用户（与 GET /auth/me 同形状）' })
+  @ApiResponse({
+    status: 400,
+    description: '昵称 / 头像不合法，或请求体带了其他字段（邮箱、用户名、角色、启用状态、密码都不能经此修改）',
+  })
+  @ApiResponse({ status: 401, description: '未授权' })
+  @ApiResponse({ status: 409, description: '昵称与其他用户的用户名或昵称相同' })
+  async updateProfile(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: UpdateProfileDto,
+    @Request() req: any,
+  ): Promise<AuthUser> {
+    // 只认登录身份里的 id（JwtStrategy 从库里加载），请求体里没有、也不能有 id
+    return this.authService.updateProfile(user.id, dto, {
+      ip: clientIp(req),
+      userAgent: req.headers['user-agent'],
+    });
   }
 
   @Post('change-password')

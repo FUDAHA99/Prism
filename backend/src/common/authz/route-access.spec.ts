@@ -62,6 +62,8 @@ const MATRIX: Record<string, AccessLevel> = {
   'POST /api/v1/auth/login': 'public',
   'POST /api/v1/auth/logout': 'authenticated',
   'GET /api/v1/auth/me': 'authenticated',
+  // 1-F-3 新增：本人修改资料（只收昵称 / 头像），admin 与 editor 的「个人设置」都用它（此前调 PATCH /users/:id，editor 403）
+  'PATCH /api/v1/auth/me': 'authenticated',
   'POST /api/v1/auth/refresh': 'public',
   'POST /api/v1/auth/register': 'public',
   // CategoryController

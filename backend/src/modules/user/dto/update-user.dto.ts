@@ -4,8 +4,9 @@ import { IsBoolean, IsOptional, IsString, Matches, MaxLength, MinLength } from '
 import { IsAccountEmail } from '../../auth/dto/account-email.decorator';
 import { rawValue, unlessUndefined } from '../../movie/dto/movie-dto.helpers';
 import { normalizeUsername, USERNAME_PATTERN } from './create-user.dto';
+import { nicknameUpdateInput } from '../display-name';
 
-/** 空串（含纯空白）按「清空」处理：后台编辑弹窗把没有昵称的账号回填成 ''，原样提交时不能因为「少于 2 个字符」被拒 */
+/** 空串（含纯空白）按「清空」处理：后台编辑弹窗把没有头像的账号回填成 ''（昵称同理，见 nicknameUpdateInput） */
 const emptyToNull = ({ value }: { value: unknown }): unknown =>
   typeof value === 'string' && value.trim() === '' ? null : value;
 
@@ -34,8 +35,12 @@ export class UpdateUserDto {
   @IsAccountEmail()
   email?: string | null;
 
-  @ApiPropertyOptional({ description: '昵称，2–100 个字符；null 或空串表示清空', nullable: true })
-  @Transform(emptyToNull)
+  /** 先规范化（见 user/display-name.ts），规范化后为空按清空处理；改了的昵称不能与其他账号的用户名或昵称相同（409） */
+  @ApiPropertyOptional({
+    description: '昵称，2–100 个字符；null 或空串表示清空；不能与其他用户的用户名或昵称相同',
+    nullable: true,
+  })
+  @Transform(nicknameUpdateInput)
   @IsOptional()
   @IsString({ message: '昵称必须是字符串' })
   @MinLength(2, { message: '昵称长度不能少于2个字符' })

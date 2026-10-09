@@ -1,6 +1,8 @@
 import { IsString, MinLength, MaxLength, Matches } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
+import { Transform } from 'class-transformer';
 import { IsAccountEmail } from './account-email.decorator';
+import { nicknameCreateInput } from '../../user/display-name';
 
 export class RegisterDto {
   @ApiProperty({
@@ -42,11 +44,13 @@ export class RegisterDto {
   })
   password: string;
 
+  /** 与后台新建用户同一条规则：先规范化再校验；不能与其他账号的用户名或昵称相同（409，见 user/display-name.ts） */
   @ApiProperty({
-    example: '管理员',
-    description: '用户昵称',
+    example: '新用户',
+    description: '用户昵称（不能与其他用户的用户名或昵称相同）',
     required: false,
   })
+  @Transform(nicknameCreateInput)
   @IsString({ message: '昵称必须是字符串' })
   @MinLength(2, { message: '昵称长度不能少于2个字符' })
   @MaxLength(100, { message: '昵称长度不能超过100个字符' })
