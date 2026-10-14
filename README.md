@@ -72,7 +72,9 @@ prism-cms/
 
 ### 方式一：本地开发
 
-**前置条件**：Node.js 20.x、Docker（用于 MySQL + Redis）
+**前置条件**：Node.js 22.x（根目录 `.nvmrc`）、Docker（用于 MySQL + Redis）
+
+切换 Node 主版本后，请在三端各执行一次 `npm ci --registry=https://registry.npmjs.org`，重新安装原生模块。
 
 ```bash
 # 1. 启动数据库

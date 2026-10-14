@@ -115,7 +115,7 @@
     {
       "id": "GHSA-p293-qw3h-jr36",
       "package": "next",
-      "reason": "需 Next 16（14.x 已停止回溯，没有 14.x 修复版；第七节 #2）；只影响跑在 Windows 主机上的服务，生产是 node:20-alpine（Linux）容器。注意本地在 Windows 上跑 next dev / next start 时受影响，不要把端口暴露到局域网",
+      "reason": "需 Next 16（14.x 已停止回溯，没有 14.x 修复版；第七节 #2）；只影响跑在 Windows 主机上的服务，生产是 node:22-alpine（Linux）容器。注意本地在 Windows 上跑 next dev / next start 时受影响，不要把端口暴露到局域网",
       "expires": "2027-01-09"
     },
     {

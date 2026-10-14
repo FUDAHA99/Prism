@@ -130,7 +130,7 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      # node:20-alpine 没有 wget/curl，用 Node.js 内置 http 模块探活
+      # 用 Node.js 内置 http 模块探活，避免依赖额外的 wget/curl
       # 任何 HTTP 响应（含 404）都说明服务已起来
       test: ["CMD", "node", "-e",
              "require('http').get('http://localhost:3001/api/v1',

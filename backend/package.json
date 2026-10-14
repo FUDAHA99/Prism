@@ -4,6 +4,9 @@
   "description": "CMS内容管理系统后端",
   "author": "Your Team",
   "private": true,
+  "engines": {
+    "node": "22.x"
+  },
   "license": "MIT",
   "scripts": {
     "build": "nest build",
@@ -32,7 +35,7 @@
     "@nestjs/throttler": "^5.0.0",
     "@nestjs/typeorm": "^11.0.1",
     "bcrypt": "^6.0.0",
-    "better-sqlite3": "12.9.0",
+    "better-sqlite3": "^12.9.0",
     "cache-manager": "^7.2.8",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.0",

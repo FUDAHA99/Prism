@@ -293,13 +293,13 @@ typeorm 升级后 `DB_SYNC=true` 启动 0 条 DDL；隔离 Docker 端到端（�
 - portal 23 条：next 14，需 Next 16；`GHSA-p293` 只影响 Windows 主机，`GHSA-2xp9` 已由关闭图片优化器 + nginx 屏蔽缓解。
 
 **已知 / 后续**：
-- `better-sqlite3` 锁在 12.9.0 由 `build-packaging.spec.ts` 守着（镜像仍是 node:20 时改回 `^` 会让 CI 变红）；升 Node 22 后解除。
+- `better-sqlite3` 的 Node 20 精确版本约束已随下方 Node 22 升级解除；约束为 `^12.9.0`，lock 实际版本仍是 12.9.0。
 - **后台 Markdown 预览会渲染原始 HTML 且未净化**（存量问题）：已于 2026-10-13 在本地修复并验证，见下方「Markdown 预览净化」。
 - **上传的文件从未写入磁盘**（存量问题，媒体功能实际不可用）：已于 2026-10-13 在本地修复，见下方「上传文件落盘」。
 - 开发依赖里的 js-yaml 因去重回落到 4.1.0（只影响本地 eslint 读配置）；例外清单暂不记录登记时的严重级别（公告被上调时不会提醒）；后台 favicon 404。
 
-**Node 22**（第七节 #4）：Node 20 已于 2026-04-30 停止维护；三端已在 `node:22-alpine` 上实测通过，作为下一个独立 PR，
-完成后才能解除 better-sqlite3 锁定、升 vitest 4 / vite 6。
+**Node 22**（第七节 #4）：已于 2026-10-13 在本地统一 Docker / CI / 版本声明，并重新验证；见下方「Node 22 升级」。
+Vitest / Vite 等框架工具版本升级仍为后续独立任务。
 
 **其他已记录、未排期**：JSON 请求体 100kb 上限导致超长章节无法保存（413）；`prism_nginx_logs` 卷里只有指向
 stdout 的符号链接，实际不持久化日志；helmet 与 nginx 安全头重复、nginx 的 Referrer-Policy 覆盖了 helmet 的
@@ -350,6 +350,42 @@ stdout 的符号链接，实际不持久化日志；helmet 与 nginx 安全头�
 - **边界**：本机 Docker 未运行，未做生产 MySQL、Docker 卷或部署验收。此前只入库的上传没有可恢复的字节，需要重新上传；
   删除不会修改正文中的引用，也不能立即撤回浏览器等 HTTP 缓存中的副本。本轮未新增运行时依赖。
 - **状态**：本地修改与上述验证完成，未提交 / 推送 / 部署；下一项为 Node 22 升级，同时跟踪测试进程异常退出。
+
+### 后续维护：Node 22 升级 —— 本地完成 ✅（2026-10-13）
+
+- **改动**：三个 Dockerfile 的六个 Node 阶段统一为 `node:22-alpine`；根目录新增 `.nvmrc`（22），
+  两个 GitHub Actions workflow 从该文件读取版本，审计 workflow 的触发路径包含它；三端 package 与 lock 根节点声明 `engines.node: 22.x`。
+  旧的 Node 20 条件锁定测试改为跨三端镜像、本地声明与两个 workflow 的版本一致性门禁。
+- **依赖范围**：`better-sqlite3` 约束从精确 12.9.0 恢复为 `^12.9.0`，lock 实际版本、下载地址和完整性值保持不变。
+  本轮没有升级任何依赖实际版本，`@types/node` 仍为 20；没有引入 Node 22 专属 API，也没有同时升级 Next / Nest / Vite / Vitest。
+- **Windows 验证**：从 Node 官方下载便携版 **22.23.3 / npm 10.9.9**，ZIP 的 SHA-256 与官方校验表一致；
+  隔离复制当前工作树源码后执行干净 `npm ci`，真实 SQLite 内存查询与 bcrypt 正误密码校验、后端构建均通过。
+  完整单进程 `jest --runInBand` **66 个套件 / 3,166 个用例通过，126.71 秒**（版本门禁替换后比上轮增加 5 项）。
+  本轮没有复现 Node 24 下的 `0xC0000409`，但没有定位其根因，不能宣称已修复该崩溃。
+- **Linux Alpine 验证**：三端实际生产 Dockerfile 均构建成功，后端与门户运行 Node 22.23.3。
+  后端镜像内 `better-sqlite3@12.9.0` 创建数据库、建表、插入、查询和关闭通过；bcrypt 6 加载 musl 原生文件并完成哈希 / 校验。
+  镜像中没有 Python / make / GCC / G++，没有通过额外安装编译工具掩盖预编译包问题。
+- **前端测试**：Node 22 的 frontend builder 镜像运行 **17 个测试文件 / 406 个用例通过**。
+  首次运行有 4 套因缺少兄弟目录 `backend/src` 而报 `ENOENT`；这些静态合同测试需要后端源码，给容器只读挂载该目录后全量通过。
+  没有改业务代码或放宽测试断言。
+- **隔离 MySQL / Redis 冒烟**：新库先按部署脚本既有流程临时 `DB_SYNC=true` 建表并执行 `seed-admin.js`，
+  再对同一份临时数据库以 `DB_SYNC=false` 重建后端。真实管理员登录 / me、匿名内容列表、上传真实字节 / GET / HEAD / Range、
+  删除文件与数据库记录、Redis 注销后旧 token 返回 401 均通过。
+- **前端与门户冒烟**：后台 `/admin/` 及其 5 个 JS / CSS、门户 `/about` 及其 8 个 JS / CSS 均返回 200；
+  门户连接上述隔离后端，首页 / 文章 / 影视 / 小说 / 漫画均返回 200，配置 / 分类 / 文章三个公开 API 正常。
+  生产 `rewrites=[]`、`/_next/image` 为 404。Chrome 1280×800 下登录必填校验、门户「关于 → 文章」导航通过；
+  门户控制台无警告或错误，后台只有既有 `/favicon.svg` 缺失的两条 404，未在本轮修复。
+- **本机与边界**：系统 Node 24 和原项目的 `node_modules` 保持原状；本地开发切换到 Node 22 后需在三端重新执行 `npm ci`。
+  验证使用隔离新库，没有连接生产服务、升级既有数据库或执行真实部署；未提交 / 推送。
+  Windows 隔离依赖目录的清理被自动审批拒绝（仅返回 `blocked by policy`），因此与验证日志一起保留在项目 `.cache/node22-qa-20261013-212547-f7899a96/`。
+- **证据与收尾**：Windows 日志位于上述目录；三端容器构建与冒烟记录分别位于
+  `.cache/node22-frontend-portal-20261013/` 和 `F:/METU/.cache/prism-node22-qa-backend-20261013/`。
+  临时容器、网络、tmpfs 数据和四个 QA 镜像已清理，用户原有七个容器、卷列表及三个 CMS 镜像保持不变。
+  Docker Desktop 已恢复到验证前的停止状态，未清理共享构建缓存。
+
+参考：[Node 维护版本计划](https://github.com/nodejs/Release#release-schedule)、
+[本次 Windows 便携版](https://nodejs.org/dist/v22.23.3/)、
+[Node 原生模块 ABI 说明](https://github.com/nodejs/node/blob/main/doc/api/process.md#processversions)。
 
 ### 批次 1-C / 1-D / 1-E —— 交叉核查后的修订方案（2026-10-08）
 

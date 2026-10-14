@@ -13,6 +13,7 @@ on:
     paths:
       - '**/package.json'
       - '**/package-lock.json'
+      - '.nvmrc'
       - '.github/audit-allowlist.json'
       - 'scripts/audit-gate.mjs'
       - '.github/workflows/audit.yml'
@@ -21,6 +22,7 @@ on:
     paths:
       - '**/package.json'
       - '**/package-lock.json'
+      - '.nvmrc'
       - '.github/audit-allowlist.json'
       - 'scripts/audit-gate.mjs'
       - '.github/workflows/audit.yml'
@@ -49,10 +51,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # 与 deploy.yml、三个 Dockerfile 一致。这里只读 lockfile、不装依赖，所以不开 npm 缓存
+      # 与 deploy.yml 共用 .nvmrc。这里只读 lockfile、不装依赖，所以不开 npm 缓存
       - uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version-file: .nvmrc
 
       # 不带 --registry 装包时，本机默认的 npmmirror 地址会被写进 lockfile 的 resolved，
       # 之后 CI 和 Docker 构建都会从镜像站下载。这里要求 resolved 全部来自官方源

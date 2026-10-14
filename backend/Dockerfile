@@ -1,7 +1,7 @@
 # ─────────────────────────────────────────────────
 # Stage 1: build
 # ─────────────────────────────────────────────────
-FROM node:20-alpine AS builder
+FROM node:22-alpine AS builder
 WORKDIR /app
 
 # 安装依赖（含 devDependencies，编译需要）
@@ -18,7 +18,7 @@ RUN npm prune --production
 # ─────────────────────────────────────────────────
 # Stage 2: runner
 # ─────────────────────────────────────────────────
-FROM node:20-alpine AS runner
+FROM node:22-alpine AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production

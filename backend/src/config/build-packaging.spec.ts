@@ -75,14 +75,27 @@ describe('backend 构建配置：生产产物不含测试文件', () => {
   });
 });
 
-describe('原生依赖与镜像基础版本的匹配（批次 2 / 3A 复审）', () => {
-  it('镜像仍是 node:20 时，better-sqlite3 必须精确锁定在 12.9.0（12.10.0 起没有 Node 20 预编译包）', () => {
-    // CI 跑在带编译工具链的 ubuntu 上，改回 ^ 并升到 12.10+ 照样变绿；要到服务器 docker build（alpine 无 python）
-    // 才失败。原因与解除条件见 docs/dev-guide.md「better-sqlite3 锁定在 12.9.0」：升到 Node 22 后再放开
-    const dockerfile = read('Dockerfile');
-    const pkg = JSON.parse(read('package.json')) as { dependencies: Record<string, string> };
-    if (/^FROM node:20\b/m.test(dockerfile)) {
-      expect(pkg.dependencies['better-sqlite3']).toBe('12.9.0');
-    }
+describe('Node 主版本在本地、CI 与三端镜像中保持一致', () => {
+  const nodeMajor = fs.readFileSync(path.join(REPO_ROOT, '.nvmrc'), 'utf8').trim();
+
+  it('.nvmrc 明确指定 Node 主版本', () => {
+    expect(nodeMajor).toMatch(/^\d+$/);
+  });
+
+  it.each(['backend', 'frontend', 'portal'])('%s 的 engines 与所有 Node 镜像阶段使用 .nvmrc 主版本', (project) => {
+    const root = path.join(REPO_ROOT, project);
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')) as { engines?: { node?: string } };
+    expect(pkg.engines?.node).toBe(`${nodeMajor}.x`);
+
+    const dockerfile = fs.readFileSync(path.join(root, 'Dockerfile'), 'utf8');
+    const nodeImages = [...dockerfile.matchAll(/^FROM\s+node:([^\s]+)/gm)].map((match) => match[1]);
+    expect(nodeImages.length).toBeGreaterThan(0);
+    for (const image of nodeImages) expect(image).toBe(`${nodeMajor}-alpine`);
+  });
+
+  it.each(['deploy.yml', 'audit.yml'])('%s 从 .nvmrc 读取 Node 版本', (workflow) => {
+    const ci = fs.readFileSync(path.join(REPO_ROOT, '.github/workflows', workflow), 'utf8');
+    expect(ci).toMatch(/uses: actions\/setup-node@[^\r\n]+\r?\n\s+with:\r?\n\s+node-version-file: \.nvmrc\b/);
+    expect(ci).not.toMatch(/^\s+node-version:/m);
   });
 });

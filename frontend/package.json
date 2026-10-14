@@ -4,6 +4,9 @@
   "description": "CMS内容管理系统前端",
   "author": "Your Team",
   "private": true,
+  "engines": {
+    "node": "22.x"
+  },
   "license": "MIT",
   "scripts": {
     "dev": "vite",

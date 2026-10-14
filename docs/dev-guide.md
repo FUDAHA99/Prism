@@ -10,11 +10,15 @@
 
 | 工具 | 最低版本 | 安装方式 |
 |------|----------|----------|
-| Node.js | 20.x（与 Dockerfile、CI 一致；better-sqlite3 12.9.0 的预编译包从 Node 20 起） | https://nodejs.org |
-| npm | 9.x | 随 Node.js 附带 |
+| Node.js | 22.x（根目录 `.nvmrc`，与 Dockerfile、CI 和三端 `engines` 一致） | https://nodejs.org |
+| npm | 使用 Node.js 22 附带版本 | 随 Node.js 附带 |
 | Git | 2.x | https://git-scm.com |
 
 > 本地数据库用根目录 `docker-compose.yml` 起的 MySQL 8 + Redis 7（需要 Docker），见第 3 节。
+
+切换 Node 主版本后，在 `backend`、`frontend`、`portal` 各执行一次 `npm ci --registry=https://registry.npmjs.org`。
+不要直接沿用其他主版本安装的 `node_modules`：`better-sqlite3` 等原生模块需要匹配当前 Node ABI。
+`engines` 在 npm 默认配置下只给出版本警告；开始开发前用 `node --version` 确认当前终端为 22.x。
 
 ### 1.2 后端启动
 
@@ -108,16 +112,14 @@ CACHE_TTL=300
 - 测试的内存夹具：spec 里 `TypeOrmModule` 直接配 `type: 'better-sqlite3'`，不经过 `DatabaseModule`；
 - `scripts/migrate-sqlite-to-mysql.js`：把早期的 SQLite 开发库迁到 MySQL。
 
-#### better-sqlite3 锁定在 12.9.0（不要改回 `^`）
+#### better-sqlite3 与 Node 版本
 
-`backend/package.json` 里 `better-sqlite3` 故意写成精确版本 `"12.9.0"`（JSON 不能写注释，原因记在这里）：
+三端 Dockerfile 与 CI 已统一到 Node 22，`backend/package.json` 中的约束恢复为 `"^12.9.0"`。
+本轮只升级运行环境，`package-lock.json` 仍解析到 12.9.0，`npm ci` 不会自动选择新版本。
 
-- 生产镜像基于 `node:20-alpine`，里面没有 python / make / g++，原生模块只能用预编译包。
-- better-sqlite3 从 12.10.0 起的 GitHub release 只提供 Node 22 及以上（ABI v127 起）的预编译包，没有 Node 20（v115）的；
-  npm 上的 `engines` 仍写着支持 20.x，npm 不会给出任何提示。
-- 写成 `^12.9.0` 的话，一次 `npm update` 就会抬到 12.10+：`docker build` 里 `prebuild-install` 找不到预编译包，
-  回落 node-gyp 源码编译，因为没有 Python 而失败。CI 跑在 ubuntu 上，有编译工具链，照样是绿的，问题要到部署时才暴露。
-- 解除条件：三个 Dockerfile 和 CI 都升到 Node 22 之后，才能放开锁定或升 13.x（13.x 要求 Node ≥ 22）。
+- 旧版 Node 20 镜像曾因缺少后续版本的预编译包而需要精确锁定；相关历史原因见维护计划的批次 2 / 3A。
+- 后续定向升级此依赖时，仍须真实构建 `node:22-alpine` 后端镜像，不能仅凭 Ubuntu CI 通过判断 musl 原生模块可用。
+- 镜像没有 Python / make / g++，本轮不添加编译工具链；缺失预编译包应作为兼容失败处理。
 - 验证原生模块要用 `new (require('better-sqlite3'))(':memory:')`：它到 `new Database()` 时才加载 `.node` 文件，
   只 `require('better-sqlite3')` 证明不了预编译包可用。
 
