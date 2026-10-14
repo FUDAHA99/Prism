@@ -405,6 +405,47 @@ describe('影视模块 HTTP', () => {
       expect(await slugsFor('posterBroken=null')).toEqual([slugs.archived, slugs.published].sort());
     });
 
+    it.each<Who>(['anonymous', 'plain', 'editor', 'admin'])('%s：只匹配别名的关键词可搜索，状态和公开字段限制不变', async (who) => {
+      // 这些影片的标题 / 原名 / 导演 / 主演都不含「别名-」。
+      const res = await get(`/movies?search=${encodeURIComponent('别名-')}&limit=100`, who).expect(200);
+      const staff = who === 'editor' || who === 'admin';
+      expect(slugsOf(res.body.data)).toEqual(staff ? ALL_LIVE_SLUGS : PUBLISHED_SLUGS);
+      expect(res.body.meta.total).toBe(staff ? 4 : 2);
+      if (!staff) expect(JSON.stringify(res.body)).not.toMatch(INTERNAL_FIELD);
+
+      const draft = await get(`/movies?search=${encodeURIComponent(`别名-${slugs.draft}`)}&status=draft`, who).expect(200);
+      expect(slugsOf(draft.body.data)).toEqual(staff ? [slugs.draft] : []);
+    });
+
+    it('别名匹配不能绕过定时发布，带 SQL 语法的搜索仍作为参数处理', async () => {
+      const id = await seedMovie('alias-scheduled', MovieStatus.PUBLISHED, {
+        aliases: '独有定时别名', publishedAt: new Date('2099-01-01T00:00:00.000Z'),
+      });
+      try {
+        const path = `/movies?search=${encodeURIComponent('独有定时别名')}`;
+        expect((await get(path, 'anonymous').expect(200)).body.data).toEqual([]);
+        expect(slugsOf((await get(path, 'editor').expect(200)).body.data)).toEqual(['alias-scheduled']);
+        expect((await get(`/movies?search=${encodeURIComponent("' OR 1=1 --")}`, 'admin').expect(200)).body.data).toEqual([]);
+      } finally {
+        await movies.delete(id);
+      }
+    });
+
+    it('别名搜索保持分页总数与唯一结果，现有类型筛选仍以 AND 组合', async () => {
+      const path = `/movies?search=${encodeURIComponent('别名-')}&limit=1`;
+      const found: string[] = [];
+      for (const page of [1, 2]) {
+        const res = await get(`${path}&page=${page}`, 'anonymous').expect(200);
+        expect(res.body.meta).toEqual({ total: 2, page, limit: 1, totalPages: 2 });
+        expect(res.body.data).toHaveLength(1);
+        found.push(res.body.data[0].slug);
+      }
+      expect(found.sort()).toEqual(PUBLISHED_SLUGS);
+      const filtered = await get(`${path}&movieType=tv`, 'anonymous').expect(200);
+      expect(slugsOf(filtered.body.data)).toEqual([slugs.featured]);
+      expect(filtered.body.meta).toEqual({ total: 1, page: 1, limit: 1, totalPages: 1 });
+    });
+
     it('门户的真实请求都能通过（portal/lib/api.ts getMovies 默认补 status=published、limit=24）', async () => {
       // 影视列表页（筛选条：类型 / 地区 / 年份 / 搜索）
       const list = await get('/movies?status=published&limit=24&page=1', 'anonymous').expect(200);
@@ -433,7 +474,7 @@ describe('影视模块 HTTP', () => {
         `/movies?search=${encodeURIComponent('草稿')}&status=draft&movieType=movie&posterBroken=false&page=1&limit=20`,
         'admin',
       ).expect(200);
-      // search 按标题 / 原名 / 导演 / 主演匹配：草稿片标题里没有「草稿」二字
+      // search 按标题 / 原名 / 别名 / 导演 / 主演匹配：这些字段里都没有「草稿」二字
       expect(res.body.data).toEqual([]);
       const byTitle = await get('/movies?search=draft&status=draft&movieType=movie&page=1&limit=20', 'editor').expect(200);
       expect(slugsOf(byTitle.body.data)).toEqual([slugs.draft]);
@@ -676,7 +717,7 @@ describe('影视模块 HTTP', () => {
 
     /** MovieForm 的全部表单项（validateFields() 返回的键） */
     const FORM_FIELDS = [
-      'title', 'originalTitle', 'slug', 'movieType', 'subType', 'year', 'region', 'language', 'score', 'director',
+      'title', 'originalTitle', 'aliases', 'slug', 'movieType', 'subType', 'year', 'region', 'language', 'score', 'director',
       'actors', 'intro', 'duration', 'totalEpisodes', 'currentEpisode', 'isFinished', 'posterUrl', 'trailerUrl',
       'isFeatured', 'isVip', 'metaTitle', 'metaKeywords', 'metaDescription',
     ] as const;
@@ -730,6 +771,7 @@ describe('影视模块 HTTP', () => {
       const values = newForm({
         title: '全字段',
         originalTitle: 'Full',
+        aliases: '全字段别名,Full Alias',
         slug: 'write-publish-now',
         movieType: 'tv',
         subType: '科幻',
@@ -752,10 +794,40 @@ describe('影视模块 HTTP', () => {
       });
       await post('/movies', 'editor', formPayload(values, true)).expect(201);
       const row = await rowBySlug('write-publish-now');
-      expect(row).toMatchObject({ status: MovieStatus.PUBLISHED, posterUrl: '/uploads/poster.jpg', isFeatured: true, viewCount: 0 });
+      expect(row).toMatchObject({ status: MovieStatus.PUBLISHED, aliases: '全字段别名,Full Alias', posterUrl: '/uploads/poster.jpg', isFeatured: true, viewCount: 0 });
       expect(row!.publishedAt).toBeInstanceOf(Date);
       const pub = await get('/movies/slug/write-publish-now', 'anonymous').expect(200);
       expect(pub.body).toMatchObject({ title: '全字段', score: 9.1, totalEpisodes: 24 });
+      expect(pub.body).not.toHaveProperty('aliases');
+    });
+
+    it.each<Who>(['admin', 'editor'])('%s：别名新建 / 编辑落库，省略保留，空串或 null 清空', async (who) => {
+      const aliases = '别'.repeat(1000);
+      const slug = `alias-write-${who}`;
+      const created = await post('/movies', who, { title: '别名编辑', slug, aliases }).expect(201);
+      const path = `/movies/${created.body.id}`;
+      expect((await rowBySlug(slug))!.aliases).toBe(aliases);
+      expect((await get(path, who).expect(200)).body.aliases).toBe(aliases);
+
+      await patch(path, who, { aliases: '别名甲,Alias B' }).expect(200);
+      await patch(path, who, { intro: '只改简介' }).expect(200);
+      expect((await rowBySlug(slug))!.aliases).toBe('别名甲,Alias B');
+      await patch(path, who, { aliases: '' }).expect(200);
+      expect((await rowBySlug(slug))!.aliases).toBe('');
+      await patch(path, who, { aliases: '恢复别名' }).expect(200);
+      await patch(path, who, { aliases: null }).expect(200);
+      expect((await rowBySlug(slug))!.aliases).toBeNull();
+    });
+
+    it('别名非法类型 / 超长返回 400，新建不写入，编辑保留原记录', async () => {
+      const before = await movies.findOneByOrFail({ id: movieIds.draft });
+      for (const aliases of [123, false, ['别名'], { value: '别名' }, '别'.repeat(1001)]) {
+        const body = { title: '不可写入', slug: 'alias-invalid', aliases };
+        await post('/movies', 'editor', body).expect(400);
+        await patch(`/movies/${movieIds.draft}`, 'editor', { intro: '不可写入', aliases }).expect(400);
+      }
+      expect(await rowBySlug('alias-invalid')).toBeNull();
+      expect(await movies.findOneByOrFail({ id: movieIds.draft })).toEqual(before);
     });
 
     it('编辑页回填采集来的剧集后原样保存（null、MySQL 读出的字符串评分、年份 0）：200，内部字段一个不变', async () => {
@@ -862,7 +934,6 @@ describe('影视模块 HTTP', () => {
       ['collectExternalId', () => `ext-${slugs.published}`],
       ['posterBroken', () => false],
       ['titleCleaned', () => true],
-      ['aliases', () => '别名'],
       ['deletedAt', () => null],
       ['createdAt', () => '2020-01-01T00:00:00.000Z'],
     ])('POST 带伪造的 %s → 400，什么都不写（带已有影视的 id 也不会把它覆盖掉）', async (key, forge) => {
@@ -1057,6 +1128,7 @@ describe('影视模块 HTTP', () => {
       const created = await service.create(
         {
           title: '直调',
+          aliases: '允许的别名',
           slug: 'service-direct',
           id: movieIds.published,
           viewCount: 42,
@@ -1071,6 +1143,7 @@ describe('影视模块 HTTP', () => {
       expect(created.id).not.toBe(movieIds.published);
       expect(await movies.findOneByOrFail({ id: created.id })).toMatchObject({
         viewCount: 0,
+        aliases: '允许的别名',
         collectSource: null,
         posterBroken: null,
         titleCleaned: false,
@@ -1085,11 +1158,11 @@ describe('影视模块 HTTP', () => {
 
       await service.update(
         created.id,
-        { title: '直调改', viewCount: 99, collectExternalId: 'x', status: 'archived', sources: [] } as never,
+        { title: '直调改', aliases: '更新别名', viewCount: 99, collectExternalId: 'x', status: 'archived', sources: [] } as never,
         ids.admin,
       );
       expect(await movies.findOneByOrFail({ id: created.id })).toMatchObject({
-        title: '直调改', viewCount: 0, collectExternalId: null, status: MovieStatus.DRAFT,
+        title: '直调改', aliases: '更新别名', viewCount: 0, collectExternalId: null, status: MovieStatus.DRAFT,
       });
       await service.updateEpisode(createdSources[0].episodes[0].id, { title: '改', sourceId: victim.id } as never, ids.admin);
       expect(await ds.getRepository(MovieEpisode).findOneByOrFail({ id: createdSources[0].episodes[0].id })).toMatchObject({
@@ -1106,8 +1179,8 @@ describe('影视模块 HTTP', () => {
     it('游客 401、无角色用户 403（写接口仅后台角色）', async () => {
       const [src] = await sourcesOf(movieIds.draft);
       const writes: Array<[string, string, object]> = [
-        ['post', '/movies', newForm({ title: 't', slug: 'anon-write' })],
-        ['patch', `/movies/${movieIds.draft}`, { title: 'x' }],
+        ['post', '/movies', newForm({ title: 't', slug: 'anon-write', aliases: '无权新建' })],
+        ['patch', `/movies/${movieIds.draft}`, { title: 'x', aliases: '无权修改' }],
         ['patch', `/movies/${movieIds.draft}/poster`, { posterUrl: 'https://x.example.com/p.jpg' }],
         ['post', `/movies/${movieIds.draft}/sources`, { name: 'x' }],
         ['post', `/movies/sources/${src.id}/episodes`, { title: 'x', url: 'https://x/1' }],
@@ -1120,6 +1193,7 @@ describe('影视模块 HTTP', () => {
       }
       expect(await rowBySlug('anon-write')).toBeNull();
       expect((await movies.findOneByOrFail({ id: movieIds.draft })).title).toBe(`标题 ${slugs.draft}`);
+      expect((await movies.findOneByOrFail({ id: movieIds.draft })).aliases).toBe(`别名-${slugs.draft}`);
     });
   });
 });

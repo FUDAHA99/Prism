@@ -50,6 +50,13 @@ export class UpdateMovieDto {
   @MaxLength(500)
   originalTitle?: string | null;
 
+  @ApiPropertyOptional({ description: '别名（逗号分隔）；null 或空串表示清空，省略则保留', maxLength: 1000, nullable: true })
+  @IsOptional()
+  @Transform(rawValue)
+  @IsString()
+  @MaxLength(1000)
+  aliases?: string | null;
+
   @ApiPropertyOptional({ description: 'URL slug（小写字母、数字、连字符）', maxLength: 500 })
   @unlessUndefined
   @IsString()

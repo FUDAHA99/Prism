@@ -2,7 +2,7 @@
 
 > 从「maccms 替代品」到「明显更好的选择」
 >
-> 最后更新：2026-04-29
+> 最后更新：2026-10-14
 
 ---
 
@@ -30,6 +30,13 @@
 | Phase 2-B | 采集 SSE 实时进度 | 🟠 高 | 2 天 |
 | Phase 3-A | 线路健康度检测 | 🟡 中 | 2 天 |
 | Phase 3-B | 搜索词统计 | 🟡 中 | 1 天 |
+
+上表为原始阶段划分与估算，不是当前完成状态。当前已核对的范围：
+
+- **Phase 1-B**：门户续播、开发路由、数据库迁移与并发一致性已经完成本地验证，见[维护记录](maintenance-plan.md)。
+- **Phase 2-A（仅影视）**：既有别名字段与采集填充已接通后台编辑、输入校验和列表搜索，验收范围见下节。
+- **封面三态筛选**已在此前修复；历史维护计划中的“筛选失效”不是当前待办。
+- 其他阶段下文仍保留设计方案，不能据此推断已实现或已部署。小说 / 漫画别名不纳入本次范围。
 
 ---
 
@@ -205,43 +212,25 @@ progressSec > 30：显示"▶ 继续看第 N 集（mm:ss）"，跳转播放页�
 
 ## Phase 2-A：别名搜索增强
 
-### 目标
-搜索时匹配别名，采集时自动填充中英双语别名，解决搜不到的问题。
+### 当前范围（仅影视，本地实现）
 
-### 数据库变更
+`movies.aliases` 已有 nullable `varchar(1000)` 列，采集的 `upsertMovie()` 已通过
+`buildAliases(cleanedTitle, it.vod_sub)` 填充。本批直接使用已有字段，不改表，也不新增小说或漫画字段。
 
-```sql
-ALTER TABLE movies  ADD COLUMN aliases VARCHAR(1000) NULL COMMENT '别名，逗号分隔';
-ALTER TABLE novels  ADD COLUMN aliases VARCHAR(1000) NULL;
-ALTER TABLE comics  ADD COLUMN aliases VARCHAR(1000) NULL;
-```
+- 列表搜索将 `aliases LIKE :s` 加入与标题 / 原名 / 导演 / 主演相同的括号 OR 条件，继续使用绑定参数。
+- 新建和编辑 DTO 接受 ≤ 1000 字符的原始字符串；拒绝数字、布尔、数组、对象及超长值。
+  更新时省略字段保留原值，`null` 或空串清空；其余内部字段继续禁止客户端写入。
+- 后台表单回填、修改、保存和清空别名，API 类型同步，搜索提示列出别名。
+- 公开查询沿用发布时间、发布状态和软删除限制；公开响应仍不返回 `aliases` 字段。
 
-### 采集时自动填充
+### 验收与边界
 
-`collect-executor.service.ts` → `upsertMovie()`
-```ts
-// vod_sub（原名/外文名）不为空时写入 aliases
-if (it.vod_sub && it.vod_sub !== it.vod_name) {
-  data.aliases = cleanTitle(it.vod_sub)
-}
-```
+验证别名独立命中、分页和组合筛选、管理员 / 编辑与普通用户 / 游客的不同可见范围，
+以及表单回填、保存后重开、清空、新建和搜索操作。测试证据见[维护记录](maintenance-plan.md)。
+本批只做本地验证与提交，不代表已部署到服务器。
 
-### 搜索逻辑改动
-
-`movie.service.ts` / `novel.service.ts` / `comic.service.ts` → `findAll()` search 条件
-```ts
-// 新增 m.aliases LIKE :s
-'(m.title LIKE :s OR m.originalTitle LIKE :s OR m.aliases LIKE :s OR m.director LIKE :s OR m.actors LIKE :s)'
-```
-
-### 管理后台
-
-`frontend/src/pages/Movie/MovieForm.tsx` 新增字段：
-```
-<Form.Item label="别名" name="aliases">
-  <Input placeholder="多个别名用英文逗号分隔，如：Breaking Bad,绝命毒师" />
-</Form.Item>
-```
+不改分词、模糊匹配规则或采集覆盖策略；再次采集仍可能用上游别名覆盖手工值。
+小说 / 漫画别名另行规划，不执行旧草案中的两个新增列语句。
 
 ---
 

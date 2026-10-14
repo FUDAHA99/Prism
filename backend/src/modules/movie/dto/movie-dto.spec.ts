@@ -40,6 +40,7 @@ async function rejects(run: Promise<unknown>): Promise<string> {
 const FORM_FIELDS = [
   'title',
   'originalTitle',
+  'aliases',
   'slug',
   'movieType',
   'subType',
@@ -75,6 +76,7 @@ const createMinimal = { title: '流浪地球 2', slug: 'wandering-earth-2', movi
 const createFull = {
   ...createMinimal,
   originalTitle: 'The Wandering Earth II',
+  aliases: '流浪地球2,小破球2',
   subType: '科幻',
   year: 2023,
   region: '中国大陆',
@@ -102,6 +104,7 @@ const createFull = {
 const editCollected = {
   title: '某采集剧',
   originalTitle: null,
+  aliases: null,
   slug: 'c-1a2b3c4d-12345',
   movieType: 'tv',
   subType: null,
@@ -191,7 +194,6 @@ describe('CreateMovieDto / UpdateMovieDto', () => {
       ['collectExternalId', '42'],
       ['posterBroken', false],
       ['titleCleaned', true],
-      ['aliases', '别名'],
       ['deletedAt', null],
       ['createdAt', '2020-01-01T00:00:00.000Z'],
       ['updatedAt', '2020-01-01T00:00:00.000Z'],
@@ -274,6 +276,22 @@ describe('CreateMovieDto / UpdateMovieDto', () => {
   });
 
   describe('字段规则', () => {
+    it.each([undefined, null, '', '别名甲,Alias B', '别'.repeat(1000)])(
+      '别名接受省略、清空和不超过 1000 字符的字符串（%#）',
+      async (aliases) => {
+        expect(Reflect.get(await createDto({ ...createMinimal, aliases }), 'aliases')).toBe(aliases);
+        expect(Reflect.get(await updateDto({ aliases }), 'aliases')).toBe(aliases);
+      },
+    );
+
+    it.each([123, false, ['别名'], { value: '别名' }, '别'.repeat(1001)])(
+      '别名拒绝原始非字符串或超过列长的值（%#），不允许隐式转换绕过',
+      async (aliases) => {
+        expect(await rejects(createDto({ ...createMinimal, aliases }))).toContain('aliases');
+        expect(await rejects(updateDto({ aliases }))).toContain('aliases');
+      },
+    );
+
     it.each(['title', 'slug', 'movieType', 'isFinished', 'isFeatured', 'isVip', 'score'])(
       'NOT NULL 列 %s 提交 null → 400（新建与编辑；此前写库 500）',
       async (key) => {

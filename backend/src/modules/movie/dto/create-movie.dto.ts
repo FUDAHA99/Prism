@@ -150,6 +150,13 @@ export class CreateMovieDto {
   @MaxLength(500)
   originalTitle?: string | null;
 
+  @ApiPropertyOptional({ description: '别名（逗号分隔，用于搜索匹配）', maxLength: 1000, nullable: true })
+  @IsOptional()
+  @Transform(rawValue)
+  @IsString()
+  @MaxLength(1000)
+  aliases?: string | null;
+
   @ApiProperty({ description: 'URL slug（小写字母、数字、连字符）', maxLength: 500 })
   @IsString()
   @Matches(MOVIE_SLUG_PATTERN, { message: 'slug 只能包含小写字母、数字和连字符' })

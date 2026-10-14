@@ -761,7 +761,7 @@
 **查询参数**（未列出的参数一律 `400`）：
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| `search` | string | 搜索标题 / 原名 / 导演 / 主演（最长 200）|
+| `search` | string | 搜索标题 / 原名 / 别名 / 导演 / 主演（最长 200）|
 | `status` | `draft` \| `published` \| `archived` | 状态筛选（仅后台角色生效）|
 | `movieType` | `movie` \| `tv` \| `variety` \| `anime` \| `short` | 类型筛选 |
 | `categoryId` | UUID | 分类筛选 |
@@ -802,6 +802,7 @@ javascript: / data: / vbscript: / file: 等其他协议不入库（影视同时�
 {
   "title": "流浪地球 2",
   "originalTitle": "The Wandering Earth II",
+  "aliases": "流浪地球第二部,The Wandering Earth 2",
   "slug": "wandering-earth-2",
   "movieType": "movie",
   "subType": "科幻",
@@ -833,7 +834,7 @@ javascript: / data: / vbscript: / file: 等其他协议不入库（影视同时�
 }
 ```
 
-只接受上面这些字段，其余字段（`id`、`viewCount`、`likeCount`、`collectSource`、`collectExternalId`、`posterBroken`、`titleCleaned`、`aliases`、时间戳等）一律 `400`；
+只接受上面这些字段，其余字段（`id`、`viewCount`、`likeCount`、`collectSource`、`collectExternalId`、`posterBroken`、`titleCleaned`、时间戳等）一律 `400`；
 采集字段只由采集任务在服务端写入。`status` 只能是 `draft`（默认）或 `published`，为 `published` 时 `publishedAt` 缺省为当前时间。
 `sources` 里的线路与剧集同样只认上面列出的字段：带 `id` / `movieId` / `sourceId` 一律 `400`（归属取新建的影视），最多 50 条线路、每条最多 2000 集。
 `sources` / `episodes` 的每一项都必须是对象（`[[]]`、`[[{...}]]` 这类嵌套数组 `400`）。影视、线路、剧集在同一个事务里写入，
@@ -845,6 +846,7 @@ javascript: / data: / vbscript: / file: 等其他协议不入库（影视同时�
 | `slug` | 必填，只含小写字母、数字、连字符，≤ 500；与任何影视（含已删除的）重复返回 `409` |
 | `movieType` | 枚举；不能为 `null` |
 | `originalTitle` / `director` | ≤ 500 字符 |
+| `aliases` | 可选字符串，≤ 1000 字符；多个别名可用逗号分隔；允许 `null` 或空串清空，数字 / 布尔 / 数组 / 对象不接受 |
 | `subType` / `region` / `language` | ≤ 200 / 100 / 100 字符 |
 | `actors` / `intro` | ≤ 65535 字节（TEXT 列）|
 | `posterUrl` / `trailerUrl` | 空串、`http(s)://` 地址或站内路径（`/uploads/...`），≤ 1000 |
@@ -864,6 +866,9 @@ javascript: / data: / vbscript: / file: 等其他协议不入库（影视同时�
 `PATCH /movies/:id`  🔒 后台角色（admin / editor）
 
 字段与校验规则同创建（不含 `sources`：线路与剧集只经 15.8 的接口增删改），全部可选；`title` / `slug` / `movieType` / `score` / 三个布尔字段不能为 `null`。
+`aliases` 省略时保留旧值，`null` 或空串清空。别名参与列表 `search` 匹配，但不出现在公开响应里；
+游客仍只能搜到已发布、到发布时间且未删除的影视，后台角色沿用现有草稿 / 归档可见范围。
+采集更新仍按上游数据重新生成别名，可能覆盖手工值；本次未改变采集覆盖策略。
 `status` 只接受 `published`（后台「保存并发布」）：同时写 `publishedAt`（优先用本次提交的，其次保留原发布时间）；取消发布请用 `POST /movies/:id/unpublish`。
 `posterUrl` 改了会把封面检测状态重置为「未检测」。
 `posterUrl` / `trailerUrl` 的协议白名单与 `score` 的 0–10 只对「与库里现值不同」的值执行：编辑页把表单全部字段原样提交，

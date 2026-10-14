@@ -69,6 +69,7 @@ export default function MovieForm() {
       form.setFieldsValue({
         title: movie.title,
         originalTitle: movie.originalTitle,
+        aliases: movie.aliases ?? '',
         slug: movie.slug,
         movieType: movie.movieType,
         subType: movie.subType,
@@ -203,6 +204,9 @@ export default function MovieForm() {
                           </Form.Item>
                         </Col>
                       </Row>
+                      <Form.Item label="别名" name="aliases" extra="多个别名用英文逗号分隔，用于搜索匹配">
+                        <Input maxLength={1000} showCount allowClear />
+                      </Form.Item>
                       <Row gutter={12}>
                         <Col span={12}>
                           <Form.Item

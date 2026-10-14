@@ -330,7 +330,7 @@ export default function MovieList() {
       <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
         <Col flex="1">
           <Input
-            placeholder="搜索标题 / 导演 / 演员..."
+            placeholder="搜索标题 / 原名 / 别名 / 导演 / 演员..."
             prefix={<SearchOutlined />}
             value={filters.search}
             onChange={(e) =>

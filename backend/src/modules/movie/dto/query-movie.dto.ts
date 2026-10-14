@@ -44,7 +44,7 @@ function queryPosterBroken(params: TransformFnParams): unknown {
  * status / posterBroken 只对后台角色生效；游客与非后台角色一律只看已发布（见 MovieService.findAll）。
  */
 export class QueryMovieDto {
-  @ApiPropertyOptional({ description: '搜索标题 / 原名 / 导演 / 主演', maxLength: 200 })
+  @ApiPropertyOptional({ description: '搜索标题 / 原名 / 别名 / 导演 / 主演', maxLength: 200 })
   @IsOptional()
   @IsString()
   @MaxLength(200)

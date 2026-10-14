@@ -38,6 +38,7 @@ import { UpdateMovieDto, UpdateMovieEpisodeDto } from './dto/update-movie.dto';
 const MOVIE_EDITABLE_FIELDS = [
   'title',
   'originalTitle',
+  'aliases',
   'slug',
   'movieType',
   'categoryId',
@@ -387,7 +388,7 @@ export class MovieService {
 
     if (search) {
       qb.andWhere(
-        '(m.title LIKE :s OR m.originalTitle LIKE :s OR m.director LIKE :s OR m.actors LIKE :s)',
+        '(m.title LIKE :s OR m.originalTitle LIKE :s OR m.aliases LIKE :s OR m.director LIKE :s OR m.actors LIKE :s)',
         { s: `%${search}%` },
       );
     }

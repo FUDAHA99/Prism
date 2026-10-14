@@ -28,6 +28,7 @@ export interface Movie {
   id: string
   title: string
   originalTitle?: string
+  aliases?: string | null
   slug: string
   movieType: MovieType
   categoryId?: string
@@ -101,6 +102,7 @@ export interface CreateMovieSourceData {
 export interface CreateMovieData {
   title: string
   originalTitle?: string
+  aliases?: string | null
   slug: string
   movieType?: MovieType
   categoryId?: string
