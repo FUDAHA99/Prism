@@ -14,9 +14,15 @@ export type WatchContentType = 'movie' | 'novel' | 'comic';
 @Index(['guestId', 'contentType', 'contentId'])
 @Index(['userId', 'updatedAt'])
 @Index(['guestId', 'updatedAt'])
+@Index('UQ_watch_history_owner_content', ['ownerKey', 'contentType', 'contentId'], { unique: true })
+@Index('IDX_watch_history_owner_updated', ['ownerKey', 'updatedAt'])
 export class WatchHistory {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  /** 用户与游客分域；游客 ID 哈希后避免 MySQL 默认大小写不敏感排序规则合并身份。 */
+  @Column({ type: 'varchar', length: 66, select: false })
+  ownerKey: string;
 
   @Column({ type: 'varchar', length: 36, nullable: true })
   userId?: string | null;

@@ -501,12 +501,12 @@ describe('全局 AccessGuard（真实 HTTP）：严格可选登录、staff / adm
         .expect(200);
       expect(guestProgress.body.progressSec).toBe(100);
 
-      // 登录用户：同一个 guestId 也记在 userId 名下
+      // 登录用户：只记在 userId 名下，不让同浏览器的 guestId 读取用户历史。
       const { accessToken } = await login('plain');
       await withAuth(http().post('/watch-history/report'), bearer(accessToken)).send(report(200)).expect(204);
       expect((await rows()).map((r) => [r.userId, r.guestId, r.progressSec])).toEqual([
         [null, guestId, 100],
-        [ids.plain, guestId, 200],
+        [ids.plain, null, 200],
       ]);
       const userProgress = await withAuth(http().get('/watch-history'), bearer(accessToken))
         .query({ contentType: 'movie', contentId, guestId })

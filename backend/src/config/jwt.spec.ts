@@ -578,7 +578,8 @@ describe('scripts/deploy.sh 的部署前预检与 jwt.ts 规则一致', () => {
         '$COMPOSE config --format json | docker run --rm -i --network none --entrypoint node "$image" -e "$JWT_VALIDATOR_JS"',
       );
       // compose run 即使带 --no-deps 也会建项目的命名卷，会让首次部署被误判（见 deploy.sh 注释）
-      const code = script
+      const validatorStart = script.indexOf('\ncheck_jwt_in_image() {');
+      const code = script.slice(validatorStart, script.indexOf('\n}\n', validatorStart) + 2)
         .split('\n')
         .filter((line) => !line.trim().startsWith('#'))
         .join('\n');

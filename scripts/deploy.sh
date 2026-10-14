@@ -19,6 +19,7 @@
 #   → 构建全部镜像 → 在一次性 backend 容器里用 backend 自己的规则校验 compose 插值后的 JWT 密钥（同上）
 #   → 生成 nginx/nginx.active.conf
 #   → 部署前 nginx -t（一次性容器；失败则中止，生效配置换回部署前的内容，容器都不动）
+#   → 首次部署：启动 MySQL 并执行 migration；已有库：只读检查 migration，未就绪就中止
 #   → up -d（不再构建）→ 等 backend → 例行部署：补齐系统角色（seed-admin.js --roles-only：不改密码、不分配角色，失败只警告），
 #     只读检查公开注册开关（enable_register 是 'true' 时提醒关闭方法，从不修改）
 #   → 部署后 nginx -t（真实网络）→ 重建 nginx（80/443 中断数秒）
@@ -57,6 +58,7 @@ NGINX_CONF_BACKUP=""
 ACTIVE_GUARD=false   # render 前置为 true
 ACTIVE_PREV=""       # render 前 nginx.active.conf 的快照（mktemp）；为空表示 render 前它不存在
 UP_STARTED=false
+DB_CHECK_STARTED=false
 
 on_exit() {
   local rc=$? ok=true touched=false
@@ -95,6 +97,8 @@ on_exit() {
 
   if $UP_STARTED; then
     warn "部署失败（退出码 $rc）：已执行过 up，部分容器可能已更新，查看：$COMPOSE ps；修好问题后重新部署"
+  elif $DB_CHECK_STARTED; then
+    warn "部署中止（退出码 $rc）：已检查或启动 MySQL，业务容器未更新；nginx 配置恢复结果见上方提示"
   elif ! $ok; then
     warn "部署中止（退出码 $rc）：容器均未改动，但上面的文件恢复失败，务必先按提示手工处理"
   elif $touched; then
@@ -252,7 +256,7 @@ process.stdin.on("end", () => {
 
 # 为什么不用 `$COMPOSE run --rm --no-deps backend`：实测 compose run 即使带 --no-deps，也会先建出项目网络和
 # backend 及其依赖（mysql、redis）的命名卷。首次部署时 prism_mysql_data 因此在 up 之前就存在了，下面按
-# 「这个卷在不在」判断的首次部署会被误判成例行部署（不开 DB_SYNC、不建管理员，backend 因缺表反复重启）；
+# 「这个卷在不在」判断的首次部署会被误判成例行部署（不初始化数据库、不建管理员）；
 # 校验没过、运维改完密钥重跑时同样会误判。所以改为：配置由 compose 渲染（插值规则与 up 完全相同），
 # 经管道交给用新 backend 镜像起的一次性容器（--network none、不挂任何卷、--rm），密钥不进命令行、不落盘。
 # 镜像名按 compose 的命名规则是「<项目名>-backend」（docker-compose.prod.yml 的 backend 只有 build、没有 image）。
@@ -274,7 +278,7 @@ check_jwt_in_image() {
 # 旧版本写入的 enable_register 默认值是 'true'，backend 的 initDefaults 只补缺失的键：从旧版本升级上来的安装，
 # 公开注册在升级后仍然开着（任何人都能注册拿到 JWT，拿不到后台权限，但能以注册用户身份发评论、改资料）。
 # 新装默认关闭。这里只读一次当前值，是 'true' 就把 docs/deploy.md 5.3 ⑥ 的关闭方法打出来，由运维决定 ——
-# 从不自动改它（零 migration；开着注册也可能是站点有意为之）。
+# 从不自动改它（开着注册也可能是站点有意为之）。
 # 在 mysql 容器里执行（与 5.3 ⑥ 的手工命令相同）：库名、账号、密码取自容器自己的环境变量，不经宿主机命令行、不落盘。
 REGISTER_SWITCH_SQL="SELECT value FROM site_settings WHERE \`key\` = 'enable_register';"
 check_register_switch() {
@@ -360,13 +364,12 @@ main() {
   # ── JWT 密钥预检：不合格就在动任何容器、任何 nginx 配置之前中止 ──────────
   check_jwt_secrets
 
-  # ── 首次部署：自动开启 DB_SYNC ────────────────────────────────
+  # ── 首次部署：只在空数据卷上自动执行 migration ────────────────
   # 按 MySQL 数据卷在不在判断，所以必须在任何可能建卷的命令（up；compose run 也会建，见 check_jwt_in_image）之前
   local first_deploy=false
   if ! docker volume inspect prism_mysql_data &>/dev/null; then
     first_deploy=true
-    warn "检测到首次部署，将临时启用 DB_SYNC=true 自动建表"
-    export DB_SYNC=true
+    log "检测到首次部署，将通过 migration 初始化数据库"
   fi
 
   # ── 构建全部镜像（后面的 up 不再构建），再用新 backend 镜像跑一遍完整的密钥校验 ──
@@ -388,13 +391,28 @@ main() {
 
   # ── 安全检查 ──────────────────────────────────────────────────
   if grep -Eq '^[[:space:]]*DB_SYNC[[:space:]]*=[[:space:]]*["'\'']?true' .env.prod; then
-    warn ".env.prod 中 DB_SYNC=true：TypeORM 会在 backend 启动时 ALTER 生产库，改类型或删列会静默丢数据。首次建表完成后应改回 false"
+    die "生产禁止 DB_SYNC=true；请设为 false，并按 docs/database-migrations.md 完成迁移"
   fi
 
   # ── 部署前 nginx -t：一次性容器 + --add-host 占位，不依赖业务容器，首次部署也能跑 ──
   log "部署前校验 nginx 配置..."
   bash scripts/check-nginx-conf.sh \
     || die "nginx 配置校验失败（见上方 nginx -t 输出），部署中止。修正 nginx/ 下的配置后重新部署"
+
+  # 已有库不在例行部署中自动改表或去重：先按 docs/database-migrations.md 备份、停写并迁移。
+  # 此时首次部署判断已完成，compose run 创建的卷不会影响判断。
+  # --no-recreate 保留已有 MySQL 容器配置，同时支持整个站点停机后的重新启动。
+  log "确保 MySQL 就绪（不重建已有容器）..."
+  DB_CHECK_STARTED=true
+  $COMPOSE up -d --no-recreate --wait mysql
+  if $first_deploy; then
+    log "执行空库 migration..."
+    $COMPOSE run --rm --no-deps backend npm run migration:run \
+      || die "数据库初始化失败；保留现场，请按 docs/database-migrations.md 排查，勿启用 DB_SYNC"
+  fi
+  log "只读检查数据库 migration 状态..."
+  $COMPOSE run --rm --no-deps backend npm run migration:check \
+    || die "数据库 migration 未就绪，未启动新版业务服务；请按 docs/database-migrations.md 处理"
 
   # ── 启动 ──────────────────────────────────────────────────────
   # 不带 --build：镜像上面已经构建并校验过，up 直接用它们（compose 只在镜像缺失时才会构建）
@@ -481,10 +499,7 @@ main() {
 
     warn "首次部署完成！建议："
     warn "  1. 登录管理后台修改管理员密码"
-    warn "  2. 建表完成后关闭 DB_SYNC（.env.prod 默认就是 false，本次只是临时 export）："
-    warn "     $COMPOSE up -d backend    # 必须用 up 重建容器；restart 不会重新读取环境变量"
-    warn "     $COMPOSE up -d --no-deps --force-recreate nginx    # backend 换了容器 IP，nginx 需重新解析"
-    warn "     （或直接再执行一次 bash scripts/deploy.sh，两步都会做）"
+    warn "  2. 保持 DB_SYNC=false；后续结构升级先备份并按 docs/database-migrations.md 执行 migration"
     warn "  3. 如已有域名并配置好 DNS，运行 HTTPS 配置："
     warn "     bash scripts/setup-ssl.sh"
   fi

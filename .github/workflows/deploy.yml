@@ -65,6 +65,55 @@ jobs:
         working-directory: ${{ matrix.project }}
         run: npm test --if-present
 
+  database:
+    name: Migrations (${{ matrix.database.type }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        database:
+          - type: mysql
+            image: mysql:8.0
+            health: mysqladmin ping -h localhost -pmigration-ci-only
+          - type: mariadb
+            image: mariadb:11.4
+            health: mariadb-admin ping -h localhost -pmigration-ci-only
+    services:
+      database:
+        image: ${{ matrix.database.image }}
+        env:
+          MYSQL_ROOT_PASSWORD: migration-ci-only
+          MYSQL_ROOT_HOST: '%'
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="${{ matrix.database.health }}"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install and build backend
+        working-directory: backend
+        run: |
+          npm ci
+          npm run build
+      - name: Real database migration and concurrency regression
+        working-directory: backend
+        run: node scripts/test-migrations.cjs
+        env:
+          MIGRATION_TEST_ALLOW_CREATE_DATABASE: '1'
+          DB_TYPE: ${{ matrix.database.type }}
+          DATABASE_HOST: 127.0.0.1
+          DATABASE_PORT: '3306'
+          DATABASE_USER: root
+          DATABASE_PASSWORD: migration-ci-only
+          DATABASE_NAME: prism_qa_migration
+
   # ─────────────────────────────────────────────────────────────
   # nginx 配置门禁：两份配置镜像一致，且两种模式渲染出的生效配置都能通过 nginx -t
   # 用的就是部署时跑的同一组脚本（render / check-nginx-conf / check-nginx-mirror），
@@ -102,12 +151,12 @@ jobs:
           bash scripts/check-nginx-conf.sh
 
   # ─────────────────────────────────────────────────────────────
-  # 部署：仅在 verify 与 nginx 全绿、且是推送到 main 时执行
+  # 部署：仅在 verify、database 与 nginx 全绿、且是推送到 main 时执行
   # 未配置 SSH secrets 时优雅跳过（而非红叉），避免 CI 长期挂红
   # ─────────────────────────────────────────────────────────────
   deploy:
     name: SSH Deploy
-    needs: [verify, nginx]
+    needs: [verify, database, nginx]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20

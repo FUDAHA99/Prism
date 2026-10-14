@@ -176,7 +176,8 @@ docker compose exec mysql mysql -ucms -pcms123 cms_dev -e "SHOW TABLES;"
 
 ### TypeORM 自动同步
 
-开发模式下 TypeORM 会根据 Entity 自动同步数据库结构（`synchronize: true`）。**生产环境请务必关闭**，使用 Migration。
+开发模式下 TypeORM 默认根据 Entity 自动同步结构；显式设置 `DB_SYNC=false` 可关闭同步并启用迁移记录检查。
+生产环境硬性禁止自动同步，包括首次建表；使用[数据库迁移手册](database-migrations.md)中的显式命令。
 
 ### 初始化管理员角色
 

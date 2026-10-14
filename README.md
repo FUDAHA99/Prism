@@ -120,6 +120,9 @@ bash scripts/deploy.sh
 
 > 详细步骤、运维命令、备份方案见 **[部署指南](docs/deploy.md)**。
 
+已有数据库升级本版本前，先按[数据库迁移手册](docs/database-migrations.md)备份、停写并接入基线。
+生产禁止 `DB_SYNC=true`；部署与启动都会检查 migration 状态，例行部署不自动修改存量库结构。
+
 **管理员账户**：`admin@cms.com` / `Admin123!`（首次登录请立即改密，登录框填邮箱）
 
 ---
@@ -190,6 +193,7 @@ CI 中由 `.github/workflows/audit.yml` 执行：改动 `package.json`、`packag
 | 文档 | 描述 |
 |------|------|
 | [部署指南](docs/deploy.md) | Docker 生产部署、运维、备份 |
+| [数据库迁移](docs/database-migrations.md) | 空库初始化、存量基线接入、续播一致性与失败恢复 |
 | [架构设计](docs/architecture.md) | 系统架构与数据流 |
 | [API 文档](docs/api.md) | 后端接口说明 |
 | [使用说明](docs/user-guide.md) | 管理员操作手册 |

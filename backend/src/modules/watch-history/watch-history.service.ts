@@ -1,12 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { createHash, randomUUID } from 'crypto';
 import { WatchHistory, WatchContentType } from './entities/watch-history.entity';
 import { ReportProgressDto } from './dto/report-progress.dto';
 
 export { ReportProgressDto };
-
-
 
 @Injectable()
 export class WatchHistoryService {
@@ -15,60 +14,49 @@ export class WatchHistoryService {
     private readonly repo: Repository<WatchHistory>,
   ) {}
 
+  private ownerKey(userId?: string, guestId?: string): string | null {
+    if (userId) return `u:${userId.toLowerCase()}`;
+    if (guestId) return `g:${createHash('sha256').update(guestId, 'utf8').digest('hex')}`;
+    return null;
+  }
+
   /**
-   * 上报播放进度（upsert 语义）
-   * - 有 userId → 按 userId + contentType + contentId 查
-   * - 否则按 guestId + contentType + contentId 查
-   * - 只有新进度 > 旧进度时才更新（防止换集后倒退）
+   * 唯一身份 + 内容键上的原子 upsert，避免先查再写产生重复行或覆盖更大的同集进度。
+   * 同集（线路、集序号、episodeId 均相同）只接受更大进度；换集直接覆盖。
+   * 请求没有采样序号，因此不同集之间仍以数据库收到的写入顺序为准。
    */
   async report(dto: ReportProgressDto, userId?: string): Promise<void> {
     const { contentType, contentId, episodeId, guestId } = dto;
+    const ownerKey = this.ownerKey(userId, guestId);
+    if (!ownerKey) return;
     const srcIdx = dto.srcIdx ?? 0;
     const epIdx = dto.epIdx ?? 0;
     const progressSec = Math.max(0, Math.round(dto.progressSec));
     const durationSec = dto.durationSec ? Math.round(dto.durationSec) : null;
 
-    // 找已有记录
-    let existing: WatchHistory | null = null;
-    if (userId) {
-      existing = await this.repo.findOne({
-        where: { userId, contentType, contentId },
-      });
-    } else if (guestId) {
-      existing = await this.repo.findOne({
-        where: { guestId, contentType, contentId },
-      });
-    } else {
-      return; // 既没 userId 也没 guestId，忽略
-    }
-
-    if (existing) {
-      // 同集：只更新进度比当前更大的
-      // 换集：直接覆盖（epIdx 不同说明用户换集了）
-      const sameEpisode = existing.epIdx === epIdx && existing.srcIdx === srcIdx;
-      if (sameEpisode && progressSec <= existing.progressSec) return;
-
-      await this.repo.update(existing.id, {
-        srcIdx,
-        epIdx,
-        episodeId: episodeId ?? null,
-        progressSec,
-        durationSec,
-      });
-    } else {
-      const record = this.repo.create({
-        userId: userId ?? null,
-        guestId: guestId ?? null,
-        contentType,
-        contentId,
-        episodeId: episodeId ?? null,
-        srcIdx,
-        epIdx,
-        progressSec,
-        durationSec,
-      });
-      await this.repo.save(record);
-    }
+    // 运行时为 MySQL / MariaDB；真实 HTTP 测试使用 better-sqlite3。
+    const sqlite = this.repo.manager.connection.options.type === 'better-sqlite3';
+    const incoming = (column: string) => sqlite ? `excluded.\`${column}\`` : `VALUES(\`${column}\`)`;
+    const sameEpisode = `\`srcIdx\` = ${incoming('srcIdx')} AND \`epIdx\` = ${incoming('epIdx')} AND \`episodeId\` ${sqlite ? 'IS' : '<=>'} ${incoming('episodeId')}`;
+    const accept = `NOT (${sameEpisode}) OR ${incoming('progressSec')} > \`progressSec\``;
+    const insert = 'INSERT INTO `watch_history` (`id`, `ownerKey`, `userId`, `guestId`, `contentType`, `contentId`, `episodeId`, `srcIdx`, `epIdx`, `progressSec`, `durationSec`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
+    const update = sqlite
+      ? `ON CONFLICT (\`ownerKey\`, \`contentType\`, \`contentId\`) DO UPDATE SET
+          \`durationSec\` = excluded.\`durationSec\`, \`updatedAt\` = CURRENT_TIMESTAMP,
+          \`progressSec\` = excluded.\`progressSec\`, \`episodeId\` = excluded.\`episodeId\`,
+          \`srcIdx\` = excluded.\`srcIdx\`, \`epIdx\` = excluded.\`epIdx\`
+          WHERE ${accept}`
+      // MySQL 按从左到右赋值；判定依赖的进度、episodeId 与序号必须在判定字段之后更新。
+      // VALUES(col) 同时兼容 MySQL 8 与 MariaDB；MySQL 的新行 alias 写法不兼容 MariaDB。
+      : `ON DUPLICATE KEY UPDATE
+          \`durationSec\` = IF(${accept}, VALUES(\`durationSec\`), \`durationSec\`),
+          \`updatedAt\` = IF(${accept}, CURRENT_TIMESTAMP(6), \`updatedAt\`),
+          \`progressSec\` = IF(${sameEpisode}, GREATEST(\`progressSec\`, VALUES(\`progressSec\`)), VALUES(\`progressSec\`)),
+          \`episodeId\` = VALUES(\`episodeId\`), \`srcIdx\` = VALUES(\`srcIdx\`), \`epIdx\` = VALUES(\`epIdx\`)`;
+    await this.repo.query(`${insert} ${update}`, [
+      randomUUID(), ownerKey, userId?.toLowerCase() ?? null, userId ? null : guestId,
+      contentType, contentId, episodeId ?? null, srcIdx, epIdx, progressSec, durationSec,
+    ]);
   }
 
   /**
@@ -82,13 +70,8 @@ export class WatchHistoryService {
   ): Promise<WatchHistory | null> {
     // 条件里有 undefined 时 TypeORM 会直接忽略它，查到的就是这个用户 / 游客的第一条记录
     if (typeof contentId !== 'string' || contentId === '') return null;
-    if (userId) {
-      return this.repo.findOne({ where: { userId, contentType, contentId } });
-    }
-    if (guestId) {
-      return this.repo.findOne({ where: { guestId, contentType, contentId } });
-    }
-    return null;
+    const ownerKey = this.ownerKey(userId, guestId);
+    return ownerKey ? this.repo.findOne({ where: { ownerKey, contentType, contentId } }) : null;
   }
 
   /**
@@ -99,17 +82,13 @@ export class WatchHistoryService {
     guestId?: string,
     limit = 10,
   ): Promise<WatchHistory[]> {
-    if (!userId && !guestId) return [];
+    const ownerKey = this.ownerKey(userId, guestId);
+    if (!ownerKey) return [];
     const qb = this.repo
       .createQueryBuilder('w')
+      .where('w.ownerKey = :ownerKey', { ownerKey })
       .orderBy('w.updatedAt', 'DESC')
       .take(limit);
-
-    if (userId) {
-      qb.where('w.userId = :userId', { userId });
-    } else {
-      qb.where('w.guestId = :guestId', { guestId });
-    }
 
     return qb.getMany();
   }

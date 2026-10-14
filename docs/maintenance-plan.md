@@ -509,6 +509,42 @@ stdout 的符号链接，实际不持久化日志；helmet 与 nginx 安全头�
 [Next 15 异步参数迁移](https://nextjs.org/docs/app/guides/upgrading/version-15)、
 [缓存机制](https://nextjs.org/docs/app/guides/caching-without-cache-components)。
 
+### 数据库 migration 基线与续播一致性 —— 本地完成 ✅（2026-10-14）
+
+本节为 `783aeba` 之后的实际结果；下文旧方案中的“零 migration / DB_SYNC 首次建表”描述保留为历史背景，
+当前操作以[数据库迁移手册](database-migrations.md)为准。未对任何真实业务库执行迁移。
+
+- **冻结基线**：从 `783aeba` 的实体生成并核对 27 张表、41 条建表 / 外键 SQL；
+  冻结 MySQL / MariaDB 两份结构快照。CLI 提供 `migration:baseline / run / check`，不加载真实 `.env`。
+  存量库必须完整匹配表、列、索引、外键、默认值、字符集等，才只登记初始基线；
+  缺表、额外表 / 触发器、结构漂移或异常迁移记录均拒绝。执行续播迁移前再次核对基线。
+- **启动与部署**：生产硬性禁止自动同步；开发显式 `DB_SYNC=false` 也启用迁移记录检查。
+  应用连接初始化后、业务模块初始化前只读校验迁移记录，失败关闭连接。
+  部署先确保 MySQL 就绪（不重建已有容器），空卷首次初始化可执行迁移；已有卷只检查，
+  需人工先备份、停写和迁移。检查失败不继续更新业务容器，仍恢复此前 nginx 配置。
+- **续播一致性**：新增隐藏的 ownerKey、归属 / 内容唯一索引和最近观看索引；
+  登录记录清除游客 ID，读写均按独立归属键隔离。单条条件 upsert 防并发重复和同集进度倒退，
+  换线路、集序号或 episodeId 允许低秒数覆盖。历史重复行按 updatedAt / createdAt / id 确定性保留最新一行。
+  真实数据库测试发现回填会触发 updatedAt 自动更新，已修为保留原时间；固定反向 ID 的失败 / 通过证据保留。
+- **MariaDB 兼容**：TypeORM 对 MariaDB 原生 UUID 的推导与既有关系列宽冲突；
+  应用改用 MySQL 兼容驱动，保持 varchar UUID，迁移 CLI 仍按真实数据库类型匹配各自快照。
+  两种数据库均实际加载生产 DatabaseModule 全实体，验证 UUID 关联、JSON、更新和级联删除。
+- **验证**：Node 22.23.3 构建通过；后端全量 **67 套 / 3200 用例通过**，
+  其中续播与访问控制专项 **61 项通过**。原测试进程继承的 TLS 环境有关闭校验警告，
+  随后显式启用 TLS 校验复跑 safe-fetch **60 项通过**，本轮无网络安装。
+  隔离 MySQL **8.0.46** 与 MariaDB **11.4.13** 各 **17 / 17** 场景通过，
+  包含 8 个独立连接实际并发写入，以及真实 Nest HTTP 上报 204、查询 200 并读回 47 秒。
+  部署脚本在真实 Bash + stub Docker 下验证首次成功、已有库成功、待迁移拒绝、初始化失败和 DB_SYNC 拒绝 **5 项通过**；
+  这是流程分支验证，不是实际生产部署。工作流 YAML、shell 语法与 diff 检查通过。
+- **CI 与证据**：部署 workflow 新增独立 MySQL / MariaDB 迁移回归矩阵并作为部署前置，未触发远程 Actions。
+  可重复数据库检查入口为 `backend/scripts/test-migrations.cjs`。
+  本地证据在 `F:/METU/.cache/prism-migration-qa-20261014-1714/`：
+  `mysql-integration-final.log`、`mariadb-integration-final.log`、`local-checks/result.json`、`deploy-flow-result.json`。
+- **清理与边界**：随机测试库全部清理；本轮 3 个容器、1 个网络、2 个新镜像已删除，
+  原 7 个容器、19 个卷、15 个镜像、7 个网络不变，Docker 恢复停止。无推送、部署或真实业务数据修改。
+  双库 HTTP 为局部 Nest 应用，不代替完整 AppModule / Redis / 生产鉴权端到端验收。
+  DDL 不能整体回滚，去重无法恢复被合并行，撤销须用迁移前备份；跨集迟到请求仍按处理顺序覆盖，未引入事件排序协议。
+
 ### 批次 1-C / 1-D / 1-E —— 交叉核查后的修订方案（2026-10-08）
 
 第四节的 1-C/1-D/1-E 原文写于 6 周前，动手前用 5 个领域代理 + 1 个交叉核查代理逐条对照**当前代码**

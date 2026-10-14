@@ -1089,6 +1089,11 @@ javascript: / data: / vbscript: / file: 等其他协议不入库（影视同时�
 `GET /watch-history?contentType=movie&contentId=uuid&guestId=xxx` — 某部作品的进度：`contentType` 必须是 movie / novel / comic，`contentId` 必填且是 UUID（不区分大小写），`guestId` 只接受一个字符串（≤ 64）；缺 `contentId` 或写成数组 / 对象一律 `400`（此前不带 `contentId` 会返回这个游客的第一条记录）。登录时按账号查，否则按 `guestId` 查。
 `GET /watch-history/recent?guestId=xxx&limit=10` — 最近观看，`limit` 为整数，缺省 10、夹到 1–50；`guestId` 规则同上。
 
+用户和游客的记录严格分开；登录上报不再保存请求中的 `guestId`，游客历史不会自动合并到账号。
+每个身份、内容类型、内容 ID 只有一行，数据库原子写入避免并发创建重复行。
+同线路 / 集序号 / `episodeId` 下只接受更大进度，相等或较小进度不改变时长和更新时间；
+换线路或换集允许覆盖为更小秒数。请求没有采样序号，跨集旧请求晚到仍可能覆盖新集，详见[迁移与一致性说明](database-migrations.md)。
+
 ---
 
 ## 附：门户缓存窗口（下架 / 撤回发布后多久从门户消失）

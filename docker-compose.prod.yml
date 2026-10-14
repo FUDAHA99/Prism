@@ -7,8 +7,8 @@ version: '3.8'
 #   2. bash scripts/deploy.sh
 #
 # 手动操作：
-#   启动: bash scripts/render-nginx-conf.sh   # 先生成 nginx/nginx.active.conf，否则 nginx 起不来
-#         docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+#   启动: bash scripts/deploy.sh   # 含 migration 状态检查与 nginx 配置生成
+#   存量库升级: 先按 docs/database-migrations.md 备份、停写并迁移
 #   停止: docker compose -f docker-compose.prod.yml down
 #   日志: docker compose -f docker-compose.prod.yml logs -f <service>
 #   重置: docker compose -f docker-compose.prod.yml down -v  ⚠️ 删除所有数据
@@ -93,7 +93,7 @@ services:
       DATABASE_USER:     ${MYSQL_USER:-cms}
       DATABASE_PASSWORD: ${MYSQL_PASSWORD}
 
-      # 首次部署设为 true 让 TypeORM 自动建表，之后改为 false
+      # 生产硬性禁止自动改表；迁移命令与启动检查均使用同一配置
       DB_SYNC:           ${DB_SYNC:-false}
 
       REDIS_HOST:        redis

@@ -92,13 +92,13 @@ bash scripts/deploy.sh
 2. 预检 JWT 密钥，两道都在动任何容器之前，不通过则中止，容器和 nginx 配置都不动（规则见 5.3）：先由脚本快速检查 `.env.prod` 的基本规则（两把都要设置、不短于 32 个字符、不是仓库里的示例/占位值、互不相同、不在已泄露清单里）；再构建全部镜像（backend / portal / frontend，此时运行中的容器不受影响），用新 backend 镜像起一个一次性容器（不联网、不挂卷、用完即删）直接调用 backend 的启动校验，被校验的值取自 compose 渲染出的配置，插值方式与 `up` 相同（shell 里导出的同名变量、未加引号的 `$` 都与 backend 实际拿到的一致），失败时只打印问题清单、不回显密钥
 3. 生成 nginx 生效配置 `nginx/nginx.active.conf`（`scripts/render-nginx-conf.sh`；HTTP / HTTPS 模式见第 7 节）
 4. 部署前校验：在一次性容器里对生成的配置跑 `nginx -t`，不依赖业务容器；不通过则中止，`nginx/nginx.active.conf` 换回部署前的内容，容器一个都不动（运行中的 nginx 重启后仍是原配置）
-5. 检测是否首次部署（自动设置 `DB_SYNC=true` 建表）；`.env.prod` 里写着 `DB_SYNC=true` 时打印警告
+5. 拒绝 `DB_SYNC=true`；确保 MySQL 就绪（不重建已有容器），首次部署执行 migration，已有数据卷只读检查迁移状态，未就绪则中止，详见[数据库迁移手册](database-migrations.md)
 6. 用上一步构建好的镜像启动全部 6 个容器（`up -d` 不再构建）
 7. 等待 backend 就绪后接到真实 Docker 网络再跑一次 `nginx -t`，通过后强制重建 nginx 容器（每次部署 80/443 中断数秒，见第 7 节「nginx 配置变更如何生效」）
 8. 首次部署：运行 `seed-admin.js` 创建管理员账户，并配置每日自动备份；例行部署：backend 就绪后运行 `seed-admin.js --roles-only` 补齐 `admin` / `editor` 系统角色（不建账号、不改密码、不分配任何角色；没有可用的 `admin` 时打印警告和手工分配的命令，失败只警告、不中止部署，见 5.1），再只读查询一次公开注册开关 `enable_register`，是 `true` 时打印关闭方法（从不修改它，查询失败只警告，见 5.3 ⑥）
 9. 清理悬空镜像（`docker image prune -f`）
 
-首次部署仅在本次执行中临时设置 `DB_SYNC=true`（不修改 `.env.prod`）；backend 容器会一直保留 `DB_SYNC=true`，直到下一次 `up` 重建它。建完表后执行 `docker compose -f docker-compose.prod.yml --env-file .env.prod up -d backend` 关闭（`restart` 无效），再执行 `docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --no-deps --force-recreate nginx` 让 nginx 重新解析 backend 的新容器 IP（或直接再执行一次 `bash scripts/deploy.sh`，两步都会做）。
+生产环境始终禁止自动同步。旧版本首次升级前，必须按[数据库迁移手册](database-migrations.md)备份、停写、核对并登记基线，再执行后续 migration。例行部署不会自动修改已有数据库结构；后端启动也只读检查迁移记录。
 
 部署完成后访问：
 
