@@ -89,7 +89,7 @@ DATABASE_PASSWORD=cms123
 CORS_ORIGIN=http://localhost:5173,http://localhost:3002
 
 # 文件上传
-UPLOAD_DIR=uploads
+UPLOAD_DEST=./uploads
 MAX_FILE_SIZE=10485760
 
 # 缓存（内存缓存，不需要 Redis）
@@ -347,12 +347,14 @@ TypeORM `synchronize: true` 在开发模式下自动同步，但某些操作（�
 - 开发时可以直接重建本地库：`docker compose down -v` 后再 `docker compose up -d`（会清空本地 MySQL 与 Redis 的数据）
 - 生产环境使用 Migration
 
-### Q: 文件上传失败 `ENOENT: no such file or directory`
+### Q: 文件上传失败或上传后图片无法显示
 
-确保 `backend/uploads` 目录存在：
-```bash
-mkdir -p backend/uploads
-```
+后端按 `UPLOAD_DEST` 写入并公开提供文件，默认 `./uploads` 相对后端进程的工作目录，缺失目录会自动创建。
+请确认运行用户对目录有写入权限、磁盘空间足够；修改目录后需同步迁移已有文件，数据库中的 URL 不会自动改变。
+开发时后台 Vite 与门户 Next 都会将 `/uploads/` 转发至后端；门户采用与服务端 API 一致的
+`BACKEND_INTERNAL_URL` / `NEXT_PUBLIC_API_BASE`，未配置时为 `http://localhost:3001`。
+生产由 nginx 转发，默认 Docker 卷是 `prism_uploads:/app/uploads`。
+历史版本只保存媒体元数据、没有保存上传字节，修复不会恢复这些旧文件，需要重新上传。
 
 ### Q: 审计日志"操作用户"列显示截断的 UUID
 

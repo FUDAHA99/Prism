@@ -19,6 +19,10 @@ export default defineConfig({
         changeOrigin: true,
         // baseURL 已改为 /api/v1，开发和生产行为一致，无需 rewrite
       },
+      '/uploads': {
+        target: 'http://127.0.0.1:3001',
+        changeOrigin: true,
+      },
     },
   },
   build: {

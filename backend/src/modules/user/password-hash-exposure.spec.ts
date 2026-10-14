@@ -125,7 +125,7 @@ describe('密码哈希不出库：用户与关联查询只取安全字段', () =
       }),
       cache as any,
     );
-    mediaService = new MediaService(ds.getRepository(MediaFile), auditService);
+    mediaService = new MediaService(ds.getRepository(MediaFile), auditService, new ConfigService());
     contentService = new ContentService(ds.getRepository(Content), auditService);
     statsService = new StatsService(
       ds.getRepository(Content),
@@ -156,7 +156,7 @@ describe('密码哈希不出库：用户与关联查询只取安全字段', () =
     await ds.query('INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)', [adminId, adminRole.id]);
 
     // 同时写 uploaderId 与 uploader 关联：实体里 uploader 关联走的是另一列 uploader_id，
-    // 而 saveFileRecord 只写 uploaderId，只写它的话 join 恒为空、断言就成了空转
+    // 而 saveFile 只写 uploaderId，只写它的话 join 恒为空、断言就成了空转
     const media = await ds.getRepository(MediaFile).save({
       filename: 'f.png',
       originalName: 'f.png',

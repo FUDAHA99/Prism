@@ -78,14 +78,14 @@ export class MediaController {
     const filename = `${randomUUID()}${ext}`;
     const url = `/uploads/${filename}`;
 
-    const media = await this.mediaService.saveFileRecord({
+    const media = await this.mediaService.saveFile({
       filename,
       originalName: file.originalname,
       mimeType: file.mimetype,
       size: file.size,
       url,
       uploaderId: user.id,
-    });
+    }, file.buffer);
 
     return { message: '文件上传成功', data: media };
   }

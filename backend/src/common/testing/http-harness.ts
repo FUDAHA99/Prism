@@ -69,6 +69,8 @@ export interface HarnessOptions {
   /** 除鉴权闭包外还需要的实体（会同时注册为 forFeature） */
   entities?: Type<unknown>[];
   imports?: Array<Type<unknown>>;
+  /** 注册与被测路由相关的中间件（如上传文件静态服务），须在 init 前执行 */
+  configureApp?: (app: NestExpressApplication) => void;
 }
 
 export interface HttpHarness {
@@ -132,6 +134,7 @@ export async function createHttpHarness(options: HarnessOptions): Promise<HttpHa
   app.useGlobalPipes(new ValidationPipe(globalValidationPipeOptions()));
   app.useGlobalFilters(new HttpExceptionFilter());
   app.useGlobalInterceptors(new TransformInterceptor());
+  options.configureApp?.(app);
   await app.init();
   await app.listen(0, '127.0.0.1');
 

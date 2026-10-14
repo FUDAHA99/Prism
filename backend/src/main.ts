@@ -11,6 +11,7 @@ import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { parseCorsOrigins } from './common/utils/cors-origins';
 import { globalValidationPipeOptions } from './common/pipes/global-validation';
 import { API_GLOBAL_PREFIX } from './common/api-prefix';
+import { MediaService } from './modules/media/media.service';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
@@ -86,7 +87,7 @@ async function bootstrap() {
   );
   
   // 静态文件服务
-  app.useStaticAssets('uploads', {
+  app.useStaticAssets(app.get(MediaService).uploadDirectory, {
     prefix: '/uploads/',
   });
   
