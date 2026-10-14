@@ -61,11 +61,13 @@ export default function HlsPlayer({
     const isHls = /\.m3u8(\?|$)/i.test(url)
     let hls: any = null
     let cancelled = false
+    let initialSeekApplied = false
 
     const onCanPlay = () => {
       setLoading(false)
-      // 续播跳转
-      if (initialTime > 5) {
+      // 每个播放源只恢复一次，避免 seek 再次触发 canplay 时反复跳回原进度
+      if (initialTime > 5 && !initialSeekApplied) {
+        initialSeekApplied = true
         video.currentTime = initialTime
       }
     }

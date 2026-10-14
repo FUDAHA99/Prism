@@ -11,14 +11,17 @@ const nextConfig = {
     unoptimized: true,
   },
   async rewrites() {
-    // 开发时没有 nginx，由 Next 转发上传文件；生产继续由 nginx 提供该路由。
+    // 开发时没有 nginx，由 Next 转发上传文件和续播请求；生产继续由 nginx 提供这些路由。
     if (process.env.NODE_ENV !== 'development') return []
     const backend = (
       process.env.BACKEND_INTERNAL_URL ||
       process.env.NEXT_PUBLIC_API_BASE ||
       'http://localhost:3001'
     ).replace(/\/+$/, '')
-    return [{ source: '/uploads/:path*', destination: `${backend}/uploads/:path*` }]
+    return [
+      { source: '/uploads/:path*', destination: `${backend}/uploads/:path*` },
+      { source: '/api/v1/watch-history/:path*', destination: `${backend}/api/v1/watch-history/:path*` },
+    ]
   },
 }
 module.exports = nextConfig

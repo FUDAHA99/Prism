@@ -306,7 +306,8 @@ Vite / Vitest 已于 2026-10-14 在本地升级，见下方「Vite 6 / Vitest 4 
 **其他已记录、未排期**：JSON 请求体 100kb 上限导致超长章节无法保存（413）；`prism_nginx_logs` 卷里只有指向
 stdout 的符号链接，实际不持久化日志；helmet 与 nginx 安全头重复、nginx 的 Referrer-Policy 覆盖了 helmet 的
 `no-referrer`；漫画章节上传无并发上限且页序按完成顺序；nginx 镜像未锁版本。
-前端已有 17 个测试文件 / 406 个用例，CI 的测试步骤同时覆盖 backend 与 frontend，portal 暂无测试脚本。
+前端已有 17 个测试文件 / 406 个用例。2026-10-14 已补齐 portal 浏览器回归入口，CI 测试步骤现覆盖三个子项目；
+门户本地验证与线上 CI 的区别见下方「门户回归基线」。
 
 ### 后续维护：Markdown 预览净化 —— 本地完成 ✅（2026-10-13）
 
@@ -430,6 +431,43 @@ stdout 的符号链接，实际不持久化日志；helmet 与 nginx 安全头�
 
 参考：[Vite 6 迁移说明](https://v6.vite.dev/guide/migration)、[Vitest 4 迁移说明](https://v4.vitest.dev/guide/migration)、
 [npm peer 解析修复](https://github.com/npm/cli/pull/8448)。
+
+### 成果归档 —— 本地提交完成（2026-10-14）
+
+| 提交 | 内容 |
+|---|---|
+| `fc108e7` | Markdown 预览净化与 13 个组件回归用例 |
+| `d3b8922` | 上传文件落盘、删除清理及开发文件代理 |
+| `1d33abc` | Node 22 本地声明、三端镜像、CI 与版本门禁 |
+| `ff1f522` | Vite 6 / Vitest 4、ESM 配置加载与升级记录 |
+
+拆分前冻结工作树，四个提交叠加后的 29 个路径与冻结内容逐项一致（仅按 Git 规则归一换行）。
+以上各节的「未提交」是当时验证记录，当前以本节归档状态为准；未推送或部署。
+
+### 门户回归基线 —— 本地完成 ✅（2026-10-14）
+
+- **范围**：保留 Next 14.2.35 / React 18，只新增门户回归测试并修复测试直接发现的两处续播问题。
+  `portal` 的 `npm test` 使用 Node 原生测试运行器与 Playwright 1.63.0；仅新增 `playwright` / `playwright-core` 两个包，
+  现有依赖版本、下载地址、完整性值与 SWC 平台元数据保留。Windows Node 22.23.3 下，隔离目录干净 `npm ci` 成功。
+- **开发续播路由**：修前真实 Next 返回 404，API 夹具收到 0 次请求。现只在 development 将
+  `/api/v1/watch-history` 及子路径转发到后端；保留 query / Authorization。生产 Next 直连仍返回 404，由原有 nginx 提供 API 转发。
+- **播放器修复**：真实视频在恢复到 45 秒后，seek 再次触发 `canplay`，旧逻辑不断重置 `currentTime`；
+  约 3 秒的诊断记录出现 3398 次 `canplay` / `seeking`，视频停留在 45 秒。现在每个播放源只应用一次初始跳转。
+- **本地验收**：真实 Next 生产构建（含 TypeScript）通过；生产服务加本地薄代理、开发服务均通过 Chromium 回归。
+  **6 个子场景全部通过**（Node TAP 计入总测试为 7/7）：首页 / 导航 / 六类列表分页、文章 / 小说 / 漫画阅读、
+  真实 WebM 解码与换集 / 换线路 / 失败提示、404 分支、生产续播、开发续播。两种续播均从线路 2 第 3 集恢复到 45 秒，
+  自然播放到 47 秒，经过期 token 的 401 匿名重试得到上报 204，详情页读回新进度；未人工模拟媒体事件。
+  页面无 `pageerror` 或 Next 错误覆盖层，浏览器只允许本轮本地 origin，未发现外部请求。
+- **其他检查**：后端路由合同与构建打包用例 **2 套 / 591 个通过**；严格 TLS / npm 官方源下门户审计门禁通过，
+  生产公告仍为 23 条已登记例外、0 新增、0 过期；3 条开发公告不阻断。包签名验证 218 个，来源证明验证 23 个。
+- **CI**：`deploy.yml` 的 portal 分支先安装 Chromium 与系统依赖，再执行相同 `npm test`；原三端构建门禁保留。
+  此次只完成本地运行与工作流静态检查，尚未推送，因此不宣称远程 Actions 已通过。
+- **证据**：`F:/METU/.cache/prism-portal-baseline-20261014-155455-81d52ff1/`；最终回归目录
+  `portal-regression-jUH4zy/` 包含结果 JSON、截图与构建 / 服务日志，命令输出为 `portal-regression-verified.log`。
+  修前 404 位于 `portal-regression-kxfZRY/`，媒体循环诊断位于 `portal-regression-XflP7d/`。临时服务已停止。
+- **边界**：API 使用本地夹具，不代表真实 JWT / Redis / MySQL 验收；此次没有 Docker 镜像、外部 HLS、Safari、移动端或真实部署验证。
+  Windows 临时依赖 junction 引起 standalone trace 复制告警；此套验证的是 `next start`，不作为 standalone 镜像包装的通过证据。
+  已有小说 / 漫画分页丢失搜索词、从头开始链接保留本地进度等行为另行处理；未扩展到 Next / Nest 升级或其他功能。
 
 ### 批次 1-C / 1-D / 1-E —— 交叉核查后的修订方案（2026-10-08）
 

@@ -53,12 +53,15 @@ jobs:
           NEXT_PUBLIC_API_BASE: http://localhost
           NEXT_PUBLIC_SITE_NAME: Prism
 
-      # 单元测试（含评论公开接口 PII 回归：backend comment.service.spec.ts；
-      # frontend 退出登录在后台吊销 token 的回归：src/api/auth.test.ts，vitest 在 CI 下以 run 模式执行）。
-      # portal 没有 test 脚本（--if-present 下为空操作），这里直接跳过。
+      - name: Install Chromium for portal regression
+        if: matrix.project == 'portal'
+        working-directory: portal
+        run: npx playwright install --with-deps chromium
+
+      # backend / frontend 单元与集成测试；portal 用真实 Next 和本地 API 夹具运行 Chromium 回归。
+      # vitest 在 CI 下以 run 模式执行；portal 测试会在临时副本中构建自己的生产夹具环境。
       # 不要加 --coverage：backend package.json 的全局 80% 覆盖率阈值会让它失败。
       - name: Test
-        if: matrix.project != 'portal'
         working-directory: ${{ matrix.project }}
         run: npm test --if-present
 

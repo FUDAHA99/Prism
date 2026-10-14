@@ -69,6 +69,31 @@ npm run preview
 后续若重算依赖时再次遇到该错误，使用含修复的 npm 11（至少 11.6.0）重试，不使用 `--force` 或 `--legacy-peer-deps` 跳过依赖检查。
 参考：[npm peer 解析修复](https://github.com/npm/cli/pull/8448)。
 
+### 1.4 门户回归测试
+
+使用项目约定的 Node 22，在门户目录执行：
+
+```bash
+cd portal
+npm ci --registry=https://registry.npmjs.org
+npx playwright install chromium
+npm test
+```
+
+测试启动真实 Next 生产构建 / 服务和开发服务，以本地 HTTP 夹具提供内容与续播接口，再通过 Chromium 操作页面。
+它会在仓库外创建隔离副本，排除真实 `.env*`、已有 `.next` 与日志；不会使用项目的运行时数据库。
+日志、结果 JSON 和截图保存在命令输出的临时目录；可用 `PORTAL_TEST_OUTPUT_DIR` 指定仓库外的保存位置。
+CI 对 portal 安装 `playwright install --with-deps chromium`，然后执行同一个 `npm test`。
+
+覆盖内容页面、分页、章节阅读、播放失败提示、真实本地 WebM 解码 / 换源 / 续播跳转，以及续播 401 后匿名重试。
+续播测试还要求视频能继续播放到新的时间，上报后返回详情页能读回新进度，防止仅恢复初始位置就误判通过。
+小视频已经随测试提交，运行测试不需要 ffmpeg。API 夹具不验证 JWT 签名、Redis 吊销或 MySQL 持久化；
+外部 HLS 线路、Safari 原生 HLS、DRM 与移动端仍需独立验证。
+
+开发时 `/api/v1/watch-history` 及其子路径由 Next 转发到后端，保留查询参数和 Authorization；
+后端地址沿用 `/uploads` 的 `BACKEND_INTERNAL_URL` → `NEXT_PUBLIC_API_BASE` → `http://localhost:3001` 顺序。
+该 rewrite 只在 development 生效，生产继续走 nginx，不新增通用 API 代理。
+
 ---
 
 ## 2. 环境变量说明
