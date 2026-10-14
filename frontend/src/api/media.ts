@@ -25,7 +25,7 @@ export async function getMediaFile(id: string): Promise<ApiResponse<MediaFile>> 
   return res.data
 }
 
-export async function uploadFile(file: File): Promise<ApiResponse<MediaFile>> {
+export async function uploadFile(file: File, signal?: AbortSignal): Promise<ApiResponse<MediaFile>> {
   const formData = new FormData()
   formData.append('file', file)
   const res = await apiClient.post<ApiResponse<MediaFile>>('/media/upload', formData, {
@@ -33,6 +33,7 @@ export async function uploadFile(file: File): Promise<ApiResponse<MediaFile>> {
     // 覆盖全局 15s：上行低于约 5.6Mbps 时 10MB 文件必然超时。
     // XHR 超时从 send() 起算、包含浏览器连接排队时间，批量上传须由调用方限制并发
     timeout: 120_000,
+    signal,
   })
   return res.data
 }

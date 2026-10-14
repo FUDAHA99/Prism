@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import {
   App,
   Table,
@@ -37,7 +37,7 @@ import {
   type ComicChapter,
   type CreateComicChapterData,
 } from '../../api/comic'
-import { uploadFile, UPLOAD_MAX_SIZE } from '../../api/media'
+import { uploadChapterPages } from './upload-chapter-pages'
 import PageHeader from '../../components/common/PageHeader'
 import { QueryErrorSwitch } from '../../components/common/QueryErrorResult'
 import { formatDate } from '../../utils'
@@ -232,6 +232,7 @@ export default function ComicChaptersPage() {
       </QueryErrorSwitch>
 
       <ComicChapterModal
+        key={`${id}:${editing?.id ?? 'new'}`}
         open={open}
         editing={editing}
         onClose={() => {
@@ -240,9 +241,9 @@ export default function ComicChaptersPage() {
         }}
         onSubmit={(v) => {
           if (editing) {
-            updateMut.mutate({ chapterId: editing.id, data: v })
+            return updateMut.mutateAsync({ chapterId: editing.id, data: v })
           } else {
-            addMut.mutate(v)
+            return addMut.mutateAsync(v)
           }
         }}
         loading={addMut.isPending || updateMut.isPending}
@@ -261,15 +262,31 @@ function ComicChapterModal({
   open: boolean
   editing: ComicChapter | null
   onClose: () => void
-  onSubmit: (v: CreateComicChapterData) => void
+  onSubmit: (v: CreateComicChapterData) => Promise<unknown>
   loading: boolean
 }) {
   const { message } = App.useApp()
   const [form] = Form.useForm<CreateComicChapterData>()
   const [pages, setPages] = useState<string[]>([])
   const [uploading, setUploading] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const session = useRef(0)
+  const uploadingRef = useRef(false)
+  const savingRef = useRef(false)
+  const activeUpload = useRef<AbortController | null>(null)
+
+  const invalidateSession = () => {
+    session.current++
+    activeUpload.current?.abort()
+    activeUpload.current = null
+    uploadingRef.current = false
+    savingRef.current = false
+  }
 
   useEffect(() => {
+    invalidateSession()
+    setUploading(false)
+    setSaving(false)
     if (open) {
       if (editing) {
         form.setFieldsValue({
@@ -284,31 +301,66 @@ function ComicChapterModal({
         setPages([])
       }
     }
-  }, [open, editing, form])
+    return invalidateSession
+  }, [open, editing?.id, form])
 
-  const handleUpload = async (file: RcFile) => {
-    // 本地预检：超限文件不发请求（nginx 413 在慢上行下常表现为网络错误，拿不到提示）
-    if (file.size > UPLOAD_MAX_SIZE) {
-      message.error(`${file.name} 超过 10MB，已忽略`)
-      return false
-    }
+  const handleUpload = (file: RcFile, files: RcFile[]) => {
+    // Antd 对每个文件各调用一次，只由首个文件启动整批；同步 ref 防止渲染前重复进入。
+    if (file !== files[0] || !open || uploadingRef.current || savingRef.current || loading) return false
+    const currentSession = ++session.current
+    const controller = new AbortController()
+    activeUpload.current = controller
+    uploadingRef.current = true
     setUploading(true)
-    try {
-      const media = await uploadFile(file)
-      const url = (media as any).data?.url ?? (media as any).url
-      setPages((p) => [...p, url])
-    } catch (e) {
-      message.error(`${file.name} 上传失败${e instanceof Error && e.message ? '：' + e.message : ''}`)
-    } finally {
-      setUploading(false)
-    }
+    void uploadChapterPages(files, controller.signal, (text) => {
+      if (session.current === currentSession) message.error(text)
+    }).then((urls) => {
+      if (session.current === currentSession) {
+        setPages((previous) => session.current === currentSession ? [...previous, ...urls] : previous)
+      }
+    }).finally(() => {
+      if (session.current === currentSession) {
+        activeUpload.current = null
+        uploadingRef.current = false
+        setUploading(false)
+      }
+    })
     return false
   }
 
-  const removePage = (idx: number) =>
+  const handleClose = () => {
+    if (savingRef.current || loading) return
+    invalidateSession()
+    onClose()
+  }
+
+  const handleSubmit = async () => {
+    if (!open || uploadingRef.current || savingRef.current || loading) return
+    const currentSession = session.current
+    savingRef.current = true
+    setSaving(true)
+    try {
+      const values = await form.validateFields()
+      if (session.current !== currentSession || uploadingRef.current) return
+      await onSubmit({ ...values, pageUrls: pages })
+    } catch {
+      // 字段校验由 Form 展示，保存失败由 mutation 的 onError 提示。
+    } finally {
+      if (session.current === currentSession) {
+        savingRef.current = false
+        setSaving(false)
+      }
+    }
+  }
+
+  const busy = uploading || saving || loading
+  const removePage = (idx: number) => {
+    if (uploadingRef.current || savingRef.current || loading) return
     setPages((p) => p.filter((_, i) => i !== idx))
+  }
 
   const movePage = (idx: number, dir: -1 | 1) => {
+    if (uploadingRef.current || savingRef.current || loading) return
     setPages((p) => {
       const next = [...p]
       const target = idx + dir
@@ -322,13 +374,14 @@ function ComicChapterModal({
     <Modal
       title={editing ? '编辑章节' : '新建章节'}
       open={open}
-      onCancel={onClose}
-      onOk={() =>
-        form.validateFields().then((values) =>
-          onSubmit({ ...values, pageUrls: pages }),
-        )
-      }
-      confirmLoading={loading}
+      onCancel={handleClose}
+      onOk={handleSubmit}
+      okButtonProps={{ disabled: busy }}
+      confirmLoading={saving || loading}
+      cancelButtonProps={{ disabled: saving || loading }}
+      closable={!saving && !loading}
+      maskClosable={!saving && !loading}
+      keyboard={!saving && !loading}
       destroyOnClose
       width={900}
     >
@@ -371,8 +424,9 @@ function ComicChapterModal({
             multiple
             showUploadList={false}
             beforeUpload={handleUpload}
+            disabled={busy}
           >
-            <Button icon={<UploadOutlined />} loading={uploading}>
+            <Button icon={<UploadOutlined />} loading={uploading} disabled={busy}>
               批量上传图片
             </Button>
           </Upload>
@@ -427,14 +481,14 @@ function ComicChapterModal({
                   <Button
                     size="small"
                     onClick={() => movePage(idx, -1)}
-                    disabled={idx === 0}
+                    disabled={busy || idx === 0}
                   >
                     ←
                   </Button>
                   <Button
                     size="small"
                     onClick={() => movePage(idx, 1)}
-                    disabled={idx === pages.length - 1}
+                    disabled={busy || idx === pages.length - 1}
                   >
                     →
                   </Button>
@@ -443,6 +497,7 @@ function ComicChapterModal({
                     danger
                     icon={<DeleteOutlined />}
                     onClick={() => removePage(idx)}
+                    disabled={busy}
                   />
                 </Space>
               </div>
