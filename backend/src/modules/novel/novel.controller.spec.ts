@@ -34,6 +34,7 @@ import { HttpExceptionFilter } from '../../common/filters/http-exception.filter'
 import { AccessGuard } from '../../common/authz/access.guard';
 import { globalValidationPipeOptions } from '../../common/pipes/global-validation';
 import { Clock } from '../../common/clock/clock';
+import { PortalCacheService } from '../../shared/portal-cache/portal-cache.service';
 
 /**
  * 小说模块走真实 HTTP：真实 NovelController / NovelService、全局 AccessGuard（严格可选登录、JwtStrategy、角色）、
@@ -126,6 +127,8 @@ type Who = 'anonymous' | 'plain' | 'editor' | 'admin';
 jest.setTimeout(60_000);
 
 describe('小说模块 HTTP', () => {
+  const portalCache = { invalidate: jest.fn().mockResolvedValue(undefined) };
+  beforeEach(() => { portalCache.invalidate.mockClear(); });
   let app: NestExpressApplication;
   let ds: DataSource;
   let novels: Repository<Novel>;
@@ -259,6 +262,7 @@ describe('小说模块 HTTP', () => {
       controllers: [NovelController],
       providers: [
         NovelService,
+        { provide: PortalCacheService, useValue: portalCache },
         // 与 AppModule 相同：Access() 只写元数据，访问级别由全局 AccessGuard 执行
         { provide: APP_GUARD, useClass: AccessGuard },
         AuthService,
@@ -331,7 +335,59 @@ describe('小说模块 HTTP', () => {
   const ALL_LIVE_SLUGS = [slugs.published, slugs.featured, slugs.draft, slugs.archived].sort();
   const NOT_VISIBLE: NovelKey[] = ['draft', 'archived', 'deletedPublished'];
 
+  it('门户缓存：提交后的增改发布撤回删除各通知一次，读请求 / 失败写 / 空更新不通知', async () => {
+    const created = await as(http().post('/novels'), 'admin')
+      .send({ title: '缓存回归', slug: 'cache-notify-novel', status: 'published' }).expect(201);
+    const path = `/novels/${created.body.id}`;
+    expect(portalCache.invalidate.mock.calls).toEqual([[['portal:novels']]]);
+    await get('/novels/slug/cache-notify-novel', 'anonymous').expect(200);
+    await as(http().patch(path), 'admin').send({}).expect(200);
+    await as(http().patch(`/novels/${randomUUID()}`), 'admin').send({ title: '不存在' }).expect(404);
+    await as(http().post('/novels'), 'admin').send({}).expect(400);
+    await as(http().patch(path), 'anonymous').send({ title: '无权限' }).expect(401);
+    await as(http().patch(path), 'plain').send({ title: '无权限' }).expect(403);
+    expect(portalCache.invalidate).toHaveBeenCalledTimes(1);
+    await as(http().patch(path), 'admin').send({ title: '改名' }).expect(200);
+    await as(http().post(`${path}/publish`), 'admin').send({}).expect(201);
+    await as(http().post(`${path}/unpublish`), 'admin').send({}).expect(201);
+    await as(http().delete(path), 'admin').expect(204);
+    expect(portalCache.invalidate.mock.calls).toEqual(Array.from({ length: 5 }, () => [['portal:novels']]));
+  });
+
   describe('GET /novels', () => {
+    it('门户缓存：章节增改删通知、阅读不通知，后续聚合失败仍通知已提交章节', async () => {
+      const parent = await novels.save({ title: '缓存小说', slug: 'cache-chapters-novel', status: NovelStatus.PUBLISHED, publishedAt: new Date('2020-01-01') });
+      try {
+        const created = await as(http().post(`/novels/${parent.id}/chapters`), 'editor').send({ title: '新章', content: '正文', isPublished: true }).expect(201);
+        const path = `/novels/chapters/${created.body.id}`;
+        await get(path, 'anonymous').expect(200);
+        await as(http().patch(path), 'editor').send({}).expect(200);
+        expect(portalCache.invalidate).toHaveBeenCalledTimes(1);
+        await as(http().patch(path), 'editor').send({ title: '修改章节' }).expect(200);
+        await as(http().delete(path), 'editor').expect(204);
+        expect(portalCache.invalidate.mock.calls).toEqual(Array.from({ length: 3 }, () => [['portal:novels']]));
+        portalCache.invalidate.mockClear();
+        await ds.query("CREATE TRIGGER cache_parent_fail BEFORE UPDATE ON novels BEGIN SELECT RAISE(ABORT, 'cache regression'); END");
+        try {
+          await as(http().post(`/novels/${parent.id}/chapters`), 'editor').send({ title: '新章', content: '正文', isPublished: true }).expect(500);
+          expect(await ds.getRepository(NovelChapter).countBy({ novelId: parent.id })).toBe(1);
+          expect(portalCache.invalidate.mock.calls).toEqual([[['portal:novels']]]);
+        } finally {
+          await ds.query('DROP TRIGGER cache_parent_fail');
+        }
+        portalCache.invalidate.mockClear();
+        await ds.query("CREATE TRIGGER cache_chapter_fail BEFORE INSERT ON novel_chapters BEGIN SELECT RAISE(ABORT, 'cache regression'); END");
+        try {
+          await as(http().post(`/novels/${parent.id}/chapters`), 'editor').send({ title: '新章', content: '正文', isPublished: true }).expect(500);
+          expect(portalCache.invalidate).not.toHaveBeenCalled();
+        } finally {
+          await ds.query('DROP TRIGGER cache_chapter_fail');
+        }
+      } finally {
+        await novels.delete(parent.id);
+      }
+    });
+
     it.each<Who>(['anonymous', 'plain'])('%s：只看到已发布、未删除的小说', async (who) => {
       const res = await get('/novels', who).expect(200);
       expect(slugsOf(res.body.data)).toEqual(PUBLISHED_SLUGS);

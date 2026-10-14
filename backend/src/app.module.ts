@@ -34,6 +34,7 @@ import { WatchHistoryModule } from './modules/watch-history/watch-history.module
 // 共享模块
 import { DatabaseModule } from './shared/database/database.module';
 import { RedisModule } from './shared/redis/redis.module';
+import { PortalCacheModule } from './shared/portal-cache/portal-cache.module';
 
 @Module({
   imports: [
@@ -58,6 +59,7 @@ import { RedisModule } from './shared/redis/redis.module';
     // 共享模块
     DatabaseModule,
     RedisModule,
+    PortalCacheModule,
     
     // 功能模块
     AuthModule,

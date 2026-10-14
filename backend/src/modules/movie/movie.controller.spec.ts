@@ -35,6 +35,7 @@ import { HttpExceptionFilter } from '../../common/filters/http-exception.filter'
 import { AccessGuard } from '../../common/authz/access.guard';
 import { globalValidationPipeOptions } from '../../common/pipes/global-validation';
 import { Clock } from '../../common/clock/clock';
+import { PortalCacheService } from '../../shared/portal-cache/portal-cache.service';
 
 /**
  * 影视模块走真实 HTTP：真实 MovieController / MovieService、全局 AccessGuard（严格可选登录、JwtStrategy、
@@ -112,6 +113,8 @@ type Who = 'anonymous' | 'plain' | 'editor' | 'admin';
 jest.setTimeout(60_000);
 
 describe('影视模块 HTTP', () => {
+  const portalCache = { invalidate: jest.fn().mockResolvedValue(undefined) };
+  beforeEach(() => { portalCache.invalidate.mockClear(); });
   let app: NestExpressApplication;
   let ds: DataSource;
   let movies: Repository<Movie>;
@@ -243,6 +246,7 @@ describe('影视模块 HTTP', () => {
       controllers: [MovieController],
       providers: [
         MovieService,
+        { provide: PortalCacheService, useValue: portalCache },
         // 与 AppModule 相同：Access() 只写元数据，访问级别由全局 AccessGuard 执行
         { provide: APP_GUARD, useClass: AccessGuard },
         AuthService,
@@ -322,7 +326,52 @@ describe('影视模块 HTTP', () => {
   const PUBLISHED_SLUGS = [slugs.published, slugs.featured].sort();
   const ALL_LIVE_SLUGS = [slugs.published, slugs.featured, slugs.draft, slugs.archived].sort();
 
+  it('门户缓存：提交后的增改发布撤回删除各通知一次，读请求 / 失败写 / 空更新不通知', async () => {
+    const created = await as(http().post('/movies'), 'admin')
+      .send({ title: '缓存回归', slug: 'cache-notify-movie', status: 'published' }).expect(201);
+    const path = `/movies/${created.body.id}`;
+    expect(portalCache.invalidate.mock.calls).toEqual([[['portal:movies']]]);
+    await get('/movies/slug/cache-notify-movie', 'anonymous').expect(200);
+    await as(http().patch(path), 'admin').send({}).expect(200);
+    await as(http().patch(`/movies/${randomUUID()}`), 'admin').send({ title: '不存在' }).expect(404);
+    await as(http().post('/movies'), 'admin').send({}).expect(400);
+    await as(http().patch(path), 'anonymous').send({ title: '无权限' }).expect(401);
+    await as(http().patch(path), 'plain').send({ title: '无权限' }).expect(403);
+    expect(portalCache.invalidate).toHaveBeenCalledTimes(1);
+    await as(http().patch(path), 'admin').send({ title: '改名' }).expect(200);
+    await as(http().post(`${path}/publish`), 'admin').send({}).expect(201);
+    await as(http().post(`${path}/unpublish`), 'admin').send({}).expect(201);
+    await as(http().delete(path), 'admin').expect(204);
+    expect(portalCache.invalidate.mock.calls).toEqual(Array.from({ length: 5 }, () => [['portal:movies']]));
+  });
+
   describe('GET /movies', () => {
+    it('门户缓存：封面、线路与剧集增改删都失效，事务回滚不通知', async () => {
+      const id = await seedMovie('cache-movie-parts', MovieStatus.DRAFT);
+      try {
+        await as(http().patch(`/movies/${id}/poster`), 'editor').send({ posterUrl: '/uploads/new.jpg' }).expect(200);
+        const source = await as(http().post(`/movies/${id}/sources`), 'editor').send({ name: '缓存线路' }).expect(201);
+        const episode = await as(http().post(`/movies/sources/${source.body.id}/episodes`), 'editor')
+          .send({ title: '第1集', url: 'https://video.example.com/1.mp4' }).expect(201);
+        await as(http().patch(`/movies/episodes/${episode.body.id}`), 'editor').send({ title: '改名' }).expect(200);
+        await as(http().delete(`/movies/episodes/${episode.body.id}`), 'editor').expect(204);
+        await as(http().delete(`/movies/sources/${source.body.id}`), 'editor').expect(204);
+        expect(portalCache.invalidate.mock.calls).toEqual(Array.from({ length: 6 }, () => [['portal:movies']]));
+        portalCache.invalidate.mockClear();
+        await ds.query("CREATE TRIGGER cache_episode_fail BEFORE INSERT ON movie_episodes BEGIN SELECT RAISE(ABORT, 'cache regression'); END");
+        try {
+          await as(http().post(`/movies/${id}/sources`), 'editor')
+            .send({ name: '应回滚', episodes: [{ title: '失败集', url: 'https://video.example.com/2.mp4' }] }).expect(500);
+          expect(portalCache.invalidate).not.toHaveBeenCalled();
+          expect(await ds.getRepository(MovieSource).countBy({ movieId: id, name: '应回滚' })).toBe(0);
+        } finally {
+          await ds.query('DROP TRIGGER cache_episode_fail');
+        }
+      } finally {
+        await movies.delete(id);
+      }
+    });
+
     it.each<Who>(['anonymous', 'plain'])('%s：只看到已发布、未删除的影视', async (who) => {
       const res = await get('/movies', who).expect(200);
       expect(slugsOf(res.body.data)).toEqual(PUBLISHED_SLUGS);

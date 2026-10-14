@@ -10,6 +10,7 @@ import { Repository, SelectQueryBuilder } from 'typeorm';
 import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { Content, ContentStatus, ContentType } from './entities/content.entity';
 import { AuditService } from '../audit/audit.service';
+import { PortalCacheService } from '../../shared/portal-cache/portal-cache.service';
 import { changedAuditFields } from '../audit/audit-summary';
 import { isStaff, Viewer } from '../../common/authz/viewer';
 import { publishedDueParams, publishedDueSql } from '../../common/authz/publish-window';
@@ -140,6 +141,7 @@ export class ContentService {
     @InjectRepository(Content)
     private readonly contentRepository: Repository<Content>,
     private readonly auditService: AuditService,
+    private readonly portalCache: PortalCacheService,
     @Optional() private readonly clock: Clock = SYSTEM_CLOCK,
   ) {}
 
@@ -186,6 +188,7 @@ export class ContentService {
       ...state,
     });
     const saved = await this.contentRepository.save(content);
+    await this.portalCache.invalidate(['portal:contents']);
 
     await this.auditService.log({
       userId: authorId,
@@ -319,6 +322,7 @@ export class ContentService {
 
     if (Object.keys(patch).length > 0) {
       await this.contentRepository.update(id, patch);
+      await this.portalCache.invalidate(['portal:contents']);
     }
 
     // 只记变更字段名：此前记录整个 dto，草稿正文全文进审计表，超过 TEXT 64KB 时还会让已提交的更新返回 500
@@ -348,6 +352,7 @@ export class ContentService {
 
     // 「发布」按钮即立即发布：定时发布中的文章点了也马上可见
     await this.contentRepository.update(id, publishedState(this.publishNow()));
+    await this.portalCache.invalidate(['portal:contents']);
 
     await this.auditService.log({
       userId: currentUserId,
@@ -376,6 +381,7 @@ export class ContentService {
       status: ContentStatus.DRAFT,
       isPublished: false,
     });
+    await this.portalCache.invalidate(['portal:contents']);
 
     await this.auditService.log({
       userId: currentUserId,
@@ -401,6 +407,7 @@ export class ContentService {
     }
 
     await this.contentRepository.softDelete(id);
+    await this.portalCache.invalidate(['portal:contents']);
 
     await this.auditService.log({
       userId: currentUserId,

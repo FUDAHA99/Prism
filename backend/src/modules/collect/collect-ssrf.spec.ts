@@ -257,6 +257,7 @@ describe('CollectExecutorService 执行采集', () => {
       {} as any,
       sourceSvc as any,
       {} as any,
+      { invalidate: jest.fn().mockResolvedValue(undefined) } as any,
     );
 
     const { logId } = await executor.startRun(src.id, { mode: CollectMode.HOURS, hours: 24 }, 'admin-id');

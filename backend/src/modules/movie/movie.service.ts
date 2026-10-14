@@ -14,6 +14,7 @@ import {
 } from './entities/movie-source.entity';
 import { MovieEpisode } from './entities/movie-episode.entity';
 import { AuditService } from '../audit/audit.service';
+import { PortalCacheService } from '../../shared/portal-cache/portal-cache.service';
 import { changedAuditFields } from '../audit/audit-summary';
 import { isStaff, Viewer } from '../../common/authz/viewer';
 import { publishedDueParams, publishedDueSql } from '../../common/authz/publish-window';
@@ -246,6 +247,7 @@ export class MovieService {
     @InjectRepository(MovieEpisode)
     private readonly episodeRepo: Repository<MovieEpisode>,
     private readonly auditService: AuditService,
+    private readonly portalCache: PortalCacheService,
     @Optional() private readonly clock: Clock = SYSTEM_CLOCK,
   ) {}
 
@@ -343,6 +345,7 @@ export class MovieService {
       }
       return movie;
     });
+    await this.portalCache.invalidate(['portal:movies']);
 
     await this.auditService.log({
       userId,
@@ -487,6 +490,7 @@ export class MovieService {
     // 什么都没提交时不发 UPDATE：否则 TypeORM 仍会把 updatedAt 刷成当前时间，后台列表的「更新时间」凭空变了
     if (Object.keys(patch).length > 0) {
       await this.movieRepo.update(id, patch);
+      await this.portalCache.invalidate(['portal:movies']);
     }
 
     // 只记实际写入的变更字段名，不记请求体原文
@@ -510,6 +514,7 @@ export class MovieService {
       status: MovieStatus.PUBLISHED,
       publishedAt: movie.publishedAt ?? this.publishNow(),
     });
+    await this.portalCache.invalidate(['portal:movies']);
     await this.auditService.log({
       userId,
       action: 'MOVIE_PUBLISH',
@@ -525,6 +530,7 @@ export class MovieService {
     const movie = await this.movieRepo.findOne({ where: { id, deletedAt: IsNull() } });
     if (!movie) throw new NotFoundException(`影视不存在: ${id}`);
     await this.movieRepo.update(id, { status: MovieStatus.DRAFT });
+    await this.portalCache.invalidate(['portal:movies']);
     await this.auditService.log({
       userId,
       action: 'MOVIE_UNPUBLISH',
@@ -540,6 +546,7 @@ export class MovieService {
     const movie = await this.movieRepo.findOne({ where: { id, deletedAt: IsNull() } });
     if (!movie) throw new NotFoundException(`影视不存在: ${id}`);
     await this.movieRepo.softDelete(id);
+    await this.portalCache.invalidate(['portal:movies']);
     await this.auditService.log({
       userId,
       action: 'MOVIE_DELETE',
@@ -563,6 +570,7 @@ export class MovieService {
 
     // 重置检测状态为 null（待异步重新检测）
     await this.movieRepo.update(id, { posterUrl, posterBroken: null });
+    await this.portalCache.invalidate(['portal:movies']);
 
     await this.auditService.log({
       userId,
@@ -592,6 +600,7 @@ export class MovieService {
     if (!movie) throw new NotFoundException(`影视不存在: ${movieId}`);
     assertPlainObjects(dto.episodes, 'episodes');
     const saved = await this.movieRepo.manager.transaction((em) => this.insertSource(em, movieId, dto));
+    await this.portalCache.invalidate(['portal:movies']);
     await this.auditService.log({
       userId,
       action: 'MOVIE_SOURCE_CREATE',
@@ -607,6 +616,7 @@ export class MovieService {
     const src = await this.sourceRepo.findOne({ where: { id: sourceId } });
     if (!src) throw new NotFoundException(`线路不存在: ${sourceId}`);
     await this.sourceRepo.delete(sourceId);
+    await this.portalCache.invalidate(['portal:movies']);
     await this.auditService.log({
       userId,
       action: 'MOVIE_SOURCE_DELETE',
@@ -628,6 +638,7 @@ export class MovieService {
     const src = await this.sourceRepo.findOne({ where: { id: sourceId } });
     if (!src) throw new NotFoundException(`线路不存在: ${sourceId}`);
     const saved = await this.episodeRepo.save(this.newEpisode(sourceId, dto, { episodeNumber: 1, sortOrder: 0 }));
+    await this.portalCache.invalidate(['portal:movies']);
     await this.auditService.log({
       userId,
       action: 'MOVIE_EPISODE_CREATE',
@@ -653,6 +664,7 @@ export class MovieService {
     const patch = pickEpisodeFields(dto);
     if (Object.keys(patch).length > 0) {
       await this.episodeRepo.update(episodeId, patch);
+      await this.portalCache.invalidate(['portal:movies']);
     }
     await this.auditService.log({
       userId,
@@ -671,6 +683,7 @@ export class MovieService {
     const ep = await this.episodeRepo.findOne({ where: { id: episodeId } });
     if (!ep) throw new NotFoundException(`剧集不存在: ${episodeId}`);
     await this.episodeRepo.delete(episodeId);
+    await this.portalCache.invalidate(['portal:movies']);
     await this.auditService.log({
       userId,
       action: 'MOVIE_EPISODE_DELETE',

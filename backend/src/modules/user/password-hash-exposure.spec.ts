@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import { BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { PortalCacheService } from '../../shared/portal-cache/portal-cache.service';
 import { JwtService } from '@nestjs/jwt';
 import { instanceToPlain } from 'class-transformer';
 import { DataSource, Repository } from 'typeorm';
@@ -126,7 +127,7 @@ describe('密码哈希不出库：用户与关联查询只取安全字段', () =
       cache as any,
     );
     mediaService = new MediaService(ds.getRepository(MediaFile), auditService, new ConfigService());
-    contentService = new ContentService(ds.getRepository(Content), auditService);
+    contentService = new ContentService(ds.getRepository(Content), auditService, new PortalCacheService(new ConfigService()));
     statsService = new StatsService(
       ds.getRepository(Content),
       userRepo,

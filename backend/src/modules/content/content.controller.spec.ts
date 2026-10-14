@@ -32,6 +32,7 @@ import { HttpExceptionFilter } from '../../common/filters/http-exception.filter'
 import { AccessGuard } from '../../common/authz/access.guard';
 import { globalValidationPipeOptions } from '../../common/pipes/global-validation';
 import { Clock } from '../../common/clock/clock';
+import { PortalCacheService } from '../../shared/portal-cache/portal-cache.service';
 
 /**
  * 内容模块走真实 HTTP：真实 ContentController / ContentService、全局 AccessGuard（严格可选登录、JwtStrategy、
@@ -86,6 +87,8 @@ type Who = 'anonymous' | 'plain' | 'editor' | 'admin';
 jest.setTimeout(60_000);
 
 describe('内容模块 HTTP', () => {
+  const portalCache = { invalidate: jest.fn().mockResolvedValue(undefined) };
+  beforeEach(() => { portalCache.invalidate.mockClear(); });
   let app: NestExpressApplication;
   let ds: DataSource;
   let contents: Repository<Content>;
@@ -182,6 +185,7 @@ describe('内容模块 HTTP', () => {
       controllers: [ContentController],
       providers: [
         ContentService,
+        { provide: PortalCacheService, useValue: portalCache },
         // 与 AppModule 相同：Access() 只写元数据，访问级别由全局 AccessGuard 执行
         { provide: APP_GUARD, useClass: AccessGuard },
         AuthService,
@@ -262,6 +266,25 @@ describe('内容模块 HTTP', () => {
 
   const PUBLISHED_SLUGS = [slugs.published, slugs.publishedNoAuthor].sort();
   const ALL_LIVE_SLUGS = [slugs.published, slugs.publishedNoAuthor, slugs.draft, slugs.review, slugs.archived].sort();
+
+  it('门户缓存：提交后的增改发布撤回删除各通知一次，读请求 / 失败写 / 空更新不通知', async () => {
+    const created = await as(http().post('/contents'), 'admin')
+      .send({ title: '缓存回归', slug: 'cache-notify-content', status: 'published', body: '正文' }).expect(201);
+    const path = `/contents/${created.body.id}`;
+    expect(portalCache.invalidate.mock.calls).toEqual([[['portal:contents']]]);
+    await get('/contents/slug/cache-notify-content', 'anonymous').expect(200);
+    await as(http().patch(path), 'admin').send({}).expect(200);
+    await as(http().patch(`/contents/${randomUUID()}`), 'admin').send({ title: '不存在' }).expect(404);
+    await as(http().post('/contents'), 'admin').send({}).expect(400);
+    await as(http().patch(path), 'anonymous').send({ title: '无权限' }).expect(401);
+    await as(http().patch(path), 'plain').send({ title: '无权限' }).expect(403);
+    expect(portalCache.invalidate).toHaveBeenCalledTimes(1);
+    await as(http().patch(path), 'admin').send({ title: '改名' }).expect(200);
+    await as(http().post(`${path}/publish`), 'admin').send({}).expect(201);
+    await as(http().post(`${path}/unpublish`), 'admin').send({}).expect(201);
+    await as(http().delete(path), 'admin').expect(204);
+    expect(portalCache.invalidate.mock.calls).toEqual(Array.from({ length: 5 }, () => [['portal:contents']]));
+  });
 
   describe('GET /contents', () => {
     it.each<Who>(['anonymous', 'plain'])('%s：只看到已发布、未删除的内容', async (who) => {

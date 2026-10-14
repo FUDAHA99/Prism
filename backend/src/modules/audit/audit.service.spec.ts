@@ -1,5 +1,7 @@
 import 'reflect-metadata';
 import { Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { PortalCacheService } from '../../shared/portal-cache/portal-cache.service';
 import { DataSource, Repository } from 'typeorm';
 
 import { AuditLog } from './entities/audit-log.entity';
@@ -48,6 +50,7 @@ interface RawAuditRow {
 }
 
 describe('AuditService 脱敏、截断与列表字段', () => {
+  const portalCache = new PortalCacheService(new ConfigService());
   let ds: DataSource;
   let auditRepo: Repository<AuditLog>;
   let auditService: AuditService;
@@ -81,7 +84,7 @@ describe('AuditService 脱敏、截断与列表字段', () => {
     const cache = new MemoryCache();
     const roleService = new RoleService(ds.getRepository(Role), ds.getRepository(Permission), cache as any);
     userService = new UserService(userRepo, roleService, auditService, cache as any);
-    contentService = new ContentService(ds.getRepository(Content), auditService);
+    contentService = new ContentService(ds.getRepository(Content), auditService, portalCache);
 
     const admin = await userService.create({
       username: 'admin',
@@ -344,7 +347,7 @@ describe('AuditService 脱敏、截断与列表字段', () => {
       const movie = { id: 'm-1', title: 'old', slug: 'm', intro: 'd', sources: [] };
       const movieRepo = { findOne: async () => ({ ...movie }), update: jest.fn() };
       const episodeRepo = { findOne: async () => ({ id: 'e-1', title: 'ep', url: 'https://v/1.m3u8' }), update: jest.fn() };
-      const movieSvc = new MovieService(movieRepo as any, {} as any, episodeRepo as any, auditService);
+      const movieSvc = new MovieService(movieRepo as any, {} as any, episodeRepo as any, auditService, portalCache);
       jest.spyOn(movieSvc, 'findOne').mockResolvedValue(movie as any);
       await movieSvc.update(
         'm-1',
@@ -361,13 +364,13 @@ describe('AuditService 脱敏、截断与列表字段', () => {
       expect(ep.newValues).not.toContain('EP-SECRET');
 
       const novelRepo = { findOne: async () => ({ id: 'n-1', title: 'n', slug: 'n', intro: 'x' }), update: jest.fn() };
-      const novelSvc = new NovelService(novelRepo as any, {} as any, auditService);
+      const novelSvc = new NovelService(novelRepo as any, {} as any, auditService, portalCache);
       // chapters 不是小说的可写列（章节走专用接口），不会出现在变更字段里
       await novelSvc.update('n-1', { intro: '长简介'.repeat(3000), title: 'n', chapters: [{}] } as any, adminId);
       expect(JSON.parse((await lastRaw('NOVEL_UPDATE')).newValues!)).toEqual({ changedFields: ['intro'] });
 
       const comicRepo = { findOne: async () => ({ id: 'c-1', title: 'c', slug: 'c' }), update: jest.fn() };
-      const comicSvc = new ComicService(comicRepo as any, {} as any, auditService);
+      const comicSvc = new ComicService(comicRepo as any, {} as any, auditService, portalCache);
       await comicSvc.update('c-1', { title: 'c2', slug: 'c' } as any, adminId);
       expect(JSON.parse((await lastRaw('COMIC_UPDATE')).newValues!)).toEqual({ changedFields: ['title'] });
 

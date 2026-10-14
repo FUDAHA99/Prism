@@ -35,6 +35,7 @@ import {
 import { PosterCheckerService } from './poster-checker.service';
 import { hasDangerousScheme } from '../movie/dto/movie-dto.helpers';
 import { Clock, SYSTEM_CLOCK, wholeSecond } from '../../common/clock/clock';
+import { PortalCacheService, PortalCacheTag } from '../../shared/portal-cache/portal-cache.service';
 
 import { Movie, MovieStatus, MovieType } from '../movie/entities/movie.entity';
 import { MovieSource, MovieSourceKind } from '../movie/entities/movie-source.entity';
@@ -94,6 +95,7 @@ export class CollectExecutorService {
     private readonly dataSource: DataSource,
     private readonly sourceService: CollectSourceService,
     private readonly posterChecker: PosterCheckerService,
+    private readonly portalCache: PortalCacheService,
     @Optional() private readonly clock: Clock = SYSTEM_CLOCK,
   ) {}
 
@@ -222,30 +224,36 @@ export class CollectExecutorService {
     mappingMap: Map<string, string | null>,
     stats: RunStats,
   ) {
-    for (const it of items) {
-      stats.total++;
-      try {
-        const sourceCategoryId = String(it.type_id);
-        // 没配置映射 → 直接丢
-        if (!mappingMap.has(sourceCategoryId)) {
-          stats.skipped++;
-          continue;
-        }
-        const localCategoryId = mappingMap.get(sourceCategoryId);
+    const changed = new Set<PortalCacheTag>();
+    try {
+      for (const it of items) {
+        stats.total++;
+        try {
+          const sourceCategoryId = String(it.type_id);
+          // 没配置映射 → 直接丢
+          if (!mappingMap.has(sourceCategoryId)) {
+            stats.skipped++;
+            continue;
+          }
+          const localCategoryId = mappingMap.get(sourceCategoryId);
 
-        const result = await this.upsertOne(source, it, localCategoryId, stats);
-        if (result === 'inserted') stats.inserted++;
-        else if (result === 'updated') stats.updated++;
-        else stats.skipped++;
-      } catch (e: any) {
-        stats.failed++;
-        const summary = `vod_id=${String(it?.vod_id).slice(0, 64)}: ${e?.message ?? String(e)}`.slice(
-          0,
-          ITEM_ERROR_MAX_CHARS,
-        );
-        if (!stats.firstError) stats.firstError = summary;
-        this.logger.warn(`采集条目失败: ${summary}`);
+          const result = await this.upsertOne(source, it, localCategoryId, stats, changed);
+          if (result === 'inserted') stats.inserted++;
+          else if (result === 'updated') stats.updated++;
+          else stats.skipped++;
+        } catch (e: any) {
+          stats.failed++;
+          const summary = `vod_id=${String(it?.vod_id).slice(0, 64)}: ${e?.message ?? String(e)}`.slice(
+            0,
+            ITEM_ERROR_MAX_CHARS,
+          );
+          if (!stats.firstError) stats.firstError = summary;
+          this.logger.warn(`采集条目失败: ${summary}`);
+        }
       }
+    } finally {
+      // 主记录可能已提交、但后续线路写入失败；按实际提交标记，一页最多通知一次。
+      if (changed.size > 0) await this.portalCache.invalidate([...changed]);
     }
   }
 
@@ -254,16 +262,17 @@ export class CollectExecutorService {
     it: MacCmsItem,
     localCategoryId: string | null | undefined,
     stats: RunStats,
+    changed: Set<PortalCacheTag>,
   ): Promise<'inserted' | 'updated' | 'skipped'> {
     const externalId = String(it.vod_id);
 
     switch (source.contentType) {
       case CollectContentType.MOVIE:
-        return this.upsertMovie(source, it, localCategoryId, externalId, stats);
+        return this.upsertMovie(source, it, localCategoryId, externalId, stats, changed);
       case CollectContentType.NOVEL:
-        return this.upsertNovel(source, it, localCategoryId, externalId);
+        return this.upsertNovel(source, it, localCategoryId, externalId, changed);
       case CollectContentType.COMIC:
-        return this.upsertComic(source, it, localCategoryId, externalId);
+        return this.upsertComic(source, it, localCategoryId, externalId, changed);
       default:
         return 'skipped';
     }
@@ -277,6 +286,7 @@ export class CollectExecutorService {
     localCategoryId: string | null | undefined,
     externalId: string,
     stats: RunStats,
+    changed: Set<PortalCacheTag>,
   ): Promise<'inserted' | 'updated'> {
     let movie = await this.movieRepo.findOne({
       where: { collectSource: source.id, collectExternalId: externalId },
@@ -330,6 +340,7 @@ export class CollectExecutorService {
       movie = this.movieRepo.create(data);
     }
     movie = await this.movieRepo.save(movie);
+    changed.add('portal:movies');
 
     // 异步检测封面图可用性（不阻塞主采集流程）
     if (posterUrl) {
@@ -405,6 +416,7 @@ export class CollectExecutorService {
     it: MacCmsItem,
     localCategoryId: string | null | undefined,
     externalId: string,
+    changed: Set<PortalCacheTag>,
   ): Promise<'inserted' | 'updated'> {
     let novel = await this.novelRepo.findOne({
       where: { collectSource: source.id, collectExternalId: externalId },
@@ -429,6 +441,7 @@ export class CollectExecutorService {
     if (novel) Object.assign(novel, data);
     else novel = this.novelRepo.create(data);
     await this.novelRepo.save(novel);
+    changed.add('portal:novels');
     return isNew ? 'inserted' : 'updated';
   }
 
@@ -439,6 +452,7 @@ export class CollectExecutorService {
     it: MacCmsItem,
     localCategoryId: string | null | undefined,
     externalId: string,
+    changed: Set<PortalCacheTag>,
   ): Promise<'inserted' | 'updated'> {
     let comic = await this.comicRepo.findOne({
       where: { collectSource: source.id, collectExternalId: externalId },
@@ -463,6 +477,7 @@ export class CollectExecutorService {
     if (comic) Object.assign(comic, data);
     else comic = this.comicRepo.create(data);
     await this.comicRepo.save(comic);
+    changed.add('portal:comics');
     return isNew ? 'inserted' : 'updated';
   }
 

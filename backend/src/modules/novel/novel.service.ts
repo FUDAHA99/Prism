@@ -10,6 +10,7 @@ import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity
 import { Novel, NovelStatus, NovelSerialStatus } from './entities/novel.entity';
 import { NovelChapter } from './entities/novel-chapter.entity';
 import { AuditService } from '../audit/audit.service';
+import { PortalCacheService } from '../../shared/portal-cache/portal-cache.service';
 import { changedAuditFields } from '../audit/audit-summary';
 import { isStaff, Viewer } from '../../common/authz/viewer';
 import { publishedDue, publishedDueParams, publishedDueSql } from '../../common/authz/publish-window';
@@ -203,6 +204,7 @@ export class NovelService {
     @InjectRepository(NovelChapter)
     private readonly chapterRepo: Repository<NovelChapter>,
     private readonly auditService: AuditService,
+    private readonly portalCache: PortalCacheService,
     @Optional() private readonly clock: Clock = SYSTEM_CLOCK,
   ) {}
 
@@ -241,6 +243,7 @@ export class NovelService {
       publishedAt: published ? (requestedAt ?? this.publishNow()) : requestedAt,
     });
     const saved = await this.novelRepo.save(entity);
+    await this.portalCache.invalidate(['portal:novels']);
 
     await this.auditService.log({
       userId,
@@ -388,6 +391,7 @@ export class NovelService {
     // 什么都没提交时不发 UPDATE：否则 TypeORM 仍会把 updatedAt 刷成当前时间
     if (Object.keys(patch).length > 0) {
       await this.novelRepo.update(id, patch);
+      await this.portalCache.invalidate(['portal:novels']);
     }
 
     // 只记实际写入的变更字段名，不记请求体原文
@@ -409,6 +413,7 @@ export class NovelService {
       status: NovelStatus.PUBLISHED,
       publishedAt: novel.publishedAt ?? this.publishNow(),
     });
+    await this.portalCache.invalidate(['portal:novels']);
     await this.auditService.log({
       userId,
       action: 'NOVEL_PUBLISH',
@@ -423,6 +428,7 @@ export class NovelService {
   async unpublish(id: string, userId: string): Promise<Novel> {
     await this.findOne(id);
     await this.novelRepo.update(id, { status: NovelStatus.DRAFT });
+    await this.portalCache.invalidate(['portal:novels']);
     await this.auditService.log({
       userId,
       action: 'NOVEL_UNPUBLISH',
@@ -437,6 +443,7 @@ export class NovelService {
   async remove(id: string, userId: string): Promise<void> {
     await this.findOne(id);
     await this.novelRepo.softDelete(id);
+    await this.portalCache.invalidate(['portal:novels']);
     await this.auditService.log({
       userId,
       action: 'NOVEL_DELETE',
@@ -559,12 +566,17 @@ export class NovelService {
     });
     const saved = await this.chapterRepo.save(ch);
 
-    // 小说的聚合计数
-    await this.novelRepo.increment({ id: novelId }, 'chapterCount', 1);
-    if (wordCount > 0) {
-      await this.novelRepo.increment({ id: novelId }, 'wordCount', wordCount);
+    try {
+      // 小说的聚合计数
+      await this.novelRepo.increment({ id: novelId }, 'chapterCount', 1);
+      if (wordCount > 0) {
+        await this.novelRepo.increment({ id: novelId }, 'wordCount', wordCount);
+      }
+      await this.novelRepo.update(novelId, { lastChapterAt: new Date() });
+    } finally {
+      // 章节已经提交；后续聚合写入失败也必须让门户丢弃旧章节缓存。
+      await this.portalCache.invalidate(['portal:novels']);
     }
-    await this.novelRepo.update(novelId, { lastChapterAt: new Date() });
 
     await this.auditService.log({
       userId,
@@ -594,11 +606,15 @@ export class NovelService {
 
     if (Object.keys(patch).length > 0) {
       await this.chapterRepo.update(chapterId, patch);
-    }
-    if (delta > 0) {
-      await this.novelRepo.increment({ id: ch.novelId }, 'wordCount', delta);
-    } else if (delta < 0) {
-      await this.novelRepo.decrement({ id: ch.novelId }, 'wordCount', -delta);
+      try {
+        if (delta > 0) {
+          await this.novelRepo.increment({ id: ch.novelId }, 'wordCount', delta);
+        } else if (delta < 0) {
+          await this.novelRepo.decrement({ id: ch.novelId }, 'wordCount', -delta);
+        }
+      } finally {
+        await this.portalCache.invalidate(['portal:novels']);
+      }
     }
 
     await this.auditService.log({
@@ -616,9 +632,13 @@ export class NovelService {
   async removeChapter(chapterId: string, userId: string): Promise<void> {
     const ch = await this.getChapter(chapterId);
     await this.chapterRepo.delete(chapterId);
-    await this.novelRepo.decrement({ id: ch.novelId }, 'chapterCount', 1);
-    if (ch.wordCount > 0) {
-      await this.novelRepo.decrement({ id: ch.novelId }, 'wordCount', ch.wordCount);
+    try {
+      await this.novelRepo.decrement({ id: ch.novelId }, 'chapterCount', 1);
+      if (ch.wordCount > 0) {
+        await this.novelRepo.decrement({ id: ch.novelId }, 'wordCount', ch.wordCount);
+      }
+    } finally {
+      await this.portalCache.invalidate(['portal:novels']);
     }
     await this.auditService.log({
       userId,

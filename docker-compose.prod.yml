@@ -107,6 +107,10 @@ services:
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET 未设置，请在 .env.prod 中用 openssl rand -hex 32 另行生成}
       JWT_REFRESH_EXPIRES_IN: ${JWT_REFRESH_EXPIRES_IN:-7d}
 
+      # 门户缓存通知仅走内网；未配置专用密钥时，两项都为空，沿用 TTL
+      PORTAL_INTERNAL_URL: ${PORTAL_REVALIDATE_SECRET:+http://portal:3002}
+      PORTAL_REVALIDATE_SECRET: ${PORTAL_REVALIDATE_SECRET:-}
+
       BCRYPT_SALT_ROUNDS: 12
       # 毫秒。throttler v5 的 ttl 单位是毫秒，此前写 60 等于窗口 60ms
       RATE_LIMIT_TTL:    60000
@@ -156,6 +160,8 @@ services:
       PORT:     3002
       # 服务端 SSR 走内网直连 backend，快且绕过 nginx
       BACKEND_INTERNAL_URL: http://backend:3001
+      # 仅运行时服务端使用，绝不放入 NEXT_PUBLIC_* 或构建参数
+      PORTAL_REVALIDATE_SECRET: ${PORTAL_REVALIDATE_SECRET:-}
     networks:
       - prism-net
     depends_on:

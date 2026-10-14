@@ -26,6 +26,7 @@ import {
   resolveJwtConfig,
 } from './jwt';
 import configuration from './configuration';
+import { resolvePortalCacheConfig } from './portal-cache';
 
 const REPO_ROOT = path.resolve(__dirname, '../../..');
 // 两个 `openssl rand -hex 32` 形态的固定值（测试专用，从未用于任何环境）
@@ -533,15 +534,16 @@ describe('scripts/deploy.sh 的部署前预检与 jwt.ts 规则一致', () => {
 
     /**
      * 按 deploy.sh 里的原文执行那段 node -e 脚本：stdin 喂 `compose config --format json` 形状的配置，
-     * ./dist/config/jwt 换成本模块（dist 就是它编译出来的）。
+     * dist 配置模块换成对应源码（dist 就是它们编译出来的）。
      */
     function runValidator(stdin: string) {
       const errors: string[] = [];
       let exitCode: number | undefined;
       const handlers: Record<string, (arg?: string) => void> = {};
       const fakeRequire = (id: string) => {
-        expect(id).toBe('./dist/config/jwt');
-        return { resolveJwtConfig };
+        if (id === './dist/config/jwt') return { resolveJwtConfig };
+        expect(id).toBe('./dist/config/portal-cache');
+        return { resolvePortalCacheConfig };
       };
       const fakeProcess = {
         env: {},
@@ -569,8 +571,10 @@ describe('scripts/deploy.sh 的部署前预检与 jwt.ts 规则一致', () => {
       return { exitCode, errors };
     }
     /** compose config 渲染结果的形状；字面量 $ 在渲染结果里是 $$ */
-    const rendered = (environment: Record<string, string | null>) =>
-      JSON.stringify({ name: 'prism-cms', services: { backend: { environment }, mysql: {} } });
+    const rendered = (environment: Record<string, string | null>, portalSecret = '') =>
+      JSON.stringify({ name: 'prism-cms', services: {
+        backend: { environment }, portal: { environment: { PORTAL_REVALIDATE_SECRET: portalSecret } }, mysql: {},
+      } });
 
     it('一次性容器的调用方式：compose 渲染的配置经管道交给新 backend 镜像，不联网、不挂卷、用完即删', () => {
       expect(js).toBeTruthy();
@@ -616,6 +620,24 @@ describe('scripts/deploy.sh 的部署前预检与 jwt.ts 规则一致', () => {
       expect(ok).toEqual({ exitCode: undefined, errors: [] });
       const weak = runValidator(rendered({ NODE_ENV: 'development', JWT_SECRET: 'weak', JWT_REFRESH_SECRET: STRONG_REFRESH }));
       expect(weak.exitCode).toBe(1);
+    });
+
+    it('门户通知配置必须成对有效且两端密钥相同，错误不回显密钥', () => {
+      const secret = 'c'.repeat(64);
+      const env = { JWT_SECRET: STRONG, JWT_REFRESH_SECRET: STRONG_REFRESH,
+        PORTAL_INTERNAL_URL: 'http://portal:3002', PORTAL_REVALIDATE_SECRET: secret };
+      expect(runValidator(rendered(env, secret))).toEqual({ exitCode: undefined, errors: [] });
+      for (const input of [
+        rendered({ ...env, PORTAL_INTERNAL_URL: '' }, secret),
+        rendered({ ...env, PORTAL_INTERNAL_URL: 'http://portal:3002/api/revalidate' }, secret),
+        rendered(env, 'd'.repeat(64)),
+      ]) {
+        const result = runValidator(input);
+        expect(result.exitCode).toBe(1);
+        expect(result.errors.join('\n')).toMatch(/PORTAL_/);
+        expect(result.errors.join('\n')).not.toContain(secret);
+        expect(result.errors.join('\n')).not.toContain('d'.repeat(64));
+      }
     });
 
     it('渲染结果里的 $$ 还原成容器实际拿到的 $（否则校验的不是同一个值）', () => {

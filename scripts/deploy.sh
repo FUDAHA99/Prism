@@ -223,7 +223,7 @@ check_jwt_secrets() {
   log "JWT 密钥基本规则预检通过（完整规则待镜像构建后用 backend 自己的校验再查一遍）"
 }
 
-# 在一次性容器里跑 backend 的启动校验：只 require dist/config/jwt（不连数据库、不起 Nest）。
+# 在一次性容器里跑 backend 的 JWT 与门户缓存配置校验（不连数据库、不起 Nest）。
 # 从 stdin 读 `compose config --format json`（compose 插值后的完整配置），取 backend 服务的 environment：
 # 渲染结果里每个字面量 $ 都被转义成 $$（为了能再被 compose 读回），这里还原成容器实际拿到的值。
 # 不合格时只打印问题清单（resolveJwtConfig 的报错从不回显密钥本身），退出码 1。
@@ -233,8 +233,11 @@ process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => (raw += chunk));
 process.stdin.on("end", () => {
   let environment;
+  let portalSecret;
   try {
-    environment = JSON.parse(raw).services.backend.environment || {};
+    const services = JSON.parse(raw).services;
+    environment = services.backend.environment || {};
+    portalSecret = (services.portal?.environment?.PORTAL_REVALIDATE_SECRET || "").split("$$").join("$");
   } catch (e) {
     console.error("读不到 compose 渲染出的 backend 配置");
     process.exit(2);
@@ -245,8 +248,13 @@ process.stdin.on("end", () => {
   }
   env.NODE_ENV = "production";
   const { resolveJwtConfig } = require("./dist/config/jwt");
+  const { resolvePortalCacheConfig } = require("./dist/config/portal-cache");
   try {
     resolveJwtConfig(env, () => {});
+    resolvePortalCacheConfig(env, () => {});
+    if (portalSecret !== (env.PORTAL_REVALIDATE_SECRET || "")) {
+      throw new Error("backend 与 portal 的 PORTAL_REVALIDATE_SECRET 必须一致");
+    }
   } catch (e) {
     console.error(String((e && e.message) || e));
     process.exit(1);
@@ -267,11 +275,11 @@ check_jwt_in_image() {
   image="${project}-backend"
   docker image inspect "$image" &>/dev/null \
     || die "找不到新构建的 backend 镜像 $image，部署中止，容器均未改动"
-  log "用新镜像 $image 里 backend 自己的规则校验 JWT 密钥（一次性容器，不联网、不挂卷，现有容器不动）..."
+  log "用新镜像 $image 校验 JWT 与门户缓存配置（一次性容器，不联网、不挂卷，现有容器不动）..."
   if ! $COMPOSE config --format json | docker run --rm -i --network none --entrypoint node "$image" -e "$JWT_VALIDATOR_JS"; then
-    die "JWT 密钥未通过 backend 的启动校验（问题见上方，backend 若照此启动会拒绝启动、API 502），部署中止，容器均未改动。用 openssl rand -hex 32 分别生成两把新密钥写入 .env.prod 后重新部署（见 docs/deploy.md 5.3）"
+    die "JWT 或门户缓存配置未通过 backend 的启动校验（问题见上方），部署中止，容器均未改动。请修正 .env.prod 后重新部署（见 docs/deploy.md 5.3）"
   fi
-  log "JWT 密钥通过 backend 启动校验"
+  log "JWT 与门户缓存配置通过 backend 启动校验"
 }
 
 # ── 例行部署：公开注册开关只读检查（从不修改，失败只警告）──────────────────

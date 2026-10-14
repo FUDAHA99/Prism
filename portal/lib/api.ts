@@ -7,6 +7,7 @@
  */
 import { cache } from 'react'
 import { unstable_cache } from 'next/cache'
+import type { PortalCacheTag } from './cache-tags'
 import type {
   Category,
   Comic,
@@ -33,9 +34,9 @@ const API_BASE =
     : (process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:3001')
 
 // 服务端取数的缓存秒数（Next 数据缓存，落在 .next/cache/fetch-cache，进程重启不清空）。
-// 页面虽然是 force-dynamic，但显式写了 next.revalidate 的 fetch 仍按这里缓存：后台下架 / 撤回发布 / 删除后，
-// 门户最多再展示这么久，过期后的第一次请求仍拿旧数据、同时在后台刷新（stale-while-revalidate）。
-// 单条数据另走 cachedItem（见下）。窗口与后续的按需失效方案见 docs/api.md「附：门户缓存窗口」。
+// 页面虽然是 force-dynamic，但显式写了 next.revalidate 的 fetch 仍按这里缓存。后台通知按家族 tag 立即失效；
+// 通知不可用时保留 TTL 兜底，过期后的第一次请求仍拿旧数据、同时在后台刷新（stale-while-revalidate）。
+// 单条数据另走 cachedItem（见下）。失效与兜底边界见 docs/api.md「附：门户缓存窗口」。
 
 /** 列表、分类、标签、站点配置、文章详情（request 的默认值） */
 const REVALIDATE_LIST = 30
@@ -59,18 +60,20 @@ class ApiError extends Error {
 /** 通用请求方法 */
 async function request<T>(
   path: string,
-  init?: RequestInit & { revalidate?: number },
+  init?: RequestInit & { revalidate?: number; tags?: PortalCacheTag[] },
 ): Promise<T> {
-  const { revalidate = REVALIDATE_LIST, ...rest } = init ?? {}
+  const { revalidate = REVALIDATE_LIST, tags, ...rest } = init ?? {}
   const url = `${API_BASE}/api/v1${path}`
 
   const res = await fetch(url, {
     ...rest,
     headers: {
       'Content-Type': 'application/json',
+      // Headers participate in the fetch cache key; isolate legacy untagged entries.
+      ...(tags?.length ? { 'X-Portal-Cache-Version': '1' } : {}),
       ...(rest.headers ?? {}),
     },
-    next: { revalidate },
+    next: { revalidate, tags },
   })
 
   const json = (await res.json()) as ApiEnvelope<T>
@@ -107,6 +110,7 @@ export const isUuidKey = (key: string) => UUID_KEY.test(key)
 
 function cachedItem<T>(
   name: string,
+  tag: PortalCacheTag,
   revalidate: number,
   fetchItem: (key: string) => Promise<T>,
   isValidKey: (key: string) => boolean,
@@ -120,8 +124,8 @@ function cachedItem<T>(
         throw e
       }
     },
-    ['portal-item', name],
-    { revalidate },
+    ['portal-item-tagged-v1', name],
+    { revalidate, tags: [tag] },
   )
   return cache(async (key: string): Promise<T | null> => {
     if (!isValidKey(key)) return null
@@ -147,11 +151,12 @@ export async function getContents(params: {
   })
   // 默认只取已发布的
   if (!qs.has('status')) qs.set('status', 'published')
-  return request<Pagination<Content>>(`/contents?${qs.toString()}`)
+  return request<Pagination<Content>>(`/contents?${qs.toString()}`, { tags: ['portal:contents'] })
 }
 
 export const getContentBySlug = cachedItem(
   'content-by-slug',
+  'portal:contents',
   REVALIDATE_LIST,
   (slug) => request<Content>(`/contents/slug/${encodeURIComponent(slug)}`, { revalidate: 0 }),
   isSlugKey,
@@ -231,11 +236,12 @@ export async function getMovies(
   params: MovieListParams = {},
 ): Promise<Pagination<Movie>> {
   const qs = buildQs({ status: 'published', limit: 24, ...params })
-  return request<Pagination<Movie>>(`/movies?${qs}`)
+  return request<Pagination<Movie>>(`/movies?${qs}`, { tags: ['portal:movies'] })
 }
 
 export const getMovieBySlug = cachedItem(
   'movie-by-slug',
+  'portal:movies',
   REVALIDATE_DETAIL,
   (slug) => request<Movie>(`/movies/slug/${encodeURIComponent(slug)}`, { revalidate: 0 }),
   isSlugKey,
@@ -254,11 +260,12 @@ export async function getNovels(
   params: NovelListParams = {},
 ): Promise<Pagination<Novel>> {
   const qs = buildQs({ status: 'published', limit: 24, ...params })
-  return request<Pagination<Novel>>(`/novels?${qs}`)
+  return request<Pagination<Novel>>(`/novels?${qs}`, { tags: ['portal:novels'] })
 }
 
 export const getNovelBySlug = cachedItem(
   'novel-by-slug',
+  'portal:novels',
   REVALIDATE_DETAIL,
   (slug) => request<Novel>(`/novels/slug/${encodeURIComponent(slug)}`, { revalidate: 0 }),
   isSlugKey,
@@ -271,7 +278,7 @@ export async function getNovelChapters(
     // 后端返回 { data: NovelChapter[], meta } 这种分页结构，这里把 data 拆出来
     const r = await request<NovelChapter[] | Pagination<NovelChapter>>(
       `/novels/${novelId}/chapters`,
-      { revalidate: REVALIDATE_DETAIL },
+      { revalidate: REVALIDATE_DETAIL, tags: ['portal:novels'] },
     )
     return Array.isArray(r) ? r : (r?.data ?? [])
   } catch {
@@ -281,6 +288,7 @@ export async function getNovelChapters(
 
 export const getNovelChapter = cachedItem(
   'novel-chapter',
+  'portal:novels',
   REVALIDATE_DETAIL,
   (chapterId) => request<NovelChapter>(`/novels/chapters/${encodeURIComponent(chapterId)}`, { revalidate: 0 }),
   isUuidKey,
@@ -299,11 +307,12 @@ export async function getComics(
   params: ComicListParams = {},
 ): Promise<Pagination<Comic>> {
   const qs = buildQs({ status: 'published', limit: 24, ...params })
-  return request<Pagination<Comic>>(`/comics?${qs}`)
+  return request<Pagination<Comic>>(`/comics?${qs}`, { tags: ['portal:comics'] })
 }
 
 export const getComicBySlug = cachedItem(
   'comic-by-slug',
+  'portal:comics',
   REVALIDATE_DETAIL,
   (slug) => request<Comic>(`/comics/slug/${encodeURIComponent(slug)}`, { revalidate: 0 }),
   isSlugKey,
@@ -315,7 +324,7 @@ export async function getComicChapters(
   try {
     const r = await request<ComicChapter[] | Pagination<ComicChapter>>(
       `/comics/${comicId}/chapters`,
-      { revalidate: REVALIDATE_DETAIL },
+      { revalidate: REVALIDATE_DETAIL, tags: ['portal:comics'] },
     )
     return Array.isArray(r) ? r : (r?.data ?? [])
   } catch {
@@ -325,6 +334,7 @@ export async function getComicChapters(
 
 export const getComicChapter = cachedItem(
   'comic-chapter',
+  'portal:comics',
   REVALIDATE_DETAIL,
   (chapterId) => request<ComicChapter>(`/comics/chapters/${encodeURIComponent(chapterId)}`, { revalidate: 0 }),
   isUuidKey,

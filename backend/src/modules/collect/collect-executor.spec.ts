@@ -41,6 +41,7 @@ function item(extra: Partial<MacCmsItem>): MacCmsItem {
 }
 
 describe('CollectExecutorService 采集落库', () => {
+  const portalCache = { invalidate: jest.fn().mockResolvedValue(undefined) };
   let ds: DataSource;
   let movies: Repository<Movie>;
   let novels: Repository<Novel>;
@@ -68,6 +69,7 @@ describe('CollectExecutorService 采集落库', () => {
   });
 
   beforeEach(async () => {
+    portalCache.invalidate.mockClear();
     await ds.getRepository(MovieEpisode).clear();
     await ds.query('DELETE FROM movie_sources');
     await ds.query('DELETE FROM movies');
@@ -100,6 +102,7 @@ describe('CollectExecutorService 采集落库', () => {
       ds,
       sourceService as any,
       posterChecker as any,
+      portalCache as any,
       { now: () => NOW },
     );
     await (executor as any).runInBackground(sourceOf(contentType), { mode: CollectMode.PAGE_RANGE }, 'log-1');
@@ -107,6 +110,36 @@ describe('CollectExecutorService 采集落库', () => {
   }
 
   describe('发布时间不晚于入库时刻（公开视图把未来的发布时间当成定时发布）', () => {
+    it.each([
+      [CollectContentType.MOVIE, 'portal:movies'],
+      [CollectContentType.NOVEL, 'portal:novels'],
+      [CollectContentType.COMIC, 'portal:comics'],
+    ])('%s：一页多条成功只通知一次对应门户缓存', async (type, tag) => {
+      await collect(type as CollectContentType, [item({ vod_id: 1 }), item({ vod_id: 2 })]);
+      expect(portalCache.invalidate.mock.calls).toEqual([[[tag]]]);
+    });
+
+    it('没有映射或写库前失败均不通知，主记录已提交但线路失败仍通知', async () => {
+      await collect(CollectContentType.MOVIE, [item({ type_id: 99 })]);
+      expect(portalCache.invalidate).not.toHaveBeenCalled();
+      await ds.query("CREATE TRIGGER cache_movie_fail BEFORE INSERT ON movies BEGIN SELECT RAISE(ABORT, 'cache regression'); END");
+      try {
+        await collect(CollectContentType.MOVIE, [item({ vod_id: 2 })]);
+        expect(portalCache.invalidate).not.toHaveBeenCalled();
+      } finally {
+        await ds.query('DROP TRIGGER cache_movie_fail');
+      }
+      await ds.query("CREATE TRIGGER cache_source_fail BEFORE INSERT ON movie_sources BEGIN SELECT RAISE(ABORT, 'cache regression'); END");
+      try {
+        const { log } = await collect(CollectContentType.MOVIE, [item({ vod_id: 3, vod_play_from: 'm3u8', vod_play_url: '1$https://video.example.com/1.mp4' })]);
+        expect(log.failedCount).toBe(1);
+        expect(await movies.count()).toBe(1);
+        expect(portalCache.invalidate.mock.calls).toEqual([[['portal:movies']]]);
+      } finally {
+        await ds.query('DROP TRIGGER cache_source_fail');
+      }
+    });
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     it.each<[CollectContentType, () => Repository<any>]>([
       [CollectContentType.MOVIE, () => movies],

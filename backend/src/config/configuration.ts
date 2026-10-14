@@ -1,6 +1,7 @@
 import { Logger } from '@nestjs/common';
 import { registerAs } from '@nestjs/config';
 import { resolveJwtConfig } from './jwt';
+import { resolvePortalCacheConfig } from './portal-cache';
 
 export default registerAs('app', () => ({
   // 应用基础配置
@@ -8,6 +9,7 @@ export default registerAs('app', () => ({
   appName: process.env.APP_NAME || 'cms-backend',
   appPort: parseInt(process.env.APP_PORT, 10) || 3000,
   appUrl: process.env.APP_URL || 'http://localhost:3000',
+  portalCache: resolvePortalCacheConfig(process.env, (message) => new Logger('PortalCacheConfig').warn(message)),
   
   // JWT配置：生产环境密钥缺失 / 是示例值 / 过短时直接抛错拒绝启动，有效期统一解析成秒（见 config/jwt.ts）
   jwt: resolveJwtConfig(process.env, (message) => new Logger('JwtConfig').warn(message)),

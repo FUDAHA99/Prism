@@ -51,6 +51,7 @@ async function createFixture() {
   const progress = new Map()
   const comments = []
   const commentState = { status: 'pending' }
+  const listItems = new Map(Object.entries({ '/movies': movie, '/novels': novel, '/comics': comic, '/contents': article }))
   // Unlinked slugs avoid browser prefetch warming the cache before the test does.
   const cacheStates = new Map([
     ['/contents/slug/cache-article', { status: 200, data: { ...article, id: uuid(41), slug: 'cache-article', title: '缓存文章' } }],
@@ -73,6 +74,7 @@ async function createFixture() {
     let body = ''
     for await (const chunk of req) body += chunk
     const entry = { method: req.method, path: url.pathname, query: Object.fromEntries(url.searchParams), authorized: Boolean(req.headers.authorization) }
+    if (req.headers['x-portal-cache-version']) entry.cacheVersion = req.headers['x-portal-cache-version']
     if (body) entry.body = JSON.parse(body)
     requests.push(entry)
     res.once('finish', () => { entry.status = res.statusCode; entry.completedAt = Date.now() })
@@ -114,10 +116,9 @@ async function createFixture() {
       const state = cacheStates.get(route)
       envelope(res, state.status === 200 ? state.data : null, state.status); return
     }
-    const lists = { '/movies': movie, '/novels': novel, '/comics': comic, '/contents': article }
-    if (lists[route]) {
+    if (listItems.has(route)) {
       const page = Number(url.searchParams.get('page') || 1)
-      const item = lists[route]
+      const item = listItems.get(route)
       const data = page === 1 ? [item] : [{ ...item, id: uuid(90), slug: `${item.slug}-page-${page}`, title: `${item.title}第${page}页` }]
       envelope(res, { data, meta: { page, limit: Number(url.searchParams.get('limit') || 24), total: 48, totalPages: 2 } }); return
     }
@@ -134,7 +135,7 @@ async function createFixture() {
   })
   const origin = await listen(server)
   server.origin = origin
-  return { origin, server, requests, progress, commentState, cacheStates }
+  return { origin, server, requests, progress, commentState, cacheStates, listItems }
 }
 
 module.exports = { createFixture, listen, movie, novel, comic, article, novelChapters, comicChapters }

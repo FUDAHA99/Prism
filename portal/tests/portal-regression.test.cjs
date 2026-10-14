@@ -7,8 +7,9 @@ const os = require('node:os')
 const path = require('node:path')
 const http = require('node:http')
 const { spawn, execFileSync } = require('node:child_process')
+const { randomBytes } = require('node:crypto')
 const { chromium } = require('playwright')
-const { createFixture, listen, movie, article, novelChapters, comicChapters } = require('./fixture.cjs')
+const { createFixture, listen, movie, article, novel, comic, novelChapters, comicChapters } = require('./fixture.cjs')
 
 const source = path.resolve(__dirname, '..')
 const repository = path.dirname(source)
@@ -23,6 +24,7 @@ const report = { node: process.version, output, runner: 'Playwright Chromium via
 let browser
 let fixture
 let cleanupPromise
+const revalidateSecret = randomBytes(32).toString('hex')
 const save = () => fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify(report, null, 2))
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -69,12 +71,14 @@ function isolatedSource(name) {
   return target
 }
 
-function nextProcess(target, args, mode, name) {
+function nextProcess(target, args, mode, name, extraEnv = {}) {
   const env = {}
   for (const key of ['PATH', 'Path', 'SYSTEMROOT', 'SystemRoot', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'HOME', 'USERPROFILE', 'LOCALAPPDATA', 'APPDATA']) {
     if (process.env[key]) env[key] = process.env[key]
   }
   Object.assign(env, { NODE_ENV: mode, NODE_TLS_REJECT_UNAUTHORIZED: '1', NEXT_TELEMETRY_DISABLED: '1', BACKEND_INTERNAL_URL: fixture.origin, NEXT_PUBLIC_API_BASE: fixture.origin })
+  if (args[0] !== 'build') env.PORTAL_REVALIDATE_SECRET = revalidateSecret
+  Object.assign(env, extraEnv)
   const log = fs.openSync(path.join(output, `${name}.log`), 'w')
   const child = spawn(process.execPath, [path.join(source, 'node_modules/next/dist/bin/next'), ...args], { cwd: target, env, windowsHide: true, stdio: ['ignore', log, log] })
   fs.closeSync(log)
@@ -89,10 +93,10 @@ async function freePort() {
   return Number(new URL(origin).port)
 }
 
-async function startNext(target, mode) {
+async function startNext(target, mode, extraEnv = {}, label = mode) {
   const port = await freePort()
   const origin = `http://127.0.0.1:${port}`
-  const child = nextProcess(target, [...(mode === 'development' ? ['dev', '--webpack'] : ['start']), '-H', '127.0.0.1', '-p', String(port)], mode, mode)
+  const child = nextProcess(target, [...(mode === 'development' ? ['dev', '--webpack'] : ['start']), '-H', '127.0.0.1', '-p', String(port)], mode, label, extraEnv)
   for (let tries = 0; tries < 120; tries++) {
     if (child.exitCode !== null) throw new Error(`Next exited ${child.exitCode}; see ${mode}.log`)
     try { if ((await fetch(origin + '/about', { signal: AbortSignal.timeout(1000) })).ok) return origin } catch {}
@@ -173,6 +177,17 @@ async function goto(page, origin, route, heading) {
 async function title(page, expected) {
   // Next can stream metadata after the page body has become visible.
   await page.waitForFunction(expected => document.title === expected + ' | Portal Regression', expected)
+}
+
+async function revalidate(origin, init = {}) {
+  const response = await fetch(origin + '/api/revalidate', {
+    method: 'POST', headers: { Authorization: `Bearer ${revalidateSecret}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tags: ['portal:contents'] }), signal: AbortSignal.timeout(10000), ...init,
+  })
+  const body = await response.text()
+  assert.equal(body.includes(revalidateSecret), false, 'Revalidation responses must not expose the secret')
+  assert.equal(response.headers.get('cache-control'), 'no-store')
+  return { status: response.status, body: JSON.parse(body) }
 }
 
 async function playback(page) {
@@ -406,6 +421,134 @@ test('portal HTTP and browser regression', { timeout: 360000 }, async t => {
         await screenshot('approved')
       })
     })
+    let unconfiguredOrigin
+    await t.test('revalidation configuration fails closed without exposing its secret', async () => {
+      const checks = report.revalidationConfiguration = []
+      for (const [label, secret] of [['missing-secret', ''], ['invalid-secret', 'not-a-64-hex-secret']]) {
+        const disabled = await startNext(production, 'production', { PORTAL_REVALIDATE_SECRET: secret }, label)
+        if (!unconfiguredOrigin) unconfiguredOrigin = disabled
+        const result = await revalidate(disabled)
+        assert.equal(result.status, 503)
+        assert.equal((await fetch(disabled + '/about')).status, 200, 'Disabled notifications must not disable the portal')
+        checks.push({ label, status: result.status })
+      }
+      const files = fs.readdirSync(path.join(production, '.next', 'static'), { recursive: true }).filter(file => file.endsWith('.js'))
+      assert(files.length > 0)
+      for (const file of files) assert.equal(fs.readFileSync(path.join(production, '.next', 'static', file)).includes(Buffer.from(revalidateSecret)), false)
+      report.secretAbsentFromClientChunks = files.length
+    })
+    await t.test('authorized family invalidation refreshes lists, details, chapters and cached 404', async () => {
+      await scenario('invalidation', origin, async (page, _context, entry, screenshot) => {
+        const count = apiPath => fixture.requests.filter(item => item.path === '/api/v1' + apiPath).length
+        const render = async route => {
+          await page.goto(origin + route)
+          await page.locator('main h1').first().waitFor()
+          return page.locator('main').innerText()
+        }
+        const id = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
+        const families = [
+          { family: 'contents', route: 'articles', item: article, id: 140 },
+          { family: 'movies', route: 'movies', item: movie, id: 170 },
+          { family: 'novels', route: 'novels', item: novel, id: 150, chapter: novelChapters[0] },
+          { family: 'comics', route: 'comics', item: comic, id: 160, chapter: comicChapters[0] },
+        ]
+        for (const item of families) {
+          item.slug = `invalidate-${item.family}`
+          item.apiPath = `/${item.family}/slug/${item.slug}`
+          item.detailRoute = `/${item.route}/${item.slug}`
+          item.listRoute = `/${item.route}?q=invalidation-probe`
+          item.state = { status: 200, data: { ...item.item, id: id(item.id), slug: item.slug, title: `旧${item.item.title}` } }
+          fixture.cacheStates.set(item.apiPath, item.state)
+          if (item.chapter) {
+            item.chapterState = { status: 200, data: { ...item.chapter, id: id(item.id + 1), [item.family === 'novels' ? 'novelId' : 'comicId']: id(item.id), title: `旧${item.chapter.title}` } }
+            item.chapterApi = `/${item.family}/chapters/${id(item.id + 1)}`
+            item.directoryApi = `/${item.family}/${id(item.id)}/chapters`
+            item.chapterRoute = `${item.detailRoute}/chapters/${id(item.id + 1)}`
+            fixture.cacheStates.set(item.chapterApi, item.chapterState)
+            fixture.cacheStates.set(item.directoryApi, { status: 200, data: [item.chapterState.data] })
+          }
+          assert((await render(item.listRoute)).includes(item.item.title))
+          assert((await render(item.detailRoute)).includes(item.state.data.title))
+          if (item.chapter) assert((await render(item.chapterRoute)).includes(item.chapterState.data.title))
+          item.warmCount = count(item.apiPath)
+          assert(item.warmCount > 0)
+          item.oldTitle = item.state.data.title
+          item.state.data = { ...item.state.data, title: `新${item.item.title}` }
+          fixture.listItems.set(`/${item.family}`, { ...item.item, title: `新列表${item.item.title}` })
+          if (item.chapter) {
+            item.chapterState.data = { ...item.chapterState.data, title: `新${item.chapter.title}`, ...(item.family === 'novels' ? { content: '更新后的小说正文' } : { pageUrls: ['/uploads/updated-comic.png'] }) }
+            fixture.cacheStates.get(item.directoryApi).data = [item.chapterState.data]
+          }
+          assert((await render(item.detailRoute)).includes(item.oldTitle))
+          assert.equal(count(item.apiPath), item.warmCount)
+          assert(!(await render(item.listRoute)).includes(`新列表${item.item.title}`))
+        }
+        const hidden = '/movies/slug/invalidate-hidden'
+        fixture.cacheStates.set(hidden, { status: 404, data: { ...movie, slug: 'invalidate-hidden', title: '重新发布影视' } })
+        assert((await render('/movies/invalidate-hidden')).includes('页面没有找到'))
+        const hiddenCount = count(hidden)
+        fixture.cacheStates.get(hidden).status = 200
+        assert((await render('/movies/invalidate-hidden')).includes('页面没有找到'))
+        assert.equal(count(hidden), hiddenCount, 'The missing detail must actually have been cached')
+        const rejected = [
+          ['missing-auth', { headers: {} }, 401],
+          ['wrong-secret', { headers: { Authorization: `Bearer ${'0'.repeat(64)}` } }, 401],
+          ['changed-case-secret', { headers: { Authorization: `Bearer ${revalidateSecret.toUpperCase()}` } }, 401],
+          ['wrong-scheme', { headers: { Authorization: `bearer ${revalidateSecret}` } }, 401],
+          ['get', { method: 'GET', body: undefined }, 405],
+          ['bad-json', { body: '{' }, 400],
+          ['extra-key', { body: JSON.stringify({ tags: ['portal:contents'], path: '/' }) }, 400],
+          ['unknown-tag', { body: JSON.stringify({ tags: ['portal:unknown'] }) }, 400],
+          ['changed-case-tag', { body: JSON.stringify({ tags: ['PORTAL:CONTENTS'] }) }, 400],
+          ['empty-tags', { body: JSON.stringify({ tags: [] }) }, 400],
+          ['non-string-tag', { body: JSON.stringify({ tags: [1] }) }, 400],
+          ['too-many-tags', { body: JSON.stringify({ tags: Array(5).fill('portal:contents') }) }, 400],
+          ['large-body', { body: ' '.repeat(1025) }, 413],
+          ['chunked-large-body', { body: new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(' '.repeat(1025))); controller.close() } }), duplex: 'half' }, 413],
+        ]
+        entry.rejected = []
+        for (const [label, init, expected] of rejected) {
+          const result = await revalidate(direct, init)
+          assert.equal(result.status, expected, label)
+          assert((await render(families[0].detailRoute)).includes(families[0].oldTitle), `${label} must not clear the cache`)
+          assert.equal(count(families[0].apiPath), families[0].warmCount)
+          entry.rejected.push({ label, status: result.status })
+        }
+        entry.families = []
+        for (const item of families) {
+          const tags = [`portal:${item.family}`, `portal:${item.family}`]
+          assert.deepEqual(await revalidate(direct, { body: JSON.stringify({ tags }) }), { status: 200, body: { revalidated: [tags[0]] } })
+          assert((await render(item.detailRoute)).includes(item.state.data.title), 'First request after invalidation must be fresh')
+          assert(count(item.apiPath) > item.warmCount)
+          assert((await render(item.listRoute)).includes(`新列表${item.item.title}`))
+          if (item.chapter) {
+            assert((await render(item.detailRoute)).includes(item.chapterState.data.title), 'Directory must refresh with its family')
+            const reader = await render(item.chapterRoute)
+            assert(reader.includes(item.chapterState.data.title))
+            if (item.family === 'novels') assert(reader.includes('更新后的小说正文'))
+            else {
+              const image = page.locator('.comic-page-wrap img')
+              assert((await image.getAttribute('src')).includes('/uploads/updated-comic.png'))
+              await image.evaluate(async element => { await element.decode(); if (!element.naturalWidth) throw new Error('Updated page image failed to decode') })
+            }
+          }
+          if (item.family === 'contents') {
+            assert((await render(families[1].detailRoute)).includes(families[1].oldTitle), 'An article notification must not clear movies')
+            assert.equal(count(families[1].apiPath), families[1].warmCount)
+          }
+          if (item.family === 'movies') {
+            assert((await render('/movies/invalidate-hidden')).includes('重新发布影视'))
+            assert(count(hidden) > hiddenCount)
+            entry.cached404Republished = true
+          }
+          entry.families.push({ tag: tags[0], refreshed: true, chapters: Boolean(item.chapter) })
+        }
+        const taggedReads = fixture.requests.filter(item => ['/contents', '/movies', '/novels', '/comics'].includes(item.path.replace('/api/v1', '')) || families.some(family => item.path === '/api/v1' + family.directoryApi))
+        assert(taggedReads.length > 0)
+        assert(taggedReads.every(item => item.cacheVersion === '1'), 'Tagged fetches must isolate old cache entries')
+        await screenshot('updated-chapter')
+      }, item => item.status === 404)
+    })
     await t.test('production cache expiry, withdrawal and transient failure', async () => {
       await scenario('cache', origin, async (page, _context, _entry, screenshot) => {
         const observations = report.cache = { next: require('next/package.json').version, details: [], listRequestCounts: [] }
@@ -435,6 +578,9 @@ test('portal HTTP and browser regression', { timeout: 360000 }, async t => {
           assert.equal(count(apiPath), warmCount, 'A warm detail must reuse its cached result')
           observations.details.push({ route, apiPath, seconds, backendStatusAfterWarm: status, warmCount, warmedAt: Date.now() })
         }
+        const rejectedNotification = await revalidate(unconfiguredOrigin, { body: JSON.stringify({ tags: ['portal:contents', 'portal:movies'] }) })
+        assert.equal(rejectedNotification.status, 503)
+        observations.notificationFailureStatus = rejectedNotification.status
         const cold = '/contents/slug/cache-cold-error'
         assert(missing(await render('/articles/cache-cold-error')))
         fixture.cacheStates.get(cold).status = 200

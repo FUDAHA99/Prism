@@ -10,6 +10,7 @@ import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity
 import { Comic, ComicStatus, ComicSerialStatus } from './entities/comic.entity';
 import { ComicChapter } from './entities/comic-chapter.entity';
 import { AuditService } from '../audit/audit.service';
+import { PortalCacheService } from '../../shared/portal-cache/portal-cache.service';
 import { changedAuditFields } from '../audit/audit-summary';
 import { isStaff, Viewer } from '../../common/authz/viewer';
 import { publishedDue, publishedDueParams, publishedDueSql } from '../../common/authz/publish-window';
@@ -200,6 +201,7 @@ export class ComicService {
     @InjectRepository(ComicChapter)
     private readonly chapterRepo: Repository<ComicChapter>,
     private readonly auditService: AuditService,
+    private readonly portalCache: PortalCacheService,
     @Optional() private readonly clock: Clock = SYSTEM_CLOCK,
   ) {}
 
@@ -238,6 +240,7 @@ export class ComicService {
       publishedAt: published ? (requestedAt ?? this.publishNow()) : requestedAt,
     });
     const saved = await this.comicRepo.save(entity);
+    await this.portalCache.invalidate(['portal:comics']);
 
     await this.auditService.log({
       userId,
@@ -382,6 +385,7 @@ export class ComicService {
     // 什么都没提交时不发 UPDATE：否则 TypeORM 仍会把 updatedAt 刷成当前时间
     if (Object.keys(patch).length > 0) {
       await this.comicRepo.update(id, patch);
+      await this.portalCache.invalidate(['portal:comics']);
     }
 
     // 只记实际写入的变更字段名，不记请求体原文
@@ -403,6 +407,7 @@ export class ComicService {
       status: ComicStatus.PUBLISHED,
       publishedAt: comic.publishedAt ?? this.publishNow(),
     });
+    await this.portalCache.invalidate(['portal:comics']);
     await this.auditService.log({
       userId,
       action: 'COMIC_PUBLISH',
@@ -417,6 +422,7 @@ export class ComicService {
   async unpublish(id: string, userId: string): Promise<Comic> {
     await this.findOne(id);
     await this.comicRepo.update(id, { status: ComicStatus.DRAFT });
+    await this.portalCache.invalidate(['portal:comics']);
     await this.auditService.log({
       userId,
       action: 'COMIC_UNPUBLISH',
@@ -431,6 +437,7 @@ export class ComicService {
   async remove(id: string, userId: string): Promise<void> {
     await this.findOne(id);
     await this.comicRepo.softDelete(id);
+    await this.portalCache.invalidate(['portal:comics']);
     await this.auditService.log({
       userId,
       action: 'COMIC_DELETE',
@@ -543,8 +550,13 @@ export class ComicService {
     });
     const saved = await this.chapterRepo.save(ch);
 
-    await this.comicRepo.increment({ id: comicId }, 'chapterCount', 1);
-    await this.comicRepo.update(comicId, { lastChapterAt: new Date() });
+    try {
+      await this.comicRepo.increment({ id: comicId }, 'chapterCount', 1);
+      await this.comicRepo.update(comicId, { lastChapterAt: new Date() });
+    } finally {
+      // 章节已经提交；后续聚合写入失败也必须让门户丢弃旧章节缓存。
+      await this.portalCache.invalidate(['portal:comics']);
+    }
 
     await this.auditService.log({
       userId,
@@ -573,6 +585,7 @@ export class ComicService {
 
     if (Object.keys(patch).length > 0) {
       await this.chapterRepo.update(chapterId, patch);
+      await this.portalCache.invalidate(['portal:comics']);
     }
     await this.auditService.log({
       userId,
@@ -589,7 +602,11 @@ export class ComicService {
   async removeChapter(chapterId: string, userId: string): Promise<void> {
     const ch = await this.getChapter(chapterId);
     await this.chapterRepo.delete(chapterId);
-    await this.comicRepo.decrement({ id: ch.comicId }, 'chapterCount', 1);
+    try {
+      await this.comicRepo.decrement({ id: ch.comicId }, 'chapterCount', 1);
+    } finally {
+      await this.portalCache.invalidate(['portal:comics']);
+    }
     await this.auditService.log({
       userId,
       action: 'COMIC_CHAPTER_DELETE',
