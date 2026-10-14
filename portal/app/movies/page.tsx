@@ -11,13 +11,13 @@ import type { MovieType } from '@/lib/types'
 export const metadata: Metadata = { title: '影视' }
 
 interface PageProps {
-  searchParams: {
+  searchParams: Promise<{
     page?: string
     type?: MovieType | 'all'
     region?: string
     year?: string
     q?: string
-  }
+  }>
 }
 
 const TYPE_TABS: { key: MovieType | 'all'; label: string }[] = [
@@ -29,7 +29,8 @@ const TYPE_TABS: { key: MovieType | 'all'; label: string }[] = [
   { key: 'short', label: '短剧' },
 ]
 
-export default async function MoviesPage({ searchParams }: PageProps) {
+export default async function MoviesPage({ searchParams: searchParamsPromise }: PageProps) {
+  const searchParams = await searchParamsPromise
   // 查询串来自地址栏，先收成后端认的值：后端对非法 page / year / 类型返回 400，原样透传会让整页显示「加载失败」
   const page = parsePageParam(searchParams.page)
   const movieType = TYPE_TABS.some((t) => t.key !== 'all' && t.key === searchParams.type)

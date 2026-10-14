@@ -10,10 +10,11 @@ import { friendlySourceName, movieTypeLabel } from '@/lib/movie-utils'
 import { safeMediaSrc } from '@/lib/safe-url'
 
 interface Props {
-  params: { slug: string }
+  params: Promise<{ slug: string }>
 }
 
-export async function generateMetadata({ params }: Props): Promise<Metadata> {
+export async function generateMetadata({ params: paramsPromise }: Props): Promise<Metadata> {
+  const params = await paramsPromise
   const m = await getMovieBySlug(params.slug)
   if (!m) return { title: '未找到' }
   return {
@@ -22,7 +23,8 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   }
 }
 
-export default async function MovieDetailPage({ params }: Props) {
+export default async function MovieDetailPage({ params: paramsPromise }: Props) {
+  const params = await paramsPromise
   const movie = await getMovieBySlug(params.slug)
   if (!movie) notFound()
 

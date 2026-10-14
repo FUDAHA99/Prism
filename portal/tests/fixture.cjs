@@ -49,6 +49,15 @@ async function listen(server) {
 async function createFixture() {
   const requests = []
   const progress = new Map()
+  const comments = []
+  const commentState = { status: 'pending' }
+  // Unlinked slugs avoid browser prefetch warming the cache before the test does.
+  const cacheStates = new Map([
+    ['/contents/slug/cache-article', { status: 200, data: { ...article, id: uuid(41), slug: 'cache-article', title: '缓存文章' } }],
+    ['/movies/slug/cache-movie', { status: 200, data: { ...movie, id: uuid(71), slug: 'cache-movie', title: '缓存影视' } }],
+    ['/movies/slug/cache-outage', { status: 200, data: { ...movie, id: uuid(72), slug: 'cache-outage', title: '暂时故障影视' } }],
+    ['/contents/slug/cache-cold-error', { status: 503, data: { ...article, id: uuid(42), slug: 'cache-cold-error', title: '故障恢复文章' } }],
+  ])
   const media = fs.readFileSync(path.join(__dirname, 'sample.webm'))
   const envelope = (res, data, status = 200) => {
     res.writeHead(status, { 'Content-Type': 'application/json' })
@@ -66,6 +75,7 @@ async function createFixture() {
     const entry = { method: req.method, path: url.pathname, query: Object.fromEntries(url.searchParams), authorized: Boolean(req.headers.authorization) }
     if (body) entry.body = JSON.parse(body)
     requests.push(entry)
+    res.once('finish', () => { entry.status = res.statusCode; entry.completedAt = Date.now() })
     if (url.pathname.startsWith('/uploads/')) {
       if (url.pathname === '/uploads/broken.webm') { res.writeHead(404); res.end(); return }
       const bytes = url.pathname.endsWith('.webm') ? media : image
@@ -91,10 +101,19 @@ async function createFixture() {
       const record = progress.get(url.searchParams.get('guestId'))
       envelope(res, record?.contentId === url.searchParams.get('contentId') && record?.contentType === url.searchParams.get('contentType') ? record : null); return
     }
-    if (route === '/site-settings/public') { envelope(res, [{ key: 'site_name', value: 'Portal Regression' }, { key: 'site_favicon', value: '/uploads/poster.png' }, { key: 'posts_per_page', value: '2' }, { key: 'enable_comment', value: 'false' }]); return }
+    if (route === '/site-settings/public') { envelope(res, [{ key: 'site_name', value: 'Portal Regression' }, { key: 'site_favicon', value: '/uploads/poster.png' }, { key: 'posts_per_page', value: '2' }, { key: 'enable_comment', value: 'true' }, { key: 'comment_audit', value: 'true' }]); return }
     if (route === '/categories') { envelope(res, [category]); return }
     if (route === '/tags') { envelope(res, [tag]); return }
-    if (route === '/comments/public') { envelope(res, []); return }
+    if (route === '/comments/public') { envelope(res, comments.filter(comment => comment.contentId === url.searchParams.get('contentId') && comment.status === 'approved')); return }
+    if (route === '/comments' && req.method === 'POST') {
+      const comment = { id: uuid(100 + comments.length), contentId: entry.body.contentId, guestName: entry.body.guestName, body: entry.body.body, isRegistered: false, status: commentState.status, createdAt: date, children: [] }
+      comments.push(comment)
+      envelope(res, comment, 201); return
+    }
+    if (cacheStates.has(route)) {
+      const state = cacheStates.get(route)
+      envelope(res, state.status === 200 ? state.data : null, state.status); return
+    }
     const lists = { '/movies': movie, '/novels': novel, '/comics': comic, '/contents': article }
     if (lists[route]) {
       const page = Number(url.searchParams.get('page') || 1)
@@ -115,7 +134,7 @@ async function createFixture() {
   })
   const origin = await listen(server)
   server.origin = origin
-  return { origin, server, requests, progress }
+  return { origin, server, requests, progress, commentState, cacheStates }
 }
 
 module.exports = { createFixture, listen, movie, novel, comic, article, novelChapters, comicChapters }

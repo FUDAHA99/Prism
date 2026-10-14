@@ -9,8 +9,8 @@
 //   2  门禁给不出结论：参数不对，或 npm audit 没拿到有效报告（源不支持 audit，如 npmmirror；网络故障；输出无法解析）。
 //
 // 只读 lockfile，不需要先 npm ci；零依赖（CI 的这个 job 只装了 node）。
-// 不用 npm audit --audit-level：next 14 的 critical 没有 14.x 修复版本，按级别卡会永远是红的；
-// 而且按级别卡没法逐条豁免，也没有到期复查，还会把新出现的低级别公告一起藏起来。
+// 不用 npm audit --audit-level：按级别卡没法逐条豁免，也没有到期复查，
+// 还会把新出现的低级别公告一起藏起来。
 // 例外清单格式：{ "<项目>": [{ "id": "GHSA-…", "package": "…", "reason": "…", "expires": "YYYY-MM-DD" }] }，
 // 到期日当天仍有效（按 UTC 日期），次日起失败。
 import { execFileSync, execSync } from 'node:child_process';

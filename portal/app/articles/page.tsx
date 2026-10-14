@@ -8,12 +8,13 @@ import { clampListLimit, parsePageParam } from '@/lib/page-param'
 export const revalidate = 30
 
 interface Props {
-  searchParams: { page?: string }
+  searchParams: Promise<{ page?: string }>
 }
 
 export const metadata = { title: '全部文章' }
 
-export default async function ArticlesPage({ searchParams }: Props) {
+export default async function ArticlesPage({ searchParams: searchParamsPromise }: Props) {
+  const searchParams = await searchParamsPromise
   // 地址栏里的 page 先收成后端认的值（1–100000 的整数）：后端对非法 page 返回 400；接口出错时整页降级为「加载失败」
   const page = parsePageParam(searchParams.page)
   const config = await getSiteConfig().catch(() => null)

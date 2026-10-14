@@ -8,7 +8,7 @@ const path = require('node:path')
 const http = require('node:http')
 const { spawn, execFileSync } = require('node:child_process')
 const { chromium } = require('playwright')
-const { createFixture, listen, movie, novelChapters, comicChapters } = require('./fixture.cjs')
+const { createFixture, listen, movie, article, novelChapters, comicChapters } = require('./fixture.cjs')
 
 const source = path.resolve(__dirname, '..')
 const repository = path.dirname(source)
@@ -19,7 +19,7 @@ fs.mkdirSync(outputParent, { recursive: true })
 const output = fs.mkdtempSync(path.join(outputParent, 'portal-regression-'))
 const children = []
 const servers = []
-const report = { node: process.version, output, browserFallback: 'Browser plugin not available; repository Playwright runner', cases: [], limitations: ['Desktop Chromium only; no Safari/native HLS, DRM or remote CDN coverage.', 'Native WebM decode and seek are real. Progress reporting uses the real media timeupdate and React navigation cleanup.', 'Known pre-existing behavior: novel/comic pagination loses q; from-start link retains stored progress.'] }
+const report = { node: process.version, output, runner: 'Playwright Chromium via npm test', cases: [], limitations: ['Desktop Chromium only; no Safari/native HLS, DRM or remote CDN coverage.', 'Native WebM decode and seek are real. Progress reporting uses the real media timeupdate and React navigation cleanup.', 'Known pre-existing behavior: novel/comic pagination loses q; from-start link retains stored progress.'] }
 let browser
 let fixture
 let cleanupPromise
@@ -92,7 +92,7 @@ async function freePort() {
 async function startNext(target, mode) {
   const port = await freePort()
   const origin = `http://127.0.0.1:${port}`
-  const child = nextProcess(target, [mode === 'development' ? 'dev' : 'start', '-H', '127.0.0.1', '-p', String(port)], mode, mode)
+  const child = nextProcess(target, [...(mode === 'development' ? ['dev', '--webpack'] : ['start']), '-H', '127.0.0.1', '-p', String(port)], mode, mode)
   for (let tries = 0; tries < 120; tries++) {
     if (child.exitCode !== null) throw new Error(`Next exited ${child.exitCode}; see ${mode}.log`)
     try { if ((await fetch(origin + '/about', { signal: AbortSignal.timeout(1000) })).ok) return origin } catch {}
@@ -141,11 +141,13 @@ async function scenario(name, origin, body, allowedHttp = () => false) {
   try {
     await body(page, context, entry, screenshot)
     entry.url = page.url()
+    await page.waitForFunction(() => document.title.trim().length > 0)
     entry.title = await page.title()
     assert(entry.url.startsWith(origin))
     assert(entry.title.length > 0)
     assert((await page.locator('main').innerText()).trim().length > 0)
-    assert.equal(await page.locator('nextjs-portal').count(), 0)
+    // Next's healthy development indicator shares this host with the error overlay.
+    assert.equal(await page.locator('nextjs-portal [data-nextjs-dialog], nextjs-portal [data-nextjs-error-overlay-nav]').count(), 0)
     assert.deepEqual(entry.pageErrors, [])
     assert.deepEqual(entry.externalRequests, [])
     assert.deepEqual(entry.httpErrors.filter(item => !allowedHttp(item)), [])
@@ -166,6 +168,11 @@ async function scenario(name, origin, body, allowedHttp = () => false) {
 async function goto(page, origin, route, heading) {
   await page.goto(origin + route)
   await page.getByRole('heading', { name: heading, exact: true }).waitFor()
+}
+
+async function title(page, expected) {
+  // Next can stream metadata after the page body has become visible.
+  await page.waitForFunction(expected => document.title === expected + ' | Portal Regression', expected)
 }
 
 async function playback(page) {
@@ -230,6 +237,7 @@ async function resumeScenario(origin, name) {
     assert(Math.abs(body.progressSec - updatedProgress) <= 1)
     assert(body.progressSec > 45 && body.durationSec >= 60)
     await page.getByRole('link', { name: new RegExp(`继续看.*0:${String(body.progressSec).padStart(2, '0')}`) }).waitFor()
+    await title(page, movie.title)
     entry.resume = { calls, duration: await video.count() ? await video.evaluate(element => element.duration) : body.durationSec, reportStatus: 204 }
   }, item => item.status === 401 && item.url.includes('/api/v1/watch-history'))
 }
@@ -243,7 +251,7 @@ test('portal HTTP and browser regression', { timeout: 360000 }, async t => {
     servers.push(fixture.server)
     browser = await chromium.launch({ headless: true, ...(process.env.PORTAL_TEST_BROWSER_EXECUTABLE ? { executablePath: process.env.PORTAL_TEST_BROWSER_EXECUTABLE } : {}) })
     const production = isolatedSource('production')
-    const build = nextProcess(production, ['build'], 'production', 'build')
+    const build = nextProcess(production, ['build', '--webpack'], 'production', 'build')
     const buildCode = await new Promise((resolve, reject) => { build.once('error', reject); build.once('exit', resolve) })
     assert.equal(buildCode, 0, `Next build failed; see ${path.join(output, 'build.log')}`)
     report.productionBuild = 'passed (includes Next TypeScript validation)'
@@ -266,6 +274,7 @@ test('portal HTTP and browser regression', { timeout: 360000 }, async t => {
           ['/category/regression-category', '回归分类', '回归文章第2页'], ['/tag/regression-tag', '# 回归标签', '回归文章第2页'],
         ]) {
           await goto(page, origin, route, heading)
+          await title(page, route.startsWith('/category') ? '分类：回归分类' : route.startsWith('/tag') ? '标签：回归标签' : heading)
           await page.getByRole('link', { name: '下一页', exact: true }).click()
           await page.getByText(secondTitle, { exact: true }).waitFor()
           assert.equal(new URL(page.url()).searchParams.get('page'), '2')
@@ -286,24 +295,29 @@ test('portal HTTP and browser regression', { timeout: 360000 }, async t => {
     await t.test('article, novel and comic readers', async () => {
       await scenario('readers', origin, async (page, _context, entry, screenshot) => {
         await goto(page, origin, '/articles/regression-article', '回归文章')
+        await title(page, '回归文章')
         await page.getByRole('heading', { name: '门户正文', exact: true }).waitFor()
         assert.equal(await page.locator('.prose table td').innerText(), '表格正文')
         assert.equal(await page.locator('.prose script').count(), 0)
         assert.equal(await page.evaluate(() => Boolean(window.__portalXss)), false)
         await screenshot('article')
         await goto(page, origin, '/novels/regression-novel', '回归小说')
+        await title(page, '回归小说')
         await page.getByRole('link', { name: '开始阅读', exact: true }).click()
         await page.getByRole('heading', { name: novelChapters[0].title, exact: true }).waitFor()
         assert((await page.locator('.novel-reader').innerText()).includes('第1章正文'))
         await page.getByRole('link', { name: '下一章 →', exact: true }).click()
         await page.getByRole('heading', { name: novelChapters[1].title, exact: true }).waitFor()
+        await title(page, novelChapters[1].title)
         await page.getByRole('link', { name: '← 上一章', exact: true }).waitFor()
         await goto(page, origin, '/comics/regression-comic', '回归漫画')
+        await title(page, '回归漫画')
         await page.getByRole('link', { name: '开始阅读', exact: true }).click()
         await page.getByRole('heading', { name: comicChapters[0].title, exact: true }).waitFor()
         await page.locator('.comic-page-wrap img').evaluate(async image => { await image.decode(); if (!image.naturalWidth) throw new Error('Comic image did not decode') })
         await page.getByRole('link', { name: '下一话 →', exact: true }).click()
         await page.getByRole('heading', { name: comicChapters[1].title, exact: true }).waitFor()
+        await title(page, comicChapters[1].title)
         await screenshot('comic')
         entry.readers = 'Markdown, chapter navigation and decoded image passed'
       })
@@ -311,6 +325,7 @@ test('portal HTTP and browser regression', { timeout: 360000 }, async t => {
     await t.test('native playback, episodes, sources and failure state', async () => {
       await scenario('playback', origin, async (page, _context, entry, screenshot) => {
         await goto(page, origin, '/movies/regression-movie', '回归影视')
+        await title(page, '回归影视')
         await page.getByRole('link', { name: '▶ 立即观看', exact: true }).click()
         await page.getByRole('heading', { name: /^回归影视\s*第1集$/ }).waitFor()
         const video = await playback(page)
@@ -318,6 +333,7 @@ test('portal HTTP and browser regression', { timeout: 360000 }, async t => {
         assert.equal(entry.nativeVideo.width, 64)
         await page.getByRole('link', { name: '下一集 →', exact: true }).click()
         await page.getByRole('heading', { name: /^回归影视\s*第2集$/ }).waitFor()
+        await title(page, '回归影视 - 第2集 - 在线播放')
         await playback(page)
         assert.equal(await video.evaluate(element => new URL(element.currentSrc).pathname), '/uploads/source-0-episode-1.webm')
         await page.getByRole('link', { name: '← 上一集', exact: true }).waitFor()
@@ -344,6 +360,139 @@ test('portal HTTP and browser regression', { timeout: 360000 }, async t => {
       }, item => item.status === 404)
     })
     await t.test('production resume read, seek, report and expired-token retry', () => resumeScenario(origin, 'production-resume'))
+    await t.test('guest comments follow the response moderation status', async () => {
+      await scenario('comments', origin, async (page, _context, entry, screenshot) => {
+        const start = fixture.requests.length
+        const posts = () => fixture.requests.slice(start).filter(item => item.path === '/api/v1/comments' && item.method === 'POST')
+        await goto(page, origin, '/articles/regression-article', '回归文章')
+        await page.getByText('暂无评论，欢迎抢沙发 🛋', { exact: true }).waitFor()
+        await page.getByText('评论将在审核通过后展示', { exact: true }).waitFor()
+        await page.getByRole('button', { name: '提交评论', exact: true }).click()
+        await page.getByText('请填写昵称、邮箱和评论内容', { exact: true }).waitFor()
+        assert.equal(posts().length, 0)
+        const name = page.getByPlaceholder('昵称 *', { exact: true })
+        const email = page.getByPlaceholder('邮箱 *（不会公开）', { exact: true })
+        const body = page.getByPlaceholder('说点什么吧... *', { exact: true })
+        await name.fill(' 回归游客 ')
+        await email.fill('reader@example.test')
+        await body.fill(' 等待审核的评论 ')
+        const pendingPost = page.waitForResponse(response => response.url().endsWith('/api/v1/comments') && response.request().method() === 'POST')
+        await page.getByRole('button', { name: '提交评论', exact: true }).click()
+        await page.getByText('✅ 评论已提交，审核通过后将公开显示', { exact: true }).waitFor()
+        assert.equal((await pendingPost).status(), 201)
+        assert.equal(await body.inputValue(), '')
+        assert.equal(await name.inputValue(), ' 回归游客 ')
+        assert.equal(await email.inputValue(), 'reader@example.test')
+        assert.equal(await page.getByText('等待审核的评论', { exact: true }).count(), 0)
+        assert.deepEqual(posts()[0].body, { contentId: article.id, guestName: '回归游客', guestEmail: 'reader@example.test', body: '等待审核的评论' })
+        // Cached site settings still require review; the POST response decides visibility.
+        fixture.commentState.status = 'approved'
+        await body.fill('直接公开的评论')
+        const refreshed = page.waitForResponse(response => response.url().includes('/api/v1/comments/public?') && response.request().method() === 'GET' && response.status() === 200)
+        const approvedPost = page.waitForResponse(response => response.url().endsWith('/api/v1/comments') && response.request().method() === 'POST')
+        await page.getByRole('button', { name: '提交评论', exact: true }).click()
+        await page.getByText('✅ 评论提交成功', { exact: true }).waitFor()
+        await refreshed
+        assert.equal((await approvedPost).status(), 201)
+        await page.getByText('直接公开的评论', { exact: true }).waitFor()
+        await page.getByRole('heading', { name: '💬 评论 (1)', exact: true }).waitFor()
+        assert.equal(await body.inputValue(), '')
+        assert.equal(posts().length, 2)
+        assert.deepEqual(posts()[1].body, { contentId: article.id, guestName: '回归游客', guestEmail: 'reader@example.test', body: '直接公开的评论' })
+        const gets = fixture.requests.slice(start).filter(item => item.path === '/api/v1/comments/public')
+        assert(gets.length >= 2)
+        for (const get of gets) assert.deepEqual(get.query, { contentId: article.id })
+        entry.comments = { postStatuses: [201, 201], publicCount: 1, posts: posts(), publicReads: gets.length }
+        await screenshot('approved')
+      })
+    })
+    await t.test('production cache expiry, withdrawal and transient failure', async () => {
+      await scenario('cache', origin, async (page, _context, _entry, screenshot) => {
+        const observations = report.cache = { next: require('next/package.json').version, details: [], listRequestCounts: [] }
+        const count = apiPath => fixture.requests.filter(item => item.path === '/api/v1' + apiPath).length
+        const render = async route => {
+          const response = await page.goto(origin + route)
+          await page.locator('main h1').first().waitFor()
+          return { status: response.status(), html: await page.locator('main').innerText(), missing: await page.getByRole('heading', { name: '404', exact: true }).count() === 1 }
+        }
+        const missing = response => response.missing && response.html.includes('页面没有找到')
+        const cases = [
+          ['/articles/cache-article', '/contents/slug/cache-article', 404, 30],
+          ['/movies/cache-movie', '/movies/slug/cache-movie', 404, 60],
+          ['/movies/cache-outage', '/movies/slug/cache-outage', 503, 60],
+        ]
+        for (const [route, apiPath, status, seconds] of cases) {
+          assert.equal(count(apiPath), 0)
+          const warmed = await render(route)
+          assert.equal(warmed.status, 200)
+          assert(warmed.html.includes(fixture.cacheStates.get(apiPath).data.title) && !missing(warmed))
+          const warmCount = count(apiPath)
+          assert(warmCount > 0)
+          fixture.cacheStates.get(apiPath).status = status
+          const cached = await render(route)
+          assert.equal(cached.status, 200)
+          assert(!missing(cached))
+          assert.equal(count(apiPath), warmCount, 'A warm detail must reuse its cached result')
+          observations.details.push({ route, apiPath, seconds, backendStatusAfterWarm: status, warmCount, warmedAt: Date.now() })
+        }
+        const cold = '/contents/slug/cache-cold-error'
+        assert(missing(await render('/articles/cache-cold-error')))
+        fixture.cacheStates.get(cold).status = 200
+        const recovered = await render('/articles/cache-cold-error')
+        assert.equal(recovered.status, 200)
+        assert(recovered.html.includes('故障恢复文章') && !missing(recovered))
+        assert(count(cold) >= 2, 'A cold 503 must not become a persistent cached null')
+        observations.coldFailureRecovered = true
+        for (let i = 0; i < 2; i++) {
+          const before = fixture.requests.filter(item => item.path === '/api/v1/movies' && item.query.search === 'cache-probe').length
+          const response = await fetch(origin + '/movies?q=cache-probe', { signal: AbortSignal.timeout(10000) })
+          await response.text()
+          assert.equal(response.status, 200)
+          observations.listRequestCounts.push(fixture.requests.filter(item => item.path === '/api/v1/movies' && item.query.search === 'cache-probe').length - before)
+        }
+        // Observe force-dynamic + explicit fetch revalidate on each Next version; do not assume its caching policy.
+        const verifyExpired = async item => {
+          const deadline = Date.now() + 15000
+          let result = await render(item.route)
+          const failedRefresh = () => fixture.requests.find(request => request.path === '/api/v1' + item.apiPath && request.status === 503 && request.completedAt > item.warmedAt)
+          while (Date.now() < deadline && (item.backendStatusAfterWarm === 404 ? !missing(result) : !failedRefresh())) {
+            await pause(250)
+            result = await render(item.route)
+          }
+          assert(count(item.apiPath) > item.warmCount, 'Expired detail must revalidate against the backend')
+          if (item.backendStatusAfterWarm === 404) assert(missing(result), 'Withdrawn detail must disappear after cache refresh')
+          else {
+            assert(failedRefresh(), 'The backend must have completed the failed refresh')
+            item.failedRefreshCompletedAt = failedRefresh().completedAt
+            await pause(250)
+            result = await render(item.route)
+            assert.equal(result.status, 200)
+            assert(result.html.includes('暂时故障影视') && !missing(result), 'A failed background refresh must preserve the last successful value')
+            item.readAfterFailedRefreshAt = Date.now()
+          }
+          item.finalStatus = result.status
+          item.finalBackendRequests = count(item.apiPath)
+          item.elapsedMs = Date.now() - item.warmedAt
+        }
+        // Check both boundaries within one 61-second window: a 30/60 mix-up must fail.
+        await pause(Math.max(0, observations.details[0].warmedAt + 31000 - Date.now()))
+        await verifyExpired(observations.details[0])
+        for (const item of observations.details.slice(1)) {
+          await pause(Math.max(0, item.warmedAt + 31000 - Date.now()))
+          const cached = await render(item.route)
+          assert.equal(cached.status, 200)
+          assert(!missing(cached))
+          assert.equal(count(item.apiPath), item.warmCount, '60-second details must still be cached at the 30-second boundary')
+          item.cachedAt31Seconds = true
+          item.cachedCheckElapsedMs = Date.now() - item.warmedAt
+        }
+        await pause(Math.max(0, Math.max(...observations.details.map(item => item.warmedAt)) + 61000 - Date.now()))
+        for (const item of observations.details.slice(1)) await verifyExpired(item)
+        observations.passed = true
+        await screenshot('retained-after-503')
+        save()
+      }, item => item.status === 404)
+    })
     const dev = await startNext(isolatedSource('development'), 'development')
     report.origins.development = dev
     await t.test('development resume reaches fixture through Next rewrite', () => resumeScenario(dev, 'development-resume'))

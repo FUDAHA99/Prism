@@ -6,15 +6,17 @@ import type { Metadata } from 'next'
 import { getNovelBySlug, getNovelChapters } from '@/lib/api'
 import { safeMediaSrc } from '@/lib/safe-url'
 
-interface Props { params: { slug: string } }
+interface Props { params: Promise<{ slug: string }> }
 
-export async function generateMetadata({ params }: Props): Promise<Metadata> {
+export async function generateMetadata({ params: paramsPromise }: Props): Promise<Metadata> {
+  const params = await paramsPromise
   const n = await getNovelBySlug(params.slug)
   if (!n) return { title: '未找到' }
   return { title: n.title, description: n.intro?.slice(0, 160) }
 }
 
-export default async function NovelDetailPage({ params }: Props) {
+export default async function NovelDetailPage({ params: paramsPromise }: Props) {
+  const params = await paramsPromise
   const novel = await getNovelBySlug(params.slug)
   if (!novel) notFound()
 

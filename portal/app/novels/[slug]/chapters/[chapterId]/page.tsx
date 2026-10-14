@@ -5,15 +5,17 @@ import { notFound } from 'next/navigation'
 import type { Metadata } from 'next'
 import { getNovelBySlug, getNovelChapters, getNovelChapter } from '@/lib/api'
 
-interface Props { params: { slug: string; chapterId: string } }
+interface Props { params: Promise<{ slug: string; chapterId: string }> }
 
-export async function generateMetadata({ params }: Props): Promise<Metadata> {
+export async function generateMetadata({ params: paramsPromise }: Props): Promise<Metadata> {
+  const params = await paramsPromise
   const ch = await getNovelChapter(params.chapterId)
   if (!ch) return { title: '未找到' }
   return { title: ch.title }
 }
 
-export default async function NovelChapterPage({ params }: Props) {
+export default async function NovelChapterPage({ params: paramsPromise }: Props) {
+  const params = await paramsPromise
   const novel = await getNovelBySlug(params.slug)
   if (!novel) notFound()
 

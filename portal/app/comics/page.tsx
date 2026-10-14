@@ -9,8 +9,9 @@ import Pagination from '@/components/Pagination'
 export const metadata: Metadata = { title: '漫画' }
 
 export default async function ComicsPage({
-  searchParams,
-}: { searchParams: { page?: string; q?: string } }) {
+  searchParams: searchParamsPromise,
+}: { searchParams: Promise<{ page?: string; q?: string }> }) {
+  const searchParams = await searchParamsPromise
   // 地址栏里的 page 先收成后端认的值：后端对非法 page 返回 400，原样透传（NaN）会让整页显示「加载失败」
   const page = parsePageParam(searchParams.page)
   const list = await getComics({ page, limit: 24, search: searchParams.q }).catch(() => null)

@@ -44,7 +44,7 @@
 ### 前台门户（`portal/`）
 | 技术 | 说明 |
 |------|------|
-| Next.js 14 App Router | SSR / ISR |
+| Next.js 16 App Router + React 19 | SSR / ISR |
 | Tailwind CSS | 样式 |
 | HLS.js | 视频播放 |
 | dayjs | 时间格式化 |

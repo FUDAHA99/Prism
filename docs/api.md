@@ -1094,7 +1094,7 @@ javascript: / data: / vbscript: / file: 等其他协议不入库（影视同时�
 ## 附：门户缓存窗口（下架 / 撤回发布后多久从门户消失）
 
 后端对游客的接口只返回已发布、未删除（且已到发布时间）的数据，状态一变，直接调 API 立即生效（详情 / 单章 `404`、
-列表里不再出现）。但门户（Next.js 14）在服务端缓存了这些接口的结果（`portal/lib/api.ts`），缓存期内门户页面照旧
+列表里不再出现）。但门户（Next.js 16，未启用 Cache Components）在服务端缓存了这些接口的结果（`portal/lib/api.ts`），缓存期内门户页面照旧
 按旧结果渲染：
 
 | 门户取数 | 缓存 | 接口 |
@@ -1105,7 +1105,7 @@ javascript: / data: / vbscript: / file: 等其他协议不入库（影视同时�
 | 影视 / 小说 / 漫画详情、单章 | 60 秒（`unstable_cache`，含 404） | `/movies/slug/:slug`、`/novels/slug/:slug`、`/comics/slug/:slug`、`/novels/chapters/:chapterId`、`/comics/chapters/:chapterId` |
 | 文章评论 | 不缓存 | `/comments/public`（浏览器直接请求） |
 
-单条数据不用 fetch 的数据缓存，是因为 Next 14 只把状态码 200 的响应写进缓存：下架后接口改回 `404`，过期后的
+单条数据改用函数缓存，源于原 Next 14 只把状态码 200 的 fetch 响应写进缓存：下架后接口改回 `404`，过期后的
 后台刷新拿到 404 不会覆盖旧条目，旧条目就一直以「过期但可用」的身份返回，已下架的详情与章节在门户上**无限期**
 可见（此前单章 300 秒、详情 60 秒的设置实际都是这样）。现在单条数据由 `unstable_cache` 缓存函数结果，`404`
 记为「不存在」一并缓存；5xx、网络错误不写缓存（首次加载时页面按不存在处理、下次再试；后台刷新失败时保留旧值，
@@ -1113,13 +1113,14 @@ Next 在服务端日志里打一条 `revalidating cache with key ...`）。单�
 
 因此在后台下架、撤回发布、删除，或把章节改成未发布之后：
 
-- 门户页面最多再显示约 60 秒（文章详情与列表约 30 秒），从缓存写入时算起；
+- 缓存 TTL 为 60 秒（文章详情与列表为 30 秒），从缓存写入时算起；这不是内容对所有访客消失的硬性时限；
 - 缓存过期后的**第一次**请求仍拿到旧内容，同时在后台刷新，之后的请求才是新结果（stale-while-revalidate）。页面
   长时间没人访问时旧缓存一直留着，所以「过期后的第一位访客」仍可能看到旧内容；
-- 已经打开过页面的浏览器在站内跳转时，还可能用 Next 客户端路由缓存里的页面（14.2 对动态页默认 30 秒），刷新页面即失效；
+- Next 16 不再沿用 14.2 动态页面默认 30 秒的客户端缓存；浏览器前进 / 后退和共享布局仍可能复用已有状态。
+  核对服务端最新结果时使用刷新，并考虑上面的服务端缓存窗口；
 - 缓存落在 portal 进程的 `.next/cache/fetch-cache`（容器里是 `/app/.next/cache/fetch-cache`），只重启 portal **不会**
   清空；必须立刻下线时，删掉这个目录再重启 portal，或重建 portal 容器。
-- 「404 也缓存」意味着每个不存在的地址都会留下一个缓存文件，而 Next 14 从不清理这个目录。门户在请求前先校验键的格式
+- 「404 也缓存」意味着不同的不存在地址会积累缓存文件。门户在请求前先校验键的格式
   （slug 只允许 URL 非保留字符、至多 200 个；章节 id 必须是 UUID），格式不对的直接按不存在处理、不落盘；格式合法的
   随机地址仍会落盘，这部分要等下面的按需失效方案（届时可以不再缓存 404）。运维上可定期检查该目录大小。
 
@@ -1131,11 +1132,15 @@ Next 在服务端日志里打一条 `revalidating cache with key ...`）。单�
 > 1. 门户取数带上标签：fetch 用 `next: { revalidate, tags: [...] }`，`unstable_cache` 用 `{ revalidate, tags: [...] }`，
 >    例如 `novel:<id>`、`novel-chapter:<chapterId>`、`novels:list`；
 > 2. 门户新增一个只给后端调用的 Route Handler（如 `POST /api/revalidate`），用共享密钥校验、只在内网可达（nginx 不对外
->    转发），里面调用 `next/cache` 的 `revalidateTag(tag)`（Next 14 的签名只有一个参数）；
+>    转发），里面调用 `next/cache` 的 `revalidateTag(tag, { expire: 0 })`（Next 16 用第二个参数显式指定立即过期）；
 > 3. 后端在发布、撤回发布、删除、改 slug、章节 `isPublished` 变更、采集更新等写操作成功后，异步调用这个接口
 >    （失败只记日志，不影响后台操作）；
 > 4. 定时发布「到点后出现」没有写事件可挂，仍靠列表的短 `revalidate`（或定时任务补调）；
 > 5. 按需失效上线后，详情与单章的缓存时间可以再放长以减轻后端压力。
+
+本节随 Next 16 迁移于 2026-10-14 更新；按需失效仍未实现。
+参考：[缓存机制](https://nextjs.org/docs/app/guides/caching-without-cache-components)、
+[revalidateTag](https://nextjs.org/docs/app/api-reference/functions/revalidateTag)。
 
 ---
 

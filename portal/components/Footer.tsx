@@ -21,7 +21,7 @@ export default function Footer({ config }: { config: SiteConfig }) {
           </div>
         )}
         <div className="text-xs text-gray-400">
-          Powered by Next.js 14 + NestJS · 基于 CMS 后端 API
+          Powered by Next.js 16 + NestJS · 基于 CMS 后端 API
         </div>
       </div>
     </footer>

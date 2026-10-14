@@ -32,7 +32,7 @@ const API_BASE =
        'http://localhost:3001')
     : (process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:3001')
 
-// 服务端取数的缓存秒数（Next 14 数据缓存，落在 .next/cache/fetch-cache，进程重启不清空）。
+// 服务端取数的缓存秒数（Next 数据缓存，落在 .next/cache/fetch-cache，进程重启不清空）。
 // 页面虽然是 force-dynamic，但显式写了 next.revalidate 的 fetch 仍按这里缓存：后台下架 / 撤回发布 / 删除后，
 // 门户最多再展示这么久，过期后的第一次请求仍拿旧数据、同时在后台刷新（stale-while-revalidate）。
 // 单条数据另走 cachedItem（见下）。窗口与后续的按需失效方案见 docs/api.md「附：门户缓存窗口」。
@@ -84,7 +84,7 @@ async function request<T>(
 /**
  * 单条数据（文章 / 影视 / 小说 / 漫画详情、单章）的取数，结果缓存 revalidate 秒，取不到时返回 null。
  *
- * 不能直接用 fetch 的数据缓存：Next 14 只把 200 的响应写进缓存。内容下架 / 撤回发布 / 删除后后端改回 404，
+ * 原 Next 14 直接用 fetch 的数据缓存时，只把 200 的响应写进缓存。内容下架 / 撤回发布 / 删除后后端改回 404，
  * 过期后的后台刷新拿到 404 不会覆盖旧条目，旧条目就一直以「过期但可用」的身份返回 —— 已下架的详情与章节
  * 在门户上会无限期可见（重启也不清，缓存在磁盘上）。
  *
@@ -95,8 +95,8 @@ async function request<T>(
  */
 /**
  * 键格式校验：不合格的直接当作不存在，不请求后端、也不写缓存。
- * cachedItem 会把 404 记成 null 落盘（撤回发布的内容才能及时从门户消失），而 Next 14 从不清理
- * .next/cache/fetch-cache —— 不校验的话，随便拼的地址每个都会留下缓存文件（1-F-2 复审 low）。
+ * cachedItem 会把 404 记成 null 落盘（撤回发布的内容才能及时从门户消失），不同键的文件会在
+ * .next/cache/fetch-cache 中累积 —— 不校验的话，随便拼的地址每个都会留下缓存文件（1-F-2 复审 low）。
  * slug 只放 URL 非保留字符、至多 200 个（兼容加校验之前写入的存量 slug）；章节 id 必须是 UUID。
  * 剩余风险（合格格式的随机键仍会落盘）要靠按需失效方案解决，见 docs/api.md「附：门户缓存窗口」。
  */

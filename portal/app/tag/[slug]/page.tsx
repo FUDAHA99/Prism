@@ -9,18 +9,21 @@ import { clampListLimit, parsePageParam } from '@/lib/page-param'
 export const revalidate = 30
 
 interface Props {
-  params: { slug: string }
-  searchParams: { page?: string }
+  params: Promise<{ slug: string }>
+  searchParams: Promise<{ page?: string }>
 }
 
-export async function generateMetadata({ params }: Props) {
+export async function generateMetadata({ params: paramsPromise }: Props) {
+  const params = await paramsPromise
   // 拉取失败（undefined）不等于不存在（null）：失败时只给通用标题
   const tag = await getTagBySlug(params.slug).catch(() => undefined)
   if (tag === undefined) return { title: '标签' }
   return { title: tag ? `标签：${tag.name}` : '标签未找到' }
 }
 
-export default async function TagPage({ params, searchParams }: Props) {
+export default async function TagPage({ params: paramsPromise, searchParams: searchParamsPromise }: Props) {
+  const params = await paramsPromise
+  const searchParams = await searchParamsPromise
   // 标签列表拉取失败（undefined）与标签不存在（null）分开：前者整页降级为「加载失败」，后者 404
   const tag = await getTagBySlug(params.slug).catch(() => undefined)
   if (tag === null) notFound()

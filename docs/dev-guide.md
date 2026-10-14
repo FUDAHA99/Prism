@@ -87,12 +87,24 @@ CI 对 portal 安装 `playwright install --with-deps chromium`，然后执行同
 
 覆盖内容页面、分页、章节阅读、播放失败提示、真实本地 WebM 解码 / 换源 / 续播跳转，以及续播 401 后匿名重试。
 续播测试还要求视频能继续播放到新的时间，上报后返回详情页能读回新进度，防止仅恢复初始位置就误判通过。
+评论测试验证待审核 / 直接公开两种响应；缓存测试按真实 30 / 60 秒等待，验证下架变为 404、短暂 503 后保留旧内容与恢复。
+因此一次完整回归通常需要约两分钟，不使用缩短缓存常量或模拟计时来代替实际失效。
 小视频已经随测试提交，运行测试不需要 ffmpeg。API 夹具不验证 JWT 签名、Redis 吊销或 MySQL 持久化；
 外部 HLS 线路、Safari 原生 HLS、DRM 与移动端仍需独立验证。
 
 开发时 `/api/v1/watch-history` 及其子路径由 Next 转发到后端，保留查询参数和 Authorization；
 后端地址沿用 `/uploads` 的 `BACKEND_INTERNAL_URL` → `NEXT_PUBLIC_API_BASE` → `http://localhost:3001` 顺序。
 该 rewrite 只在 development 生效，生产继续走 nginx，不新增通用 API 代理。
+
+### 1.5 门户 Next 16 开发约定
+
+门户使用 Next 16.4.0 / React 19.3.0，后台管理端的 React 版本不随之变动。
+`dev` / `build` 显式使用 `--webpack`，保持迁移前的构建器；回归测试直接调用 Next CLI，也使用相同选项。
+本次没有启用 Turbopack、React Compiler 或 Cache Components。
+
+页面的 `params` / `searchParams` 是 Promise，页面与 `generateMetadata` 必须各自先 `await` 再读取字段。
+原有 `next lint` 已随 Next 16 移除，门户删除了该失效脚本；ESLint 配置仍单独排期，构建中的 TypeScript 检查不能代替 lint。
+参考：[Next 16 迁移指南](https://nextjs.org/docs/app/guides/upgrading/version-16)。
 
 ---
 
@@ -424,6 +436,14 @@ docker compose exec mysql mysql -ucms -pcms123 --default-character-set=utf8mb4 c
 | `npm run preview` | 预览生产构建 |
 | `npm run lint` | ESLint 检查 |
 | `npm run type-check` | TypeScript 类型检查 |
+
+### 门户
+| 命令 | 说明 |
+|------|------|
+| `npm run dev` | Next 开发服务，端口 3002，使用 Webpack |
+| `npm run build` | Next 生产构建及 TypeScript 检查，使用 Webpack |
+| `npm start` | 本地启动生产构建；Docker 镜像通过 `node server.js` 启动 standalone |
+| `npm test` | 隔离的生产 / 开发门户回归，首次运行需安装 Playwright Chromium，见 1.4 |
 
 ---
 

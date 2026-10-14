@@ -20,7 +20,7 @@ export default async function AboutPage() {
           <div>
             <h2 className="font-semibold text-gray-800 mb-2">技术栈</h2>
             <ul className="space-y-1 text-gray-600">
-              <li>· 前端：Next.js 14 (App Router)</li>
+              <li>· 前端：Next.js 16 (App Router)</li>
               <li>· UI：Tailwind CSS</li>
               <li>· 后端：NestJS + TypeORM</li>
               <li>· 数据库：SQLite</li>

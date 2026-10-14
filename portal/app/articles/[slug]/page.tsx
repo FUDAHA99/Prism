@@ -11,10 +11,11 @@ import { safeMediaSrc } from '@/lib/safe-url'
 export const revalidate = 30
 
 interface Props {
-  params: { slug: string }
+  params: Promise<{ slug: string }>
 }
 
-export async function generateMetadata({ params }: Props) {
+export async function generateMetadata({ params: paramsPromise }: Props) {
+  const params = await paramsPromise
   const article = await getContentBySlug(params.slug)
   if (!article) return { title: '文章未找到' }
   return {
@@ -26,7 +27,8 @@ export async function generateMetadata({ params }: Props) {
   }
 }
 
-export default async function ArticleDetailPage({ params }: Props) {
+export default async function ArticleDetailPage({ params: paramsPromise }: Props) {
+  const params = await paramsPromise
   const [article, config] = await Promise.all([
     getContentBySlug(params.slug),
     getSiteConfig().catch(() => null),

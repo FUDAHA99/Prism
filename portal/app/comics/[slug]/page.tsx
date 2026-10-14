@@ -6,15 +6,17 @@ import type { Metadata } from 'next'
 import { getComicBySlug, getComicChapters } from '@/lib/api'
 import { safeMediaSrc } from '@/lib/safe-url'
 
-interface Props { params: { slug: string } }
+interface Props { params: Promise<{ slug: string }> }
 
-export async function generateMetadata({ params }: Props): Promise<Metadata> {
+export async function generateMetadata({ params: paramsPromise }: Props): Promise<Metadata> {
+  const params = await paramsPromise
   const c = await getComicBySlug(params.slug)
   if (!c) return { title: '未找到' }
   return { title: c.title, description: c.intro?.slice(0, 160) }
 }
 
-export default async function ComicDetailPage({ params }: Props) {
+export default async function ComicDetailPage({ params: paramsPromise }: Props) {
+  const params = await paramsPromise
   const comic = await getComicBySlug(params.slug)
   if (!comic) notFound()
 

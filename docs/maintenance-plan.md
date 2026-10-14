@@ -469,6 +469,46 @@ stdout 的符号链接，实际不持久化日志；helmet 与 nginx 安全头�
   Windows 临时依赖 junction 引起 standalone trace 复制告警；此套验证的是 `next start`，不作为 standalone 镜像包装的通过证据。
   已有小说 / 漫画分页丢失搜索词、从头开始链接保留本地进度等行为另行处理；未扩展到 Next / Nest 升级或其他功能。
 
+### Next 16 / React 19 升级 —— 本地完成 ✅（2026-10-14）
+
+前一节记录的是 `078ec2a` 时期的 Next 14 基线；本节为随后完成的门户升级。
+
+- **版本**：Next **14.2.35 → 16.4.0**，门户 React / React DOM **18.3.1 → 19.3.0**，
+  `@types/react` / `@types/react-dom` 同步为 **19.3.0**，这五项均精确锁定。版本与发布时间已从 npm 官方元数据核对，
+  所选版本均已发布超过七天；后台管理端与后端依赖不变。锁中新增 31、移除 8、升级 17 个包，均属于 Next / React 依赖链；
+  同版本的 `baseline-browser-mapping` 因 Next 使用而从仅开发依赖变为生产依赖。未使用 `--force` / `--legacy-peer-deps`。
+- **最小迁移**：13 个页面的 `params` / `searchParams` 改为 Promise，页面及 9 个相关 `generateMetadata` 分别 `await`。
+  保留分页、筛选、读取接口和缓存业务逻辑；页脚 / 关于页同步框架版本。`tsconfig` 接纳 Next 生成的 `react-jsx` 与
+  `.next/dev/types`，`next-env.d.ts` 同步生产构建生成内容。
+- **构建约定**：开发、生产构建和回归 CLI 均显式选择 `--webpack`；本批不切换 Turbopack、React Compiler 或 Cache Components。
+  Next 16 已移除 `next lint`，删除门户失效脚本，ESLint 配置仍单独排期。Node 22.23.3 下生成锁后，npm 10.9.9
+  干净 `npm ci` 通过，依赖树无 peer 冲突；系统全局 Node 未变。
+- **浏览器回归**：Windows Node 22 / Chromium，1365×900；旧 14 基线与新 16 均执行同一组断言（旧版仅去除不支持的 `--webpack`）。
+  新版 **8 个子场景全部通过，TAP 计入总测试为 9/9**，包括真实生产构建及 TypeScript 检查、页面 / 六类分页、阅读、
+  换集 / 换线路 / 失败提示、404、生产与开发续播、评论、缓存。视频从 45 秒自然播放到 47 秒，204 上报后详情读回新值；
+  评论覆盖空输入、pending 隐藏、approved 公开及实际 POST / GET；元数据等待精确页面标题。
+  Next 16 正常 DevTools 也会创建 `nextjs-portal`，测试改查错误对话框，仍保留页面异常与控制台错误检查。
+  Browser 插件所列 `SKILL.md` 在磁盘不存在，按 invocation failed 使用已有 Playwright 流程；未安装或修复浏览器插件。
+- **缓存对照**：两版同一列表连取两次的后端请求增量均为 **[1, 0]**，显式 fetch revalidate 继续生效。
+  文章在约 31 秒刷新后变为 404；影视约 31 秒仍命中缓存、约 62 秒刷新后变为 404。warm 503 已完成回包后再次读取仍保留旧内容，
+  cold 503 恢复后可立即重试成功。故障刷新请求次数在两版不同，不据此宣称负载或性能等价。按标签的按需失效仍未实现。
+- **Linux 部署打包**：实际 `portal/Dockerfile` 构建成功；容器以 UID **1001** 运行 `/app/server.js`，
+  **22 项 HTTP / 包装检查通过**，含 6 个 SSR 页面、章节 / 播放 / 分页参数、8 个 CSS / JS 资源、缓存写入。
+  生产 API / uploads / 图片优化器路径直接访问 Next 均为 404；本地开发 rewrite 保留。容器 `--network none`，使用容器内夹具。
+  Windows 回归副本的依赖 junction 仍可能产生 standalone trace 复制告警，镜像包装结论来自上述独立 Linux 验证。
+- **审计与合同**：npm 官方源 / 严格 TLS 下，门户生产依赖唯一 GHSA **23 → 0**，移除全部 23 条 Next 例外，其他项目例外不变；
+  开发依赖仍有 3 条旧公告，未扩展到 Tailwind 升级。审计门禁通过，包签名验证 **217 个**、来源证明 **33 个**；
+  后端路由合同与构建打包测试 **2 套 / 591 个通过**。
+- **证据与清理**：`F:/METU/.cache/prism-next16-qa-20261014-162742/`，最终新版回归 `portal-regression-4eMjjJ/`，
+  镜像证据 `docker-evidence/`；旧版对照在 `F:/METU/.cache/prism-next16-baseline-evidence-20261014/`。
+  本批测试服务与 QA 容器 / 两个 QA 镜像已清理，Docker 恢复停止；原 7 个停止容器、19 个卷、15 个镜像及网络完整保留。
+- **边界**：本地验证与提交，未推送、未运行远程 Actions、未部署；API 均为本地夹具，不代表真实 JWT / Redis / MySQL、
+  完整 nginx compose、远程 HLS / CDN、Safari / 手机或负载压测验收。
+
+参考：[Next 16 迁移指南](https://nextjs.org/docs/app/guides/upgrading/version-16)、
+[Next 15 异步参数迁移](https://nextjs.org/docs/app/guides/upgrading/version-15)、
+[缓存机制](https://nextjs.org/docs/app/guides/caching-without-cache-components)。
+
 ### 批次 1-C / 1-D / 1-E —— 交叉核查后的修订方案（2026-10-08）
 
 第四节的 1-C/1-D/1-E 原文写于 6 周前，动手前用 5 个领域代理 + 1 个交叉核查代理逐条对照**当前代码**
