@@ -6,7 +6,9 @@
 
 ## 执行进度
 
-最后更新：2026-10-13
+最后更新：2026-10-14
+
+当前状态以本节各项执行记录为准；后文保留的原始方案含实施前假设，其中「零测试」、Node 20 与旧版 Vite / Vitest 的描述不再代表当前代码。
 
 ### 批次 0 —— 已完成 ✅
 
@@ -299,12 +301,12 @@ typeorm 升级后 `DB_SYNC=true` 启动 0 条 DDL；隔离 Docker 端到端（�
 - 开发依赖里的 js-yaml 因去重回落到 4.1.0（只影响本地 eslint 读配置）；例外清单暂不记录登记时的严重级别（公告被上调时不会提醒）；后台 favicon 404。
 
 **Node 22**（第七节 #4）：已于 2026-10-13 在本地统一 Docker / CI / 版本声明，并重新验证；见下方「Node 22 升级」。
-Vitest / Vite 等框架工具版本升级仍为后续独立任务。
+Vite / Vitest 已于 2026-10-14 在本地升级，见下方「Vite 6 / Vitest 4 升级」。
 
 **其他已记录、未排期**：JSON 请求体 100kb 上限导致超长章节无法保存（413）；`prism_nginx_logs` 卷里只有指向
 stdout 的符号链接，实际不持久化日志；helmet 与 nginx 安全头重复、nginx 的 Referrer-Policy 覆盖了 helmet 的
-`no-referrer`；漫画章节上传无并发上限且页序按完成顺序；frontend 的
-`vitest` 无测试文件即失败（CI 测试步骤暂只跑 backend）；nginx 镜像未锁版本。
+`no-referrer`；漫画章节上传无并发上限且页序按完成顺序；nginx 镜像未锁版本。
+前端已有 17 个测试文件 / 406 个用例，CI 的测试步骤同时覆盖 backend 与 frontend，portal 暂无测试脚本。
 
 ### 后续维护：Markdown 预览净化 —— 本地完成 ✅（2026-10-13）
 
@@ -386,6 +388,48 @@ stdout 的符号链接，实际不持久化日志；helmet 与 nginx 安全头�
 参考：[Node 维护版本计划](https://github.com/nodejs/Release#release-schedule)、
 [本次 Windows 便携版](https://nodejs.org/dist/v22.23.3/)、
 [Node 原生模块 ABI 说明](https://github.com/nodejs/node/blob/main/doc/api/process.md#processversions)。
+
+### 后续维护：Vite 6 / Vitest 4 升级 —— 本地完成 ✅（2026-10-14）
+
+- **范围**：frontend 的 Vite 4.5.14 → **6.4.4**、Vitest 0.34.6 → **4.1.11**，并在 `package.json` 增加 `"type": "module"`，
+  让 Vite 配置按 ESM 加载。更新对应 lock；保留原测试隔离与 Node 环境，没有改业务源码、测试断言或 Vite 配置。
+  React、`@vitejs/plugin-react` 等其他直接依赖的声明与实际版本均保持不变，没有扩展到 Next / Nest / ESLint 升级。
+- **依赖核对**：锁中只有一套 Vite 6.4.4，Vitest 与 React 插件正确复用；esbuild 为 0.25.12、Rollup 为 4.64.6。
+  依赖变化属于新旧工具链及其传递依赖；额外合并了一份兼容的 `@types/estree` 类型依赖（嵌套 1.0.8 → 根节点 1.0.9），
+  满足原消费方的 `^1.0.0`。未改动其他同版本包的下载地址、完整性值或元数据。
+- **Windows 验证**：使用便携 Node **22.23.3**；升级前的隔离基线与升级后的候选、当前项目均通过
+  **17 个测试文件 / 406 个用例**及生产构建（含 TypeScript 检查）。既有大于 500 kB 的 chunk 提示仍在，未在本轮调整拆包。
+  当前项目 frontend 的 `node_modules` 已用 npm 10.9.9 干净重装；后端、门户依赖和系统全局 Node 版本未改。
+- **Linux Alpine 验证**：实际 frontend Dockerfile 的生产镜像与 builder 均构建成功；
+  在 builder 中只读挂载兄弟目录 `backend/src` 后，**17 个测试文件 / 406 个用例通过**。
+  镜像内 Node 为 22.23.3，`/app/package-lock.json` 的 SHA-256 与最终候选锁一致。
+- **安装兼容**：npm 10.9.9 从旧树重算依赖时出现 Arborist `edgesOut` 空父节点异常；
+  改用本机已有 npm 11.12.1 CLI，在 Node 22 下生成锁文件。随后 npm 10.9.9 的干净 `npm ci` 与已有新锁的常规安装均成功。
+  常规安装检查会改写 lock，检查后已恢复原候选锁；最终锁 SHA-256 为 `81b61caef03acf364d544e16812654b4d590cefa89e0b5c18660f5cf10b65fa7`。
+  没有使用 `--force` / `--legacy-peer-deps` 或安装全局 npm。候选与当前项目安装、已有新锁的安装检查及审计均显式启用严格 TLS；
+  升级前的基线安装曾继承 `NODE_TLS_REJECT_UNAUTHORIZED=0`，该条件已在基线报告记录。开发指南记录了 npm 兼容处理方式。
+- **安全审计**：严格 TLS、npm 官方源下，唯一 GHSA 从 **17 → 6**，移除 11 条、无新增：Vite 7 条、Vitest 1 条、tinypool 2 条、esbuild 1 条。
+  剩余为 lint / glob 开发依赖的 4 条 high，以及 React Router 的 2 条 moderate 生产公告；后者沿用现有例外，到期 2027-01-09。
+  `audit-gate.mjs frontend` 通过；包签名验证 **490 个包**，来源证明验证 **75 个包**。这不代表项目已无漏洞。
+- **浏览器与真实后端**：Browser 插件不可用，使用现有 Playwright / Chromium，1440×1000 桌面视口；
+  开发站点 `http://127.0.0.1:5173` 与实际生产镜像经临时 nginx 暴露的 `http://127.0.0.1:64459/admin/`，
+  均连接本轮新建的隔离 MySQL / Redis 后端。登录必填校验、真实登录 / 退出、仪表盘两张图表与往返导航通过。
+  临时 nginx 按生产路径规则剥离 `/admin/` 前缀并代理 API / uploads；这不是完整生产 compose 部署验收。
+  Markdown 标题 / 表格 / 代码 / 图片正常，危险标签被净化、脚本未执行，三种编辑模式切换不改写原文。
+  媒体页真实上传 PNG（201），缩略图解码、GET / HEAD（200）、Range（206）、删除（204）后文件 404 均通过。
+- **生产路径与视觉**：`/admin` 跳转与 `/admin/` 加载正常，5 个入口 JS / CSS 返回 200 且 MIME 正确；
+  `/admin/contents/create` 深链接刷新通过。待图表动画完成并确认 canvas 稳定后补拍前后对照，布局、字体及两张完整图表一致；
+  系统内存 / 运行时间等实时值不作像素相等断言。未出现白屏、Vite 覆盖层或 `pageerror`。
+  开发控制台保留 Ant Design 弃用 / 上下文与 React Router 提示；生产仅见既有 `/favicon.svg` 404，本轮未修复这些历史问题。
+- **证据**：基线、候选、安装 / 测试 / 构建 / 审计日志位于
+  `F:/METU/.cache/prism-vite-qa-20261014-152024-c17364a1/`，浏览器与 Linux 验证位于其 `ui-linux-evidence/`；临时验证文件均在仓库外。
+- **边界**：本轮只修改 frontend package / lock 与开发指南、维护计划；昨天的未提交修改保持原样。
+  未提交 / 推送 / 真实部署；未连接存量数据库，未重跑后端全量测试或门户回归，未验证手机 / Safari / Firefox。
+- **清理**：本轮开发服务、临时容器、网络和三个 QA 镜像均已清理；原有七个停止容器、全部卷和三个 CMS 镜像保持不变，
+  未清理共享构建缓存或历史 QA 目录。Docker Desktop 已恢复到停止状态，桌面 / 后端进程与 Linux engine 管道均不再存在。
+
+参考：[Vite 6 迁移说明](https://v6.vite.dev/guide/migration)、[Vitest 4 迁移说明](https://v4.vitest.dev/guide/migration)、
+[npm peer 解析修复](https://github.com/npm/cli/pull/8448)。
 
 ### 批次 1-C / 1-D / 1-E —— 交叉核查后的修订方案（2026-10-08）
 

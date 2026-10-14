@@ -51,7 +51,7 @@ npm run start:prod
 cd frontend
 
 # 安装依赖
-npm install --registry=https://registry.npmjs.org
+npm ci --registry=https://registry.npmjs.org
 
 # 开发模式启动（HMR + Vite Proxy）
 npm run dev
@@ -62,6 +62,12 @@ npm run preview
 ```
 
 前端开发服务器：`http://localhost:5173`
+
+前端工具链为 Vite 6 / Vitest 4；`package.json` 使用 `"type": "module"`，使 Vite 配置按 ESM 加载。
+本次从旧依赖树升级时，npm 10.9.9 的 peer 解析出现 `Cannot read properties of null (reading 'edgesOut')`，
+锁文件改用 npm 11.12.1 在 Node 22 下生成。新锁已通过 npm 10.9.9 的干净 `npm ci`，日常安装及 CI / Docker 仍可使用 Node 22 附带的 npm。
+后续若重算依赖时再次遇到该错误，使用含修复的 npm 11（至少 11.6.0）重试，不使用 `--force` 或 `--legacy-peer-deps` 跳过依赖检查。
+参考：[npm peer 解析修复](https://github.com/npm/cli/pull/8448)。
 
 ---
 
