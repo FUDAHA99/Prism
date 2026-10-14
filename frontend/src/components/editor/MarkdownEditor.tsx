@@ -1,5 +1,6 @@
 import React from 'react'
 import MDEditor from '@uiw/react-md-editor'
+import rehypeSanitize from 'rehype-sanitize'
 
 interface MarkdownEditorProps {
   value?: string
@@ -27,6 +28,8 @@ export default function MarkdownEditor({
         onChange={handleChange}
         height={height}
         preview={preview}
+        // 原始 HTML 和属性注释先由编辑器解析，再用默认白名单净化预览。
+        previewOptions={{ rehypePlugins: [rehypeSanitize] }}
       />
     </div>
   )

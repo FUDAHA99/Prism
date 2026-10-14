@@ -6,7 +6,7 @@
 
 ## 执行进度
 
-最后更新：2026-10-08
+最后更新：2026-10-13
 
 ### 批次 0 —— 已完成 ✅
 
@@ -294,7 +294,7 @@ typeorm 升级后 `DB_SYNC=true` 启动 0 条 DDL；隔离 Docker 端到端（�
 
 **已知 / 后续**：
 - `better-sqlite3` 锁在 12.9.0 由 `build-packaging.spec.ts` 守着（镜像仍是 node:20 时改回 `^` 会让 CI 变红）；升 Node 22 后解除。
-- **后台 Markdown 预览会渲染原始 HTML 且未净化**（存量问题）：editor 写入的 HTML 在管理员的同源页面执行，token 在 localStorage —— 可能被用来从 editor 提权到 admin，**列为下一步优先项**。
+- **后台 Markdown 预览会渲染原始 HTML 且未净化**（存量问题）：已于 2026-10-13 在本地修复并验证，见下方「Markdown 预览净化」。
 - **上传的文件从未写入磁盘**（存量问题，媒体功能实际不可用）：列为下一步优先项。
 - 开发依赖里的 js-yaml 因去重回落到 4.1.0（只影响本地 eslint 读配置）；例外清单暂不记录登记时的严重级别（公告被上调时不会提醒）；后台 favicon 404。
 
@@ -305,6 +305,28 @@ typeorm 升级后 `DB_SYNC=true` 启动 0 条 DDL；隔离 Docker 端到端（�
 stdout 的符号链接，实际不持久化日志；helmet 与 nginx 安全头重复、nginx 的 Referrer-Policy 覆盖了 helmet 的
 `no-referrer`；漫画章节上传无并发上限且页序按完成顺序；上传字节不落盘（媒体功能不可用）；frontend 的
 `vitest` 无测试文件即失败（CI 测试步骤暂只跑 backend）；nginx 镜像未锁版本。
+
+### 后续维护：Markdown 预览净化 —— 本地完成 ✅（2026-10-13）
+
+- **改动**：共用 `MarkdownEditor` 在 `previewOptions.rehypePlugins` 接入 `rehype-sanitize`，使用默认白名单与 DOM clobbering 防护；
+  净化位于原始 HTML / 属性注释解析之后、Prism 高亮之前。只过滤预览，不改写编辑区或数据库中的 Markdown。
+  frontend 新增 `rehype-sanitize@6.0.0`，lockfile 仅增加它与 `hast-util-sanitize@5.0.2`，均来自 npm 官方源。
+- **回归测试**：新增 13 个真实组件渲染用例，覆盖 iframe/srcdoc、脚本、object、SVG 事件、图片事件、危险 URL、
+  属性注释注入、内联样式、ID 前缀，以及常规 Markdown / 安全 HTML / 代码高亮。首个 iframe 用例修复前失败、修复后通过。
+- **本地检查**（Node 24.15.0 / npm 11.12.1）：frontend 全量 17 个测试文件 / **406 个用例通过**；`npm run build`（含 TypeScript 检查）通过；
+  `node scripts/audit-gate.mjs frontend --registry=https://registry.npmjs.org` 通过（生产依赖 2 条既有公告均已登记，开发依赖 15 条公告不阻断）；
+  `npm audit signatures --registry=https://registry.npmjs.org` 验证 515 个包的签名、58 个包的来源证明。
+- **浏览器验证边界**：Browser 插件不可用，使用已有 Playwright MCP，在 `http://127.0.0.1:5173/contents/qa-preview/edit`
+  的实际内容编辑页面、1440×1080 桌面视口检查；登录、文章与接口响应使用本地测试夹具，未连接真实数据库或保存文章。
+  iframe 的 `srcdoc` 脚本修复前确实执行（测试标记为 1），修复后 iframe 为 0、标记为 0；编辑区仍保留原文。
+  输入内容、切换预览 / 双栏模式后，标题、强调、列表、表格、安全链接、图片与高亮正常，危险链接被移除 href，无 Vite 错误覆盖层。
+  最终页面控制台仅有已有 React Router 升级提示和 Ant Design Spin 用法提示；验证期间误入无仪表盘数据夹具的首页曾报错，返回目标页后不再出现。
+- **兼容取舍**：默认净化会移除原始 HTML 的样式、SVG 和部分预览附加控件（代码复制图标及其属性）；
+  标题 ID 增加 `user-content-` 前缀，库生成的标题锚点不自动同步。不为恢复这些附加行为放宽安全规则，普通 Markdown 正文与高亮保留。
+- **状态**：本地修改与验证完成，未提交 / 推送，也未部署或重跑 Docker、后端测试。下一项仍是「上传文件未落盘」，随后再处理 Node 22。
+
+参考：[编辑器官方安全配置](https://github.com/uiwjs/react-md-editor#security)、
+[净化默认规则与标题 ID 取舍](https://github.com/rehypejs/rehype-sanitize#example-headings-dom-clobbering)。
 
 ### 批次 1-C / 1-D / 1-E —— 交叉核查后的修订方案（2026-10-08）
 
