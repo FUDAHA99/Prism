@@ -28,6 +28,8 @@ async function bootstrap() {
   // 共用同一个限流桶，几个用户刷首页就能让其他人吃 429。
   // 取 1 而非 true：只信任最近一跳，避免客户端自行伪造 X-Forwarded-For。
   app.set('trust proxy', 1);
+  // Express 5 默认 simple；保留既有嵌套查询参数的解析与 DTO 拒绝契约。
+  app.set('query parser', 'extended');
   
   // 安全中间件
   app.use(

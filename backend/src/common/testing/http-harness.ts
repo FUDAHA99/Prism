@@ -131,6 +131,7 @@ export async function createHttpHarness(options: HarnessOptions): Promise<HttpHa
   const app = moduleRef.createNestApplication<NestExpressApplication>();
   // 与 main.ts 相同：只信任最近一跳（nginx），req.ip 取 X-Forwarded-For 最右边那一项
   app.set('trust proxy', 1);
+  app.set('query parser', 'extended'); // 与 main.ts 保持一致
   app.useGlobalPipes(new ValidationPipe(globalValidationPipeOptions()));
   app.useGlobalFilters(new HttpExceptionFilter());
   app.useGlobalInterceptors(new TransformInterceptor());

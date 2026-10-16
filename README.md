@@ -27,7 +27,7 @@
 ### 后端（`backend/`）
 | 技术 | 说明 |
 |------|------|
-| NestJS 10 | 服务端框架 |
+| NestJS 11 / Express 5 | 服务端框架 |
 | TypeORM | ORM，MySQL 8 |
 | Passport JWT | 认证（Access + Refresh Token） |
 | class-validator | DTO 校验 |

@@ -26,7 +26,7 @@
 cd backend
 
 # 安装依赖
-npm install --registry=https://registry.npmjs.org   # 必须走官方源，见 README「依赖安装与安全审计」
+npm ci --registry=https://registry.npmjs.org   # 按锁文件安装，见 README「依赖安装与安全审计」
 
 # 配置环境变量
 cp .env.example .env
@@ -44,6 +44,16 @@ npm run start:prod
 ```
 
 后端没有挂载 Swagger 文档页（代码里有 `@ApiTags` 等装饰器，但从未调用 `SwaggerModule.setup`，`/api/docs` 不存在）；接口说明见 `docs/api.md`。
+
+后端使用 NestJS **11.x** / Express **5.x**。升级后重新执行上面的 `npm ci`，不要继续使用 Nest 10 的 `node_modules`。
+本批仅迁移到 11，依赖版本范围已限定；不要用 `@latest` 批量升级到 12。
+`main.ts` 和 HTTP 测试夹具显式设置 `query parser = extended`，保持原查询参数解析及非法数组 / 对象的校验行为。
+Throttler 6 沿用现有毫秒 TTL 和代理 IP 策略，缓存仍使用 Keyv，数据库仍由 migration 管理。
+
+Swagger 11.4.7 固定的 `js-yaml 5.3.0` 存在解析 DoS 公告，因此仅对 `@nestjs/swagger` 使用 `js-yaml 5.4.2` override；
+不要把它改成影响 ESLint / Jest 等开发依赖的全局 override。后续移除此覆盖前，核对上游锁定版本并重新运行生产依赖审计。
+参考：[NestJS 11 迁移指南](https://docs.nestjs.com/v11/migration-guide)、
+[js-yaml 安全公告](https://github.com/advisories/GHSA-r3ph-w7gj-g6xm)。
 
 ### 1.3 前端启动
 
