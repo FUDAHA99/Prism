@@ -2,7 +2,7 @@
 
 > 从「maccms 替代品」到「明显更好的选择」
 >
-> 最后更新：2026-10-14
+> 最后更新：2026-10-16
 
 ---
 
@@ -35,6 +35,7 @@
 
 - **Phase 1-B**：门户续播、开发路由、数据库迁移与并发一致性已经完成本地验证，见[维护记录](maintenance-plan.md)。
 - **Phase 2-A（仅影视）**：既有别名字段与采集填充已接通后台编辑、输入校验和列表搜索，验收范围见下节。
+- **Phase 2-B**：采集详情接入 SSE 统计快照、断线恢复和终态日志刷新；适用单后端进程，本地验证记录见[维护记录](maintenance-plan.md)。
 - **封面三态筛选**已在此前修复；历史维护计划中的“筛选失效”不是当前待办。
 - 其他阶段下文仍保留设计方案，不能据此推断已实现或已部署。小说 / 漫画别名不纳入本次范围。
 
@@ -236,38 +237,21 @@ progressSec > 30：显示"▶ 继续看第 N 集（mm:ss）"，跳转播放页�
 
 ## Phase 2-B：采集 SSE 实时进度
 
-### 目标
-采集运行中时，管理后台实时显示处理条数，不再靠轮询。
+### 当前实现（2026-10-16，本地）
 
-### 后端改动
+- 任务详情使用带 Bearer 头的 fetch 读取 SSE，替换原 2 秒详情轮询。显示已处理条数、当前页与分类统计；
+  成功率单独展示，不再把它当完成百分比。日志列表仍每 3 秒刷新运行中记录，展示已保存的统计。
+- `GET /api/v1/collect/logs/:id/stream` 继承全局管理员鉴权。运行任务按 logId 隔离，保留一个最新快照，
+  开始、每 10 条、开始请求新页和页末推送；失败 / 跳过条目也计入已处理数。重新连接立即获取最新快照。
+- 最终日志保存成功后推送 `done` 并结束监听，前端重新读取最终详情及列表。任务完成后删除内存状态；
+  客户端关闭抽屉、切换任务或离开页面只取消监听，后台采集继续。
+- 每条连接最多 30 秒，10 秒发送一次心跳；下一条连接重新检查 token 和当前角色，已建立连接的鉴权变化
+  最迟在 30 秒内收口。网络 / 5xx 连续失败最多重试 3 次，单次连接 45 秒超时，401 / 403 / 404 停止重试。
+- 已完成的任务可直接回放终态。数据库仍为 `running` 但当前进程没有任务，或最终日志保存失败时返回
+  `unavailable` 并停止自动重连，界面显示说明，不伪造完成或失败状态。
 
-**`collect-executor.service.ts`**
-```ts
-// 新增：进度事件 Map
-private readonly progressSubjects = new Map<string, Subject<RunStats>>()
-
-// 新增：外部获取 Observable
-getProgressStream(logId): Observable<RunStats> | null
-
-// 改动：processBatch() 每处理 10 条 emit 一次
-// 改动：runInBackground() 结束时 complete() 并删除 subject
-```
-
-**`collect.controller.ts` 新增 SSE 接口**
-```ts
-@Get('logs/:id/stream')
-@Sse()
-@UseGuards(AuthGuard('jwt'))
-streamProgress(@Param('id') id): Observable<MessageEvent>
-```
-
-### 前台改动
-
-**`frontend/src/pages/Collect/CollectLogs.tsx`**
-- `LogDetailDrawer`：任务运行时建立 SSE 连接（fetch + ReadableStream 手动解析）
-- 收到 message → 实时更新本地 stats state
-- 连接关闭 → refetch log 详情显示最终数据
-- Progress 组件 `status="active"` 显示动画进度条
+本批不新增依赖、数据库字段、持久化任务队列或跨实例消息。重启不会恢复采集任务，过程快照不入库，
+不支持在多个后端实例间任意切换连接；同源并发采集的既有计数竞争另行处理。协议详见 [API 文档](api.md)。
 
 ---
 

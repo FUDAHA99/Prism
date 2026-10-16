@@ -75,6 +75,7 @@ const MATRIX: Record<string, AccessLevel> = {
   // CollectController
   'GET /api/v1/collect/logs': 'admin',
   'GET /api/v1/collect/logs/:id': 'admin',
+  'GET /api/v1/collect/logs/:id/stream': 'admin',
   'DELETE /api/v1/collect/mappings/:mappingId': 'admin',
   'GET /api/v1/collect/sources': 'admin',
   'POST /api/v1/collect/sources': 'admin',

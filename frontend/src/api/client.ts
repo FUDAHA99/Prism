@@ -19,10 +19,15 @@ apiClient.interceptors.request.use((config) => {
  * 请求带的 token 已经不是本地当前的登录态：例如退出后在后台补发的注销请求，回来之前用户已经重新登录。
  * 这种请求被 401 只说明那个旧 token 失效了，不能因此清掉新的登录状态、把人踢回登录页。
  */
-function sentWithStaleToken(config: { headers?: { get?: (name: string) => unknown } } | undefined): boolean {
-  const sent = config?.headers?.get?.('Authorization')
+export function handleUnauthorized(sent: unknown): void {
   const current = localStorage.getItem('access_token')
-  return typeof sent === 'string' && current !== null && sent !== `Bearer ${current}`
+  if (typeof sent === 'string' && current !== null && sent !== `Bearer ${current}`) return
+
+  localStorage.removeItem('access_token')
+  localStorage.removeItem('refresh_token')
+  localStorage.removeItem('cms-auth')
+  const loginPath = `${import.meta.env.BASE_URL}login`
+  if (!window.location.pathname.startsWith(loginPath)) window.location.href = loginPath
 }
 
 apiClient.interceptors.response.use(
@@ -36,18 +41,8 @@ apiClient.interceptors.response.use(
   },
   (error) => {
     const status: number | undefined = error.response?.status
-    if (status === 401 && !sentWithStaleToken(error.config)) {
-      // 完整清理：localStorage 的 token + zustand persist 里的 isAuthenticated
-      localStorage.removeItem('access_token')
-      localStorage.removeItem('refresh_token')
-      localStorage.removeItem('cms-auth') // zustand persist key
-      // 生产部署在 /admin/（vite base），登录页是 /admin/login；写死根路径的 login 会落到门户 404。
-      // BASE_URL 与 main.tsx 里 BrowserRouter 的 basename 同源：dev 为 '/'，build 为 '/admin/'。
-      const loginPath = `${import.meta.env.BASE_URL}login`
-      // 已经在登录页就不再跳，避免对登录请求 401 时多余 reload（输错密码时要留在原页显示错误）
-      if (!window.location.pathname.startsWith(loginPath)) {
-        window.location.href = loginPath
-      }
+    if (status === 401) {
+      handleUnauthorized(error.config?.headers?.get?.('Authorization'))
     }
 
     // 带上状态码抛出 ApiError：react-query 据此只对网络错误 / 5xx 重试，页面据此区分 403 与空数据。

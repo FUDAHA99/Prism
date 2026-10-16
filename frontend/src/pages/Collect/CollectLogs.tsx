@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react'
 import {
-  Card, Table, Tag, Button, Space, Drawer, Descriptions, Typography, Statistic, Row, Col, Progress, Empty,
+  Card, Table, Tag, Button, Space, Drawer, Descriptions, Typography, Statistic, Row, Col, Alert, Empty,
 } from 'antd'
 import { ReloadOutlined, EyeOutlined } from '@ant-design/icons'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { listLogs, getLog, CollectLog, CollectLogStatus } from '../../api/collect'
+import { watchCollectProgress } from '../../api/collect-progress'
+import { errorMessage } from '../../api/errors'
 import PageHeader from '../../components/common/PageHeader'
 import QueryErrorResult, { QueryErrorSwitch } from '../../components/common/QueryErrorResult'
 
@@ -28,15 +30,14 @@ const MODE_LABEL: Record<string, string> = {
 
 export default function CollectLogs() {
   const [sp, setSp] = useSearchParams()
-  const initialId = sp.get('logId') || undefined
+  const openId = sp.get('logId') || undefined
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
-  const [openId, setOpenId] = useState<string | undefined>(initialId)
 
   const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['collect-logs', page, pageSize],
     queryFn: () => listLogs({ page, pageSize }),
-    // 列表如果有运行中的，3 秒轮询
+    // 列表读取已落库的最终统计；抽屉里的实时进度由 SSE 提供。
     refetchInterval: (q) =>
       q.state.data?.items?.some((l: CollectLog) => l.status === 'running') ? 3000 : false,
   })
@@ -79,7 +80,7 @@ export default function CollectLogs() {
       title: '操作', width: 100, fixed: 'right' as const,
       render: (_: any, r: CollectLog) => (
         <Button size="small" icon={<EyeOutlined />}
-          onClick={() => { setOpenId(r.id); sp.set('logId', r.id); setSp(sp) }}>
+          onClick={() => { sp.set('logId', r.id); setSp(sp) }}>
           详情
         </Button>
       ),
@@ -90,7 +91,7 @@ export default function CollectLogs() {
     <div>
       <PageHeader
         title="采集日志"
-        subtitle="所有采集任务的运行记录与统计"
+        subtitle="列表展示已保存的统计，打开任务详情查看实时进度"
         extra={<Button icon={<ReloadOutlined />} onClick={() => refetch()}>刷新</Button>}
       />
       <Card>
@@ -111,8 +112,8 @@ export default function CollectLogs() {
         </QueryErrorSwitch>
       </Card>
 
-      <LogDetailDrawer logId={openId} onClose={() => {
-        setOpenId(undefined); sp.delete('logId'); setSp(sp)
+      <LogDetailDrawer key={openId} logId={openId} onClose={() => {
+        sp.delete('logId'); setSp(sp)
       }} />
     </div>
   )
@@ -120,15 +121,39 @@ export default function CollectLogs() {
 
 // ==========================
 function LogDetailDrawer({ logId, onClose }: { logId?: string; onClose: () => void }) {
-  const { data: log, isError, error, refetch } = useQuery({
+  const queryClient = useQueryClient()
+  const [currentPage, setCurrentPage] = useState<number | null>(null)
+  const [connection, setConnection] = useState('正在连接实时进度…')
+  const [streamError, setStreamError] = useState('')
+  const { data: log, isError, error, refetch, isFetchedAfterMount } = useQuery({
     queryKey: ['collect-log', logId],
     queryFn: () => getLog(logId!),
     enabled: !!logId,
-    refetchInterval: (q) => q.state.data?.status === 'running' ? 2000 : false,
+    refetchOnMount: 'always',
   })
 
-  // 切换打开时主动刷新
-  useEffect(() => { if (logId) refetch() }, [logId, refetch])
+  useEffect(() => {
+    if (!logId || !isFetchedAfterMount || isError || log?.status !== 'running') return
+    const controller = new AbortController()
+    void watchCollectProgress(logId, controller.signal, event => {
+      if (controller.signal.aborted) return
+      if (event.type === 'unavailable') {
+        setStreamError(event.data.message || '该任务无法继续跟踪，请稍后查看已保存的日志')
+        return
+      }
+      setCurrentPage(event.data.currentPage)
+      queryClient.setQueryData<CollectLog>(['collect-log', logId], old => old ? { ...old, ...event.data } : old)
+      if (event.type === 'done') {
+        void queryClient.invalidateQueries({ queryKey: ['collect-log', logId], exact: true })
+        void queryClient.invalidateQueries({ queryKey: ['collect-logs'] })
+      }
+    }, state => {
+      if (!controller.signal.aborted) setConnection(state === 'connected' ? '实时进度已连接' : '连接已断开，正在重新连接…')
+    }).catch(error => {
+      if (!controller.signal.aborted) setStreamError(`${errorMessage(error, '实时进度连接失败')}；已停止自动重连，可重新打开详情重试`)
+    })
+    return () => controller.abort()
+  }, [logId, log?.status, isFetchedAfterMount, isError, queryClient])
 
   const total = log?.totalCount || 0
   const success = (log?.insertedCount || 0) + (log?.updatedCount || 0)
@@ -143,6 +168,12 @@ function LogDetailDrawer({ logId, onClose }: { logId?: string; onClose: () => vo
     >
       {log ? (
         <>
+          {streamError || isError ? (
+            <Alert type="warning" showIcon message={streamError || errorMessage(error, '最终日志加载失败，请重新打开详情重试')}
+              style={{ marginBottom: 16 }} />
+          ) : log.status === 'running' ? (
+            <Text type="secondary" style={{ display: 'block', marginBottom: 16 }}>{connection}</Text>
+          ) : null}
           <Descriptions size="small" column={1} bordered style={{ marginBottom: 16 }}>
             <Descriptions.Item label="采集源">{log.sourceName}</Descriptions.Item>
             <Descriptions.Item label="状态">
@@ -156,7 +187,7 @@ function LogDetailDrawer({ logId, onClose }: { logId?: string; onClose: () => vo
             </Descriptions.Item>
             <Descriptions.Item label="开始时间">{new Date(log.createdAt).toLocaleString()}</Descriptions.Item>
             <Descriptions.Item label="完成时间">
-              {log.finishedAt ? new Date(log.finishedAt).toLocaleString() : <Text type="secondary">运行中…</Text>}
+              {log.finishedAt ? new Date(log.finishedAt).toLocaleString() : <Text type="secondary">{log.status === 'running' ? '运行中…' : '-'}</Text>}
             </Descriptions.Item>
             <Descriptions.Item label="耗时">
               {log.durationMs ? `${(log.durationMs / 1000).toFixed(2)} 秒` : '-'}
@@ -173,9 +204,8 @@ function LogDetailDrawer({ logId, onClose }: { logId?: string; onClose: () => vo
           </Row>
 
           <div style={{ marginTop: 16 }}>
-            <Text>处理进度</Text>
-            <Progress percent={successRate} size="small"
-              status={log.status === 'failed' ? 'exception' : log.status === 'running' ? 'active' : 'success'} />
+            <Text>已处理 {log.insertedCount + log.updatedCount + log.skippedCount + log.failedCount} 条</Text>
+            {currentPage !== null ? <Text type="secondary"> · 当前第 {currentPage} 页</Text> : null}
           </div>
 
           {log.errorMessage ? (

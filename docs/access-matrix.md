@@ -27,6 +27,7 @@
 | GET | `/api/v1/categories/tree` | CategoryController.findTree | public | **remove** | remove |
 | GET | `/api/v1/collect/logs` | CollectController.listLogs | authenticated | **admin** | add-guard+fix-dto+filter |
 | GET | `/api/v1/collect/logs/:id` | CollectController.getLog | authenticated | **admin** | add-guard+filter |
+| GET | `/api/v1/collect/logs/:id/stream` | CollectController.streamLog | 新增 SSE | **admin** | 继承全局鉴权，每条连接最多 30 秒 |
 | DELETE | `/api/v1/collect/mappings/:mappingId` | CollectController.removeMapping | authenticated | **admin** | add-guard |
 | GET | `/api/v1/collect/sources` | CollectController.findAllSources | authenticated | **admin** | add-guard+filter |
 | POST | `/api/v1/collect/sources` | CollectController.createSource | authenticated | **admin** | add-guard+fix-dto |

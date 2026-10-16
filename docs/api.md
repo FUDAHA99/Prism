@@ -1161,4 +1161,33 @@ Next 在服务端日志里打一条 `revalidating cache with key ...`）。单�
 
 ---
 
-*最后更新：2026-04-25*
+## 附：采集实时进度 `/collect/logs/:id/stream`
+
+`GET /api/v1/collect/logs/:id/stream`，请求头 `Authorization: Bearer <access token>`。
+仅管理员可访问；匿名 / 无效 token 返回 `401`，编辑及普通用户返回 `403`，日志不存在返回 `404`。
+token 不放在 URL。成功响应为 `text/event-stream`，不套普通 JSON 接口的 `{ success, data, timestamp }` 包装。
+
+```text
+event: progress
+data: {"logId":"任务 UUID","status":"running","totalCount":12,"insertedCount":10,"updatedCount":1,"skippedCount":1,"failedCount":0,"durationMs":1250,"currentPage":2}
+
+```
+
+- `totalCount` 是已处理条数，等于新增 / 更新 / 跳过 / 失败四项之和，不是任务预期总量。
+  `currentPage` 为当前正在请求或处理的页码；单条模式及历史终态为 `null`。耗时以快照生成时刻为准。
+- `progress` 提供完整快照，重连从最新值继续，不需要 `Last-Event-ID`，也不回放每条历史事件。
+  `done` 使用同一数据结构，status 为 `success` / `partial` / `failed` / `cancelled`，表示最终日志已经保存；
+  收到后关闭监听并重新读取 `GET /collect/logs/:id`，取得完成时间和错误信息。
+- `unavailable` 的数据为 `{ "logId": "任务 UUID", "message": "说明" }`，表示当前进程无法继续提供进度，
+  客户端停止自动重连并展示说明。它不改变数据库中的任务状态，也不代表任务已完成。
+- 每 10 秒发送 `: heartbeat` 注释；每条连接 30 秒后正常结束，运行中客户端 1 秒后重连并重新鉴权。
+  已建立连接最多继续存活 30 秒，因此 token 失效、吊销、禁用或降权不会使旧连接无限存活。
+- 网络 / 5xx 连续失败以 1 / 2 / 4 秒间隔最多重试 3 次；单次连接 45 秒超时。401 沿用登录态清理，
+  403 / 404 / 429 等 4xx 停止自动重试。关闭抽屉、切换任务或离开页面会释放 reader、请求和重连定时器。
+
+快照只存在当前后端进程，订阅断开不取消任务；进程重启不自动恢复任务，旧 `running` 日志可能收到 `unavailable`。
+现有 nginx 模板使用上游的 `X-Accel-Buffering: no` 禁用该响应的缓冲，心跳短于 60 秒代理读超时。
+无需额外开放端口或增加生产配置；本地验证不代表生产已更新。
+参考：[NestJS SSE](https://docs.nestjs.com/techniques/server-sent-events)、[SSE 消息格式](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events)。
+
+*本节最后更新：2026-10-16*

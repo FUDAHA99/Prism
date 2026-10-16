@@ -9,6 +9,7 @@ import {
   Query,
   HttpCode,
   HttpStatus,
+  Sse,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -147,6 +148,12 @@ export class CollectController {
   }
 
   // ============ 日志 ============
+
+  @Sse('logs/:id/stream')
+  @ApiOperation({ summary: '采集实时进度（仅当前进程，连接 30 秒后需重新鉴权）' })
+  streamLog(@Param('id') id: string) {
+    return this.executor.streamLog(id);
+  }
 
   @Get('logs')
   @ApiOperation({ summary: '采集日志列表' })

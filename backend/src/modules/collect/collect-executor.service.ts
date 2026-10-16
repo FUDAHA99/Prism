@@ -1,6 +1,7 @@
-import { Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
+import { Injectable, Logger, MessageEvent, NotFoundException, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
+import { Observable, of, ReplaySubject } from 'rxjs';
 
 import {
   CollectSource,
@@ -76,6 +77,7 @@ function droppedEpisodesNote(stats: RunStats): string | null {
 @Injectable()
 export class CollectExecutorService {
   private readonly logger = new Logger(CollectExecutorService.name);
+  private readonly activeRuns = new Map<string, ReplaySubject<MessageEvent>>();
 
   constructor(
     @InjectRepository(CollectSource)
@@ -125,10 +127,17 @@ export class CollectExecutorService {
       triggeredBy: userId,
     });
     const saved = await this.logRepo.save(log);
+    const events = new ReplaySubject<MessageEvent>(1);
+    this.activeRuns.set(saved.id, events);
 
     // 后台跑（不阻塞 HTTP 响应）
     this.runInBackground(source, dto, saved.id).catch((e) => {
-      this.logger.error(`采集任务 ${saved.id} 异常: ${e.message}`, e.stack);
+      // 日志已保存后源统计更新失败，不能把已发布的 done 改成不可用。
+      if (!events.isStopped) events.next(this.unavailable(saved.id));
+      this.logger.error(`采集任务 ${saved.id} 异常: ${collectErrorLogDetail(e)}`);
+    }).finally(() => {
+      events.complete();
+      this.activeRuns.delete(saved.id);
     });
 
     return { logId: saved.id };
@@ -152,6 +161,22 @@ export class CollectExecutorService {
 
     let finalStatus: CollectLogStatus = CollectLogStatus.SUCCESS;
     let errorMessage: string | null = null;
+    let currentPage: number | null = null;
+    const snapshot = (status: CollectLogStatus) => ({
+      logId,
+      status,
+      totalCount: stats.total,
+      insertedCount: stats.inserted,
+      updatedCount: stats.updated,
+      skippedCount: stats.skipped,
+      failedCount: stats.failed,
+      durationMs: Date.now() - startedAt,
+      currentPage,
+    });
+    const progress = () => this.activeRuns.get(logId)?.next({
+      type: 'progress', data: snapshot(CollectLogStatus.RUNNING),
+    });
+    progress();
 
     try {
       const mode = dto.mode ?? CollectMode.HOURS;
@@ -160,7 +185,8 @@ export class CollectExecutorService {
       if (mode === CollectMode.SINGLE) {
         if (!dto.vodIds) throw new CollectError('SINGLE 模式必须传 vodIds');
         const res = await fetchMacCmsList(source, { ids: dto.vodIds });
-        await this.processBatch(source, res.list, mappingMap, stats);
+        await this.processBatch(source, res.list, mappingMap, stats, progress);
+        progress();
       } else {
         const pageStart = mode === CollectMode.PAGE_RANGE ? dto.pageStart ?? 1 : 1;
         const pageEnd =
@@ -170,13 +196,19 @@ export class CollectExecutorService {
         const hours = mode === CollectMode.HOURS ? dto.hours ?? 24 : undefined;
 
         for (let p = pageStart; p <= pageEnd; p++) {
+          currentPage = p;
+          progress();
           const res = await fetchMacCmsList(source, {
             page: p,
             hours,
             typeId: dto.typeId,
           });
-          if (!res.list || res.list.length === 0) break;
-          await this.processBatch(source, res.list, mappingMap, stats);
+          if (!res.list || res.list.length === 0) {
+            progress();
+            break;
+          }
+          await this.processBatch(source, res.list, mappingMap, stats, progress);
+          progress();
           if (p >= (res.pagecount || 1)) break;
         }
       }
@@ -210,6 +242,10 @@ export class CollectExecutorService {
       finishedAt: new Date(),
       durationMs,
     });
+    const events = this.activeRuns.get(logId);
+    events?.next({ type: 'done', data: { ...snapshot(finalStatus), durationMs } });
+    events?.complete();
+    this.activeRuns.delete(logId);
 
     // 更新源的统计
     await this.sourceRepo.update(source.id, {
@@ -223,6 +259,7 @@ export class CollectExecutorService {
     items: MacCmsItem[],
     mappingMap: Map<string, string | null>,
     stats: RunStats,
+    progress?: () => void,
   ) {
     const changed = new Set<PortalCacheTag>();
     try {
@@ -249,12 +286,56 @@ export class CollectExecutorService {
           );
           if (!stats.firstError) stats.firstError = summary;
           this.logger.warn(`采集条目失败: ${summary}`);
+        } finally {
+          // 包含未映射和失败的条目；只发布已经处理完的统计，不发送条目内容或错误详情。
+          if (stats.total % 10 === 0) progress?.();
         }
       }
     } finally {
       // 主记录可能已提交、但后续线路写入失败；按实际提交标记，一页最多通知一次。
       if (changed.size > 0) await this.portalCache.invalidate([...changed]);
     }
+  }
+
+  private unavailable(logId: string): MessageEvent {
+    return { type: 'unavailable', data: { logId, message: '当前进程无法提供实时进度，请刷新采集日志查看已保存结果。' } };
+  }
+
+  /** 每次重连重新经过管理员鉴权；订阅关闭不会停止采集任务。 */
+  async streamLog(logId: string): Promise<Observable<MessageEvent>> {
+    let events = this.activeRuns.get(logId);
+    if (!events) {
+      let log = await this.getLog(logId); // 在发送 SSE 头之前保留正常的 404 响应。
+      events = this.activeRuns.get(logId);
+      if (!events) {
+        // 查库期间任务可能刚完成并移出 Map，再读一次避免把已完成记录误报 unavailable。
+        if (log.status === CollectLogStatus.RUNNING) log = await this.getLog(logId);
+        if (log.status === CollectLogStatus.RUNNING) return of(this.unavailable(logId));
+        return of({ type: 'done', data: {
+          logId: log.id,
+          status: log.status,
+          totalCount: log.totalCount,
+          insertedCount: log.insertedCount,
+          updatedCount: log.updatedCount,
+          skippedCount: log.skippedCount,
+          failedCount: log.failedCount,
+          durationMs: log.durationMs,
+          currentPage: null, // 页码只保存在本进程快照，不推测历史任务的最后一页。
+        } });
+      }
+    }
+    const active = events;
+    return new Observable<MessageEvent>((subscriber) => {
+      const subscription = active.subscribe(subscriber);
+      if (subscriber.closed) return subscription;
+      const heartbeat = setInterval(() => subscriber.next({ comment: 'heartbeat' }), 10_000);
+      const expiry = setTimeout(() => subscriber.complete(), 30_000);
+      return () => {
+        clearInterval(heartbeat);
+        clearTimeout(expiry);
+        subscription.unsubscribe();
+      };
+    });
   }
 
   private async upsertOne(
