@@ -33,7 +33,7 @@ function page(count: number, pagecount = 2): maccms.MacCmsListResponse {
 /** 真实执行器；采集日志/落库边界用可控仓库，HTTP 鉴权另走真实 SQLite/JWT。 */
 function fixture() {
   const logs = new Map<string, CollectLog>();
-  const sourceRepo = { findOne: jest.fn().mockResolvedValue(SOURCE), update: jest.fn().mockResolvedValue({ affected: 1 }) };
+  const sourceRepo = { findOne: jest.fn(async ({ where }: { where: { id: string } }) => ({ ...SOURCE, id: where.id })), update: jest.fn().mockResolvedValue({ affected: 1 }) };
   const logRepo = {
     create: (data: object) => data,
     save: jest.fn(async (data: Partial<CollectLog>) => {
@@ -45,9 +45,10 @@ function fixture() {
       const log = logs.get(where.id);
       return log ? { ...log } : null;
     }),
-    update: jest.fn(async (id: string, patch: Partial<CollectLog>) => {
-      logs.set(id, { ...logs.get(id)!, ...patch });
-      return { affected: 1 };
+    update: jest.fn(async (id: string | { status: CollectLogStatus }, patch: Partial<CollectLog>) => {
+      const matches = typeof id === 'string' ? [id] : [...logs.values()].filter((log) => log.status === id.status).map((log) => log.id);
+      for (const key of matches) logs.set(key, { ...logs.get(key)!, ...patch });
+      return { affected: matches.length };
     }),
   };
   const executor = new CollectExecutorService(sourceRepo as any, logRepo as any,
@@ -131,14 +132,14 @@ describe('采集实时快照与任务生命周期', () => {
     }
   });
 
-  it('同源并发任务按logId隔离，断开和30秒到期均不停止任务，心跳定时器全部清理', async () => {
+  it('不同源并发任务按logId隔离，断开和30秒到期均不停止任务，心跳定时器全部清理', async () => {
     jest.useFakeTimers();
     const f = fixture();
     const first = deferred<maccms.MacCmsListResponse>();
     const second = deferred<maccms.MacCmsListResponse>();
     jest.spyOn(maccms, 'fetchMacCmsList').mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
     const a = await f.executor.startRun(SOURCE.id, DTO, 'admin');
-    const b = await f.executor.startRun(SOURCE.id, DTO, 'admin');
+    const b = await f.executor.startRun('source-2', DTO, 'admin');
     const events: MessageEvent[] = [];
     const complete = jest.fn();
     const subscription = (await f.executor.streamLog(a.logId)).subscribe({ next: (event) => events.push(event), complete });

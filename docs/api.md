@@ -1176,7 +1176,7 @@ data: {"logId":"任务 UUID","status":"running","totalCount":12,"insertedCount":
 - `totalCount` 是已处理条数，等于新增 / 更新 / 跳过 / 失败四项之和，不是任务预期总量。
   `currentPage` 为当前正在请求或处理的页码；单条模式及历史终态为 `null`。耗时以快照生成时刻为准。
 - `progress` 提供完整快照，重连从最新值继续，不需要 `Last-Event-ID`，也不回放每条历史事件。
-  `done` 使用同一数据结构，status 为 `success` / `partial` / `failed` / `cancelled`，表示最终日志已经保存；
+  `done` 使用同一数据结构，status 为 `success` / `partial` / `failed` / `cancelled`，表示任务终态已经保存；
   收到后关闭监听并重新读取 `GET /collect/logs/:id`，取得完成时间和错误信息。
 - `unavailable` 的数据为 `{ "logId": "任务 UUID", "message": "说明" }`，表示当前进程无法继续提供进度，
   客户端停止自动重连并展示说明。它不改变数据库中的任务状态，也不代表任务已完成。
@@ -1185,9 +1185,24 @@ data: {"logId":"任务 UUID","status":"running","totalCount":12,"insertedCount":
 - 网络 / 5xx 连续失败以 1 / 2 / 4 秒间隔最多重试 3 次；单次连接 45 秒超时。401 沿用登录态清理，
   403 / 404 / 429 等 4xx 停止自动重试。关闭抽屉、切换任务或离开页面会释放 reader、请求和重连定时器。
 
-快照只存在当前后端进程，订阅断开不取消任务；进程重启不自动恢复任务，旧 `running` 日志可能收到 `unavailable`。
+快照只存在当前后端进程，订阅断开不取消任务。单进程启动时，遗留 `running` 日志先标为 `failed`，
+附重启中断说明，再开始接受请求；已保存终态通过 `done` 回放。此操作不恢复采集，也不回滚已入库内容。
+中断任务的计数和耗时仅保留已保存值，可能不完整；`finishedAt` 是启动时确认中断的时间，不是实际进程退出时间。
+未保存的过程统计和源累计数不会根据已有内容自动回算。
+任务终态与源累计写入不在同一事务中；进程恰在两次写入之间退出时，日志可能已结束但源累计尚未更新。
+同进程最终日志保存失败时仍可能返回 `unavailable`。
 现有 nginx 模板使用上游的 `X-Accel-Buffering: no` 禁用该响应的缓冲，心跳短于 60 秒代理读超时。
 无需额外开放端口或增加生产配置；本地验证不代表生产已更新。
 参考：[NestJS SSE](https://docs.nestjs.com/techniques/server-sent-events)、[SSE 消息格式](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events)。
+
+### 同源重复启动与重试
+
+`POST /api/v1/collect/sources/:id/run` 同样仅管理员可用，成功返回 `201` 和普通响应包装中的 `{ logId }`。
+当前进程内，同一采集源只允许一个任务执行；日志保存或源统计更新尚未结束时，重复启动返回 `409` 和中文原因，
+不创建新日志，也不请求上游。不同采集源可以并行。源身份按数据库返回的 ID 确定，不因 URL 中 UUID 大小写不同绕过。
+
+正常结束或异常退出执行流程后释放同源占用，管理员可再次手动触发；重启中断任务应先核对已保存日志及已入库内容再重试。
+不会自动重跑或从断点续采；手动重试按本次提交的请求范围从头采集，已有内容仍可能被上游值覆盖。
+互斥与启动恢复仅适用单后端进程，不支持共享数据库的多 worker / 多实例 / 滚动重叠启动。
 
 *本节最后更新：2026-10-16*

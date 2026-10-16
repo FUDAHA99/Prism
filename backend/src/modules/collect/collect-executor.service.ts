@@ -1,4 +1,4 @@
-import { Injectable, Logger, MessageEvent, NotFoundException, Optional } from '@nestjs/common';
+import { ConflictException, Injectable, Logger, MessageEvent, NotFoundException, OnApplicationBootstrap, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { Observable, of, ReplaySubject } from 'rxjs';
@@ -75,9 +75,10 @@ function droppedEpisodesNote(stats: RunStats): string | null {
 }
 
 @Injectable()
-export class CollectExecutorService {
+export class CollectExecutorService implements OnApplicationBootstrap {
   private readonly logger = new Logger(CollectExecutorService.name);
   private readonly activeRuns = new Map<string, ReplaySubject<MessageEvent>>();
+  private readonly runningSources = new Set<string>();
 
   constructor(
     @InjectRepository(CollectSource)
@@ -101,6 +102,16 @@ export class CollectExecutorService {
     @Optional() private readonly clock: Clock = SYSTEM_CLOCK,
   ) {}
 
+  async onApplicationBootstrap(): Promise<void> {
+    // 单后端进程：开始接受请求前清理上次未正常结束的任务。失败必须阻止启动。
+    const result = await this.logRepo.update({ status: CollectLogStatus.RUNNING }, {
+      status: CollectLogStatus.FAILED,
+      finishedAt: new Date(),
+      errorMessage: '服务重启，采集任务未正常结束，已标记失败。部分内容可能已入库且会保留，已保存的统计和耗时可能不完整；请核对后手动重试。完成时间为恢复处理时间。',
+    });
+    if (result.affected) this.logger.warn(`已将 ${result.affected} 个中断的采集任务标记为失败`);
+  }
+
   /** 入库条目的发布时间：上游给的时间，但不晚于现在（见 collectedPublishedAt） */
   private publishedAtOf(it: MacCmsItem): Date | undefined {
     return collectedPublishedAt(it.vod_pubdate || it.vod_time, wholeSecond(this.clock.now())) ?? undefined;
@@ -116,31 +127,43 @@ export class CollectExecutorService {
   ): Promise<{ logId: string }> {
     const source = await this.sourceRepo.findOne({ where: { id: sourceId } });
     if (!source) throw new NotFoundException('采集源不存在');
+    // 只读查库后以真实ID同步占锁，覆盖UUID大小写及数据库排序规则等价的输入。
+    const sourceKey = source.id.toLowerCase();
+    if (this.runningSources.has(sourceKey)) {
+      throw new ConflictException('该采集源已有任务正在运行，请稍后重试');
+    }
+    this.runningSources.add(sourceKey);
 
-    const mode = dto.mode ?? CollectMode.HOURS;
-    const log = this.logRepo.create({
-      sourceId: source.id,
-      sourceName: source.name,
-      mode,
-      params: dto as any,
-      status: CollectLogStatus.RUNNING,
-      triggeredBy: userId,
-    });
-    const saved = await this.logRepo.save(log);
-    const events = new ReplaySubject<MessageEvent>(1);
-    this.activeRuns.set(saved.id, events);
+    try {
+      const mode = dto.mode ?? CollectMode.HOURS;
+      const log = this.logRepo.create({
+        sourceId: source.id,
+        sourceName: source.name,
+        mode,
+        params: dto as any,
+        status: CollectLogStatus.RUNNING,
+        triggeredBy: userId,
+      });
+      const saved = await this.logRepo.save(log);
+      const events = new ReplaySubject<MessageEvent>(1);
+      this.activeRuns.set(saved.id, events);
 
-    // 后台跑（不阻塞 HTTP 响应）
-    this.runInBackground(source, dto, saved.id).catch((e) => {
-      // 日志已保存后源统计更新失败，不能把已发布的 done 改成不可用。
-      if (!events.isStopped) events.next(this.unavailable(saved.id));
-      this.logger.error(`采集任务 ${saved.id} 异常: ${collectErrorLogDetail(e)}`);
-    }).finally(() => {
-      events.complete();
-      this.activeRuns.delete(saved.id);
-    });
+      // 后台跑（不阻塞 HTTP 响应）；源统计也写完或失败后才释放互斥锁。
+      this.runInBackground(source, dto, saved.id).catch((e) => {
+        // 日志已保存后源统计更新失败，不能把已发布的 done 改成不可用。
+        if (!events.isStopped) events.next(this.unavailable(saved.id));
+        this.logger.error(`采集任务 ${saved.id} 异常: ${collectErrorLogDetail(e)}`);
+      }).finally(() => {
+        events.complete();
+        this.activeRuns.delete(saved.id);
+        this.runningSources.delete(sourceKey);
+      });
 
-    return { logId: saved.id };
+      return { logId: saved.id };
+    } catch (error) {
+      this.runningSources.delete(sourceKey);
+      throw error;
+    }
   }
 
   private async runInBackground(
@@ -250,7 +273,8 @@ export class CollectExecutorService {
     // 更新源的统计
     await this.sourceRepo.update(source.id, {
       lastRunAt: new Date(),
-      totalCollected: source.totalCollected + stats.inserted + stats.updated,
+      // 增量仅来自本次内部计数；不用启动时读到的旧实体覆盖数据库当前值。
+      totalCollected: () => `totalCollected + ${stats.inserted + stats.updated}`,
     });
   }
 
