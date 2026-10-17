@@ -129,10 +129,10 @@ async function productionProxy(nextOrigin) {
   return listen(server)
 }
 
-async function scenario(name, origin, body, allowedHttp = () => false) {
+async function scenario(name, origin, body, allowedHttp = () => false, contextOptions = {}) {
   const entry = { name, pageErrors: [], consoleErrors: [], httpErrors: [], requestFailures: [], externalRequests: [], screenshots: [] }
   report.cases.push(entry)
-  const context = await browser.newContext({ viewport: { width: 1365, height: 900 }, serviceWorkers: 'block' })
+  const context = await browser.newContext({ viewport: { width: 1365, height: 900 }, serviceWorkers: 'block', ...contextOptions })
   await context.route('**/*', route => {
     const url = new URL(route.request().url())
     if (/^https?:$/.test(url.protocol) && ![origin, fixture.origin].includes(url.origin)) {
@@ -146,7 +146,7 @@ async function scenario(name, origin, body, allowedHttp = () => false) {
   page.on('pageerror', error => entry.pageErrors.push(error.message))
   page.on('console', message => { if (message.type() === 'error') entry.consoleErrors.push({ text: message.text(), url: message.location().url }) })
   page.on('response', response => { if (response.status() >= 400) entry.httpErrors.push({ url: response.url(), status: response.status() }) })
-  page.on('requestfailed', request => entry.requestFailures.push({ url: request.url(), error: request.failure()?.errorText }))
+  page.on('requestfailed', request => entry.requestFailures.push({ url: request.url(), error: request.failure()?.errorText, resourceType: request.resourceType() }))
   const screenshot = async label => {
     const file = path.join(output, `${name}-${label}.png`)
     await page.screenshot({ path: file, fullPage: true })
@@ -167,7 +167,11 @@ async function scenario(name, origin, body, allowedHttp = () => false) {
     assert.deepEqual(entry.httpErrors.filter(item => !allowedHttp(item)), [])
     const unexpectedConsole = entry.consoleErrors.filter(item => !(item.text.startsWith('Failed to load resource:') && entry.httpErrors.some(http => http.url === item.url && allowedHttp(http))))
     assert.deepEqual(unexpectedConsole, [])
-    assert.deepEqual(entry.requestFailures.filter(item => !item.error?.includes('ERR_ABORTED')), [])
+    // Chromium blocks Next's script preload when this case explicitly disables JavaScript.
+    entry.disabledScriptBlocks = entry.requestFailures.filter(item => contextOptions.javaScriptEnabled === false
+      && item.error === 'csp' && item.resourceType === 'script'
+      && new URL(item.url).origin === origin && /^\/_next\/static\/.+\.js$/.test(new URL(item.url).pathname))
+    assert.deepEqual(entry.requestFailures.filter(item => !item.error?.includes('ERR_ABORTED') && !entry.disabledScriptBlocks.includes(item)), [])
     entry.passed = true
   } catch (error) {
     entry.failure = error.stack
@@ -187,6 +191,17 @@ async function goto(page, origin, route, heading) {
 async function title(page, expected) {
   // Next can stream metadata after the page body has become visible.
   await page.waitForFunction(expected => document.title === expected + ' | Portal Regression', expected)
+}
+
+const searchReportsSince = start => fixture.requests.slice(start).filter(item => item.method === 'POST' && item.path === '/api/v1/stats/search-keywords')
+
+async function waitForSearchReports(start, count) {
+  const deadline = Date.now() + 5000
+  while (Date.now() < deadline && searchReportsSince(start).filter(item => item.completedAt).length < count) await pause(25)
+  const reports = searchReportsSince(start)
+  assert.equal(reports.length, count)
+  assert(reports.every(item => item.completedAt), 'The real HTTP fixture must finish every report')
+  return reports
 }
 
 async function revalidate(origin, init = {}) {
@@ -286,6 +301,7 @@ test('portal HTTP and browser regression', { timeout: 360000 }, async t => {
     assert.equal((await fetch(direct + '/api/v1/watch-history')).status, 404, 'Production Next must not proxy the API')
     await t.test('home, navigation and paginated public lists', async () => {
       await scenario('pages', origin, async (page, _context, entry, screenshot) => {
+        const start = fixture.requests.length
         await goto(page, origin, '/', '回归文章')
         for (const title of ['🎬 影视推荐', '📚 小说推荐', '🖼 漫画推荐']) await page.getByRole('heading', { name: title, exact: true }).waitFor()
         assert((await page.title()).includes('Portal Regression'))
@@ -315,11 +331,13 @@ test('portal HTTP and browser regression', { timeout: 360000 }, async t => {
         assert(fixture.requests.some(item => item.path === '/api/v1/contents' && item.query.page === '2' && item.query.limit === '2' && item.query.categoryId))
         assert(fixture.requests.some(item => item.path === '/api/v1/contents' && item.query.page === '2' && item.query.tagId))
         entry.pagination = 'Six lists, movie filters and invalid-page fallback passed'
+        assert.deepEqual(searchReportsSince(start), [], 'List rendering, filters, pagination and link prefetch must not report searches')
       })
     })
     await t.test('movie search uses GET and preserves filters across pagination and clearing', async () => {
-      await scenario('movie-search', origin, async (page, _context, entry, screenshot) => {
+      await scenario('movie-search', origin, async (page, context, entry, screenshot) => {
         const start = fixture.requests.length
+        await context.addCookies([{ name: 'search-qa-cookie', value: 'must-not-report', url: origin }])
         const term = '中文 & + ?/#'
         await goto(page, origin, '/movies?type=tv&region=%E5%A4%A7%E9%99%86&year=2026&page=2&q=previous-search', '影视')
         await page.getByText('回归影视第2页', { exact: true }).waitFor()
@@ -328,6 +346,7 @@ test('portal HTTP and browser regression', { timeout: 360000 }, async t => {
         assert.equal(await input.inputValue(), 'previous-search')
         assert.equal(await form.getAttribute('method'), 'get')
         assert.equal(await form.locator('[name="page"]').count(), 0)
+        assert.deepEqual(searchReportsSince(start), [])
         await input.fill(`  ${term}  `)
         const navigation = page.waitForRequest(request => request.isNavigationRequest() && new URL(request.url()).pathname === '/movies')
         await page.getByRole('button', { name: '搜索', exact: true }).click()
@@ -340,6 +359,12 @@ test('portal HTTP and browser regression', { timeout: 360000 }, async t => {
         await page.waitForFunction(expected => document.querySelector('#movie-search')?.value === expected, term)
         await page.getByText('共 48 条匹配结果', { exact: true }).waitFor()
         assert(fixture.requests.slice(start).some(item => item.path === '/api/v1/movies' && item.query.search === term && item.query.page === '1' && item.query.movieType === 'tv' && item.query.region === '大陆' && item.query.year === '2026'))
+        const [firstReport] = await waitForSearchReports(start, 1)
+        assert.deepEqual(firstReport.body, { keyword: term })
+        assert.deepEqual(firstReport.query, {})
+        assert.equal(firstReport.authorized, false)
+        assert.equal(firstReport.hasCookie, false)
+        assert.equal(firstReport.status, 204)
         const nextTerm = '后退回填 B & +'
         await input.fill(nextTerm)
         const nextNavigation = page.waitForRequest(request => request.isNavigationRequest() && new URL(request.url()).pathname === '/movies')
@@ -347,6 +372,8 @@ test('portal HTTP and browser regression', { timeout: 360000 }, async t => {
         assert.equal((await nextNavigation).method(), 'GET')
         await page.waitForURL(url => url.searchParams.get('q') === nextTerm)
         await page.waitForFunction(expected => document.querySelector('#movie-search')?.value === expected, nextTerm)
+        const reports = await waitForSearchReports(start, 2)
+        assert.deepEqual(reports.map(item => item.body), [{ keyword: term }, { keyword: nextTerm }])
         await page.goBack({ waitUntil: 'load' })
         await page.waitForURL(url => url.searchParams.get('q')?.trim() === term)
         await page.waitForFunction(expected => document.querySelector('#movie-search')?.value === expected, term)
@@ -371,11 +398,16 @@ test('portal HTTP and browser regression', { timeout: 360000 }, async t => {
         await page.waitForURL(url => !url.searchParams.has('q') && !url.searchParams.has('page'))
         await page.getByText('回归影视', { exact: true }).waitFor()
         assert.equal(await input.inputValue(), '')
+        await page.reload({ waitUntil: 'load' })
+        await page.getByText('回归影视', { exact: true }).waitFor()
+        assert.equal(searchReportsSince(start).length, 2, 'Back, filtering, pagination, clearing and reload must not report')
+        entry.reports = reports
         entry.search = { term, submittedMethod: submitted.method(), submittedQuery: Object.fromEntries(submittedParams), clearedQuery: Object.fromEntries(clearedParams) }
       })
     })
     await t.test('movie search rejects ambiguous and oversized queries before calling the API', async () => {
       await scenario('movie-search-validation', origin, async (page, _context, entry, screenshot) => {
+        const reportStart = fixture.requests.length
         // Includes both a surrogate pair and a presentation selector: the backend counts each as one character.
         const accepted = '🛰️'.repeat(200)
         await goto(page, origin, '/movies?' + new URLSearchParams({ q: accepted }), '影视')
@@ -411,8 +443,63 @@ test('portal HTTP and browser regression', { timeout: 360000 }, async t => {
         await page.getByText('共 48 条匹配结果', { exact: true }).waitFor()
         assert.equal(await page.getByRole('searchbox', { name: '搜索影视', exact: true }).inputValue(), '')
         assert(fixture.requests.slice(whitespaceStart).some(item => item.path === '/api/v1/movies' && item.query.region === '香港' && item.query.year === '2025' && !Object.hasOwn(item.query, 'search')))
+        assert.deepEqual(searchReportsSince(reportStart), [], 'Even valid bookmarked q values must not report')
         entry.validation = '200 presentation-selector emoji accepted; 201 and duplicate q rejected without corresponding API calls; clearing recovers and whitespace omits search'
       })
+    })
+    await t.test('only valid explicit submits report and reporting failures do not block GET search', async () => {
+      await scenario('movie-search-reporting', origin, async (page, _context, entry, screenshot) => {
+        const start = fixture.requests.length
+        await goto(page, origin, '/movies', '影视')
+        const input = page.getByRole('searchbox', { name: '搜索影视', exact: true })
+        const submit = async value => {
+          await input.fill(value)
+          const navigation = page.waitForRequest(request => request.isNavigationRequest() && new URL(request.url()).pathname === '/movies')
+          await input.press('Enter')
+          assert.equal((await navigation).method(), 'GET')
+          await page.waitForURL(url => url.searchParams.get('q') === value)
+          await page.waitForLoadState('load')
+        }
+        await submit(' \t　 ')
+        await page.getByText('共 48 条匹配结果', { exact: true }).waitFor()
+        await submit('🛰️'.repeat(201))
+        await page.getByText('搜索词不能超过 200 个字符，请缩短后重新搜索。', { exact: true }).waitFor()
+        assert.deepEqual(searchReportsSince(start), [])
+        const boundary = '🛰️'.repeat(200)
+        await submit(boundary)
+        await page.getByText('共 48 条匹配结果', { exact: true }).waitFor()
+        assert.deepEqual((await waitForSearchReports(start, 1))[0].body, { keyword: boundary })
+        try {
+          fixture.searchReportState.status = 503
+          await submit('统计暂不可用仍可搜索')
+          await page.getByText('回归影视', { exact: true }).waitFor()
+          await page.getByText('共 48 条匹配结果', { exact: true }).waitFor()
+          const reports = await waitForSearchReports(start, 2)
+          assert.equal(reports[1].status, 503)
+          assert.deepEqual(reports[1].body, { keyword: '统计暂不可用仍可搜索' })
+          await pause(1100)
+          assert.equal(searchReportsSince(start).length, 2, 'Reporting failures must not retry')
+          assert.equal(await input.inputValue(), '统计暂不可用仍可搜索')
+          entry.reportStatuses = reports.map(item => item.status)
+          await screenshot('search-survives-report-failure')
+        } finally { fixture.searchReportState.status = 204 }
+      }, item => item.status === 503 && new URL(item.url).pathname === '/api/v1/stats/search-keywords')
+    })
+    await t.test('native GET search still works without JavaScript and sends no report', async () => {
+      await scenario('movie-search-no-javascript', origin, async (page, _context, entry, screenshot) => {
+        const start = fixture.requests.length
+        await goto(page, origin, '/movies?type=tv&region=%E5%A4%A7%E9%99%86&page=2', '影视')
+        const keyword = '无脚本 & 搜索'
+        await page.getByRole('searchbox', { name: '搜索影视', exact: true }).fill(keyword)
+        await page.getByRole('button', { name: '搜索', exact: true }).click()
+        await page.waitForURL(url => url.searchParams.get('q') === keyword && !url.searchParams.has('page'))
+        await page.getByText('共 48 条匹配结果', { exact: true }).waitFor()
+        assert.equal(await page.getByRole('searchbox', { name: '搜索影视', exact: true }).inputValue(), keyword)
+        assert(fixture.requests.slice(start).some(item => item.path === '/api/v1/movies' && item.query.search === keyword && item.query.movieType === 'tv' && item.query.region === '大陆'))
+        assert.deepEqual(searchReportsSince(start), [])
+        entry.javascriptEnabled = false
+        await screenshot('get-only')
+      }, () => false, { javaScriptEnabled: false })
     })
     await t.test('movie search distinguishes no matches, an empty page and an API failure', async () => {
       await scenario('movie-search-results', origin, async (page, _context, entry, screenshot) => {
@@ -785,6 +872,25 @@ test('portal HTTP and browser regression', { timeout: 360000 }, async t => {
     const dev = await startNext(isolatedSource('development'), 'development')
     report.origins.development = dev
     await t.test('development resume reaches fixture through Next rewrite', () => resumeScenario(dev, 'development-resume'))
+    await t.test('development explicit search reporting reaches the fixture through its exact Next rewrite', async () => {
+      await scenario('development-search-reporting', dev, async (page, _context, entry) => {
+        const start = fixture.requests.length
+        await goto(page, dev, '/movies', '影视')
+        const keyword = '开发上报 & 别名'
+        await page.getByRole('searchbox', { name: '搜索影视', exact: true }).fill(keyword)
+        await page.getByRole('button', { name: '搜索', exact: true }).click()
+        await page.waitForURL(url => url.searchParams.get('q') === keyword)
+        await page.getByText('共 48 条匹配结果', { exact: true }).waitFor()
+        const [record] = await waitForSearchReports(start, 1)
+        assert.equal(record.status, 204)
+        assert.deepEqual(record.body, { keyword })
+        assert.equal(record.authorized, false)
+        await page.reload({ waitUntil: 'load' })
+        await page.getByText('共 48 条匹配结果', { exact: true }).waitFor()
+        assert.equal(searchReportsSince(start).length, 1)
+        entry.report = record
+      })
+    })
   } finally {
     await cleanup()
     assert.deepEqual(report.cleanupErrors, [])

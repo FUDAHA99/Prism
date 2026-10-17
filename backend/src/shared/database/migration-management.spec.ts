@@ -4,10 +4,12 @@ import { databaseOptions, runtimeDatabaseOptions, runtimeSynchronize } from './d
 import { checkMigrationHistory } from './migration-state';
 import { assertBaselineSchema, assertEmptySchema } from './schema-baseline';
 import { BASELINE_DEFINITIONS, BASELINE_SQL } from './migrations/baseline-schema';
-import { migrationDataSource } from './data-source';
+import { DATABASE_MIGRATIONS, migrationDataSource } from './data-source';
+import { SearchKeywordDaily1792195200000 } from './migrations/1792195200000-SearchKeywordDaily';
 
 const baseline = { name: 'InitialSchema1791936000000', timestamp: 1791936000000 };
 const owner = { name: 'WatchHistoryOwner1791936001000', timestamp: 1791936001000 };
+const search = { name: 'SearchKeywordDaily1792195200000', timestamp: 1792195200000 };
 const config = (values: Record<string, string | undefined>) => ({
   get: (key: string, fallback?: string) => values[key] ?? fallback,
 }) as ConfigService;
@@ -39,11 +41,12 @@ describe('migration configuration and read-only startup gate', () => {
   it('migration execution does not load mutable application entities', () => {
     expect(migrationDataSource().options.entities).toEqual([]);
     expect(migrationDataSource(true).options.migrations).toHaveLength(1);
+    expect(DATABASE_MIGRATIONS.map(migration => new migration().name)).toEqual([baseline.name, owner.name, search.name]);
   });
 
   function source(records: unknown[], exists = true) {
     const runner = { hasTable: jest.fn().mockResolvedValue(exists), query: jest.fn().mockResolvedValue(records), release: jest.fn() };
-    const dataSource = { migrations: [owner, baseline], createQueryRunner: () => runner } as unknown as DataSource;
+    const dataSource = { migrations: [owner, search, baseline], createQueryRunner: () => runner } as unknown as DataSource;
     return { dataSource, runner };
   }
 
@@ -55,8 +58,8 @@ describe('migration configuration and read-only startup gate', () => {
   });
 
   it('complete history passes using only a SELECT', async () => {
-    const { dataSource, runner } = source([baseline, owner]);
-    await expect(checkMigrationHistory(dataSource, true)).resolves.toEqual([baseline, owner]);
+    const { dataSource, runner } = source([baseline, owner, search]);
+    await expect(checkMigrationHistory(dataSource, true)).resolves.toEqual([baseline, owner, search]);
     expect(runner.query.mock.calls).toEqual([['SELECT `timestamp`, `name` FROM `migrations` ORDER BY `id`']]);
     expect(runner.release).toHaveBeenCalledTimes(1);
   });
@@ -67,16 +70,41 @@ describe('migration configuration and read-only startup gate', () => {
     await expect(checkMigrationHistory(dataSource, true)).rejects.toThrow(owner.name);
   });
 
+  it('a previously complete two-step database must run the new search migration before startup', async () => {
+    const { dataSource } = source([baseline, owner]);
+    await expect(checkMigrationHistory(dataSource, false)).resolves.toEqual([baseline, owner]);
+    await expect(checkMigrationHistory(dataSource, true)).rejects.toThrow(search.name);
+  });
+
   it.each([
     [{ ...baseline, name: 'Unknown1791936000000' }],
     [{ ...baseline, timestamp: 1 }],
     [owner],
     [baseline, baseline],
     [baseline, owner, owner],
+    [baseline, owner, search, search],
+    [baseline, search, owner],
   ])('rejects unknown, altered, repeated or unordered history: %j', async (...records) => {
     const { dataSource, runner } = source(records);
     await expect(checkMigrationHistory(dataSource, false)).rejects.toThrow('迁移记录未知、重复或顺序不正确');
     expect(runner.release).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('search keyword aggregate migration', () => {
+  it('refuses an existing table without executing DDL or pretending to finish', async () => {
+    const runner = { hasTable: jest.fn().mockResolvedValue(true), query: jest.fn() };
+    await expect(new SearchKeywordDaily1792195200000().up(runner as unknown as QueryRunner)).rejects.toThrow('已存在但迁移未登记');
+    expect(runner.query).not.toHaveBeenCalled();
+  });
+
+  it('propagates a DDL failure instead of falsely reporting completion', async () => {
+    const runner = { hasTable: jest.fn().mockResolvedValue(false), query: jest.fn().mockRejectedValue(new Error('DDL failed')) };
+    await expect(new SearchKeywordDaily1792195200000().up(runner as unknown as QueryRunner)).rejects.toThrow('DDL failed');
+  });
+
+  it('does not silently drop collected keywords on rollback', async () => {
+    await expect(new SearchKeywordDaily1792195200000().down()).rejects.toThrow('不自动删除');
   });
 });
 

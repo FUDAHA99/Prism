@@ -31,6 +31,7 @@ import { getDashboardStats, getSystemInfo } from '../../api/stats'
 import { useAuthStore } from '../../stores/authStore'
 import PageHeader from '../../components/common/PageHeader'
 import QueryErrorResult from '../../components/common/QueryErrorResult'
+import SearchKeywordCard from './SearchKeywordCard'
 
 const { Text, Title } = Typography
 
@@ -465,6 +466,7 @@ export default function Dashboard() {
           </Card>
         </Col>
       </Row>
+      <SearchKeywordCard roles={user?.roles} />
     </div>
   )
 }

@@ -6,6 +6,7 @@ import { getMovies } from '@/lib/api'
 import { normalizeMovieSearchParams, type MovieSearchParams } from '@/lib/movie-search'
 import PosterCard from '@/components/PosterCard'
 import Pagination from '@/components/Pagination'
+import MovieSearchForm from '@/components/MovieSearchForm'
 import type { MovieType } from '@/lib/types'
 
 export const metadata: Metadata = { title: '影视' }
@@ -63,7 +64,7 @@ export default async function MoviesPage({ searchParams: searchParamsPromise }: 
     <div className="max-w-6xl mx-auto px-4 py-6">
       <h1 className="text-2xl font-bold text-gray-900 mb-4">影视</h1>
 
-      <form key={JSON.stringify(searchParams)} action="/movies" method="get" className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 mb-5">
+      <MovieSearchForm key={JSON.stringify(searchParams)}>
         <label htmlFor="movie-search" className="block text-sm font-medium text-gray-700 mb-2">搜索影视</label>
         <div className="flex flex-wrap items-center gap-2">
           {/* 避免历史返回恢复离开前的输入草稿，回填仍以 URL 为准。 */}
@@ -86,7 +87,7 @@ export default async function MoviesPage({ searchParams: searchParamsPromise }: 
         </div>
         <p id="movie-search-help" className="mt-2 text-xs text-gray-500">支持片名、别名、导演或演员，最多 200 个字符。</p>
         {searchError && <p id="movie-search-error" role="alert" className="mt-2 text-sm text-red-600">{searchError}</p>}
-      </form>
+      </MovieSearchForm>
 
       {/* 筛选条 */}
       <div className="bg-white rounded-lg shadow-sm border border-gray-200 mb-5 divide-y">

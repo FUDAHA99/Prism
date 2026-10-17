@@ -7,6 +7,18 @@ export async function getDashboardStats(): Promise<DashboardStats> {
   return res.data
 }
 
+export interface SearchKeywords {
+  items: Array<{ keyword: string; count: number }>
+  from: string
+  to: string
+  timeZone: 'Asia/Shanghai'
+}
+
+export async function getSearchKeywords(): Promise<SearchKeywords> {
+  const res = await apiClient.get<SearchKeywords>('/stats/search-keywords')
+  return res.data
+}
+
 export interface SystemInfo {
   system: {
     platform: string

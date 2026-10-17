@@ -135,6 +135,8 @@
 | GET | `/api/v1/site-settings/public` | SiteSettingController.findPublic | public | **public-filtered** | none |
 | GET | `/api/v1/stats/dashboard` | StatsController.getDashboard | authenticated | **staff:admin,editor** | add-guard+filter |
 | GET | `/api/v1/stats/system` | StatsController.getSystem | authenticated | **staff:admin,editor** | add-guard+filter |
+| POST | `/api/v1/stats/search-keywords` | StatsController.recordSearchKeyword | 2026-10-17 新增 | **public** | 只收 keyword；现有代理守卫按 IP 限制 30 次 / 60 秒 |
+| GET | `/api/v1/stats/search-keywords` | StatsController.getSearchKeywords | 2026-10-17 新增 | **admin** | 固定近 7 日 Top 20；editor 不可读 |
 | GET | `/api/v1/tags` | TagController.findAll | public | **public** | none |
 | POST | `/api/v1/tags` | TagController.create | authenticated | **staff:admin,editor** | add-guard |
 | DELETE | `/api/v1/tags/:id` | TagController.remove | authenticated | **staff:admin,editor** | add-guard |
@@ -151,3 +153,7 @@
 | GET | `/api/v1/watch-history` | WatchHistoryController.findProgress | optional-auth | **optional-auth** | fix-dto(require-contentId) |
 | GET | `/api/v1/watch-history/recent` | WatchHistoryController.findRecent | optional-auth | **optional-auth** | filter |
 | POST | `/api/v1/watch-history/report` | WatchHistoryController.report | optional-auth | **optional-auth** | none |
+
+统计 controller 现在逐方法声明访问级别，避免类级 / 方法级混用：原 `dashboard`、`system` 仍为 staff，
+搜索次数写入口为 public，榜单为 admin。公开写入口不解析登录凭据；限流沿用既有 `ThrottlerBehindProxyGuard`，
+带代理头时按 `req.ip` 计数，无代理头的本地 / 内网调用仍跳过。访问矩阵及真实 HTTP 守卫回归分别验证权限与限流。

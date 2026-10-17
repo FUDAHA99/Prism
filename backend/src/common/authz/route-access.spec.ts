@@ -186,6 +186,8 @@ const MATRIX: Record<string, AccessLevel> = {
   'POST /api/v1/site-settings/batch': 'admin',
   'GET /api/v1/site-settings/public': 'public',
   // StatsController
+  'POST /api/v1/stats/search-keywords': 'public',
+  'GET /api/v1/stats/search-keywords': 'admin',
   'GET /api/v1/stats/dashboard': 'staff',
   'GET /api/v1/stats/system': 'staff',
   // TagController
@@ -238,6 +240,8 @@ const PORTAL_PATHS: readonly string[] = [
   'GET /api/v1/watch-history',
   // portal/app/movies/[slug]/play/[srcIdx]/[ep]/PlayClient.tsx
   'POST /api/v1/watch-history/report',
+  // portal/components/MovieSearchForm.tsx：仅明确提交动作上报，不携带登录凭据。
+  'POST /api/v1/stats/search-keywords',
 ];
 
 /**

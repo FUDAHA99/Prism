@@ -20,3 +20,11 @@ export function portalUrl(env: PortalUrlEnv = import.meta.env): string {
   const configured = env.VITE_PORTAL_URL?.trim()
   return configured && safeHref(configured) ? configured : DEV_PORTAL_URL_FALLBACK
 }
+
+/** 榜单词打开门户公开影视搜索；查询串交给 URLSearchParams 编码。 */
+export function portalMovieSearchUrl(keyword: string, env: PortalUrlEnv = import.meta.env): string {
+  const base = portalUrl(env)
+  const pathname = `/movies?${new URLSearchParams({ q: keyword })}`
+  if (base.startsWith('/')) return pathname
+  return new URL(pathname, base).href
+}

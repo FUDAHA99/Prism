@@ -11,7 +11,7 @@ const nextConfig = {
     unoptimized: true,
   },
   async rewrites() {
-    // 开发时没有 nginx，由 Next 转发上传文件和续播请求；生产继续由 nginx 提供这些路由。
+    // 开发时没有 nginx，由 Next 转发上传、续播和搜索上报；生产继续由 nginx 提供这些路由。
     if (process.env.NODE_ENV !== 'development') return []
     const backend = (
       process.env.BACKEND_INTERNAL_URL ||
@@ -21,6 +21,7 @@ const nextConfig = {
     return [
       { source: '/uploads/:path*', destination: `${backend}/uploads/:path*` },
       { source: '/api/v1/watch-history/:path*', destination: `${backend}/api/v1/watch-history/:path*` },
+      { source: '/api/v1/stats/search-keywords', destination: `${backend}/api/v1/stats/search-keywords` },
     ]
   },
 }

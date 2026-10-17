@@ -1,6 +1,8 @@
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { StatsController } from './stats.controller';
 import { StatsService } from './stats.service';
+import { SearchKeywordsService } from './search-keywords.service';
+import { SearchKeywordDaily } from './entities/search-keyword-daily.entity';
 import { Content, ContentStatus } from '../content/entities/content.entity';
 import { Movie } from '../movie/entities/movie.entity';
 import { Novel } from '../novel/entities/novel.entity';
@@ -25,8 +27,10 @@ describe('统计接口 HTTP', () => {
   beforeAll(async () => {
     h = await createHttpHarness({
       controllers: [StatsController],
+      entities: [SearchKeywordDaily],
       providers: [
         StatsService,
+        SearchKeywordsService,
         { provide: getRepositoryToken(Movie), useValue: countOnly(3) },
         { provide: getRepositoryToken(Novel), useValue: countOnly(2) },
         { provide: getRepositoryToken(Comic), useValue: countOnly(1) },

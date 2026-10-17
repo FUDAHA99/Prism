@@ -6,7 +6,7 @@
  * No .env is read. Only newly created, random QA databases are touched/dropped.
  */
 const assert = require('node:assert/strict');
-const { randomUUID } = require('node:crypto');
+const { randomUUID, createHash } = require('node:crypto');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const mysql = require('mysql2/promise');
@@ -43,6 +43,9 @@ async function main() {
   const { BASELINE_SQL } = require(path.join(dist, 'shared/database/migrations/baseline-schema.js'));
   const { WatchHistory } = require(path.join(dist, 'modules/watch-history/entities/watch-history.entity.js'));
   const { WatchHistoryService } = require(path.join(dist, 'modules/watch-history/watch-history.service.js'));
+  const { DATABASE_MIGRATIONS, migrationDataSource } = require(path.join(dist, 'shared/database/data-source.js'));
+  const { SearchKeywordDaily } = require(path.join(dist, 'modules/stats/entities/search-keyword-daily.entity.js'));
+  const { SearchKeywordsService } = require(path.join(dist, 'modules/stats/search-keywords.service.js'));
   admin = await mysql.createConnection(connection);
   const [[server]] = await admin.query('SELECT VERSION() AS version');
   console.log(JSON.stringify({ node: process.version, driver: process.env.DB_TYPE, server: server.version }));
@@ -64,6 +67,19 @@ async function main() {
   async function legacy() {
     const db = await database();
     for (const statement of BASELINE_SQL) await sql(db, statement);
+    return db;
+  }
+  async function twoStepDatabase() {
+    const db = await database();
+    const previous = new DataSource({
+      ...migrationDataSource().options,
+      database: db,
+      migrations: DATABASE_MIGRATIONS.slice(0, 2),
+    });
+    await previous.initialize();
+    try { await previous.runMigrations({ transaction: 'none' }); }
+    finally { await previous.destroy(); }
+    assert.deepEqual(await ledger(db), [{ name: 'InitialSchema1791936000000' }, { name: 'WatchHistoryOwner1791936001000' }]);
     return db;
   }
   function cli(db, command, succeeds = true, extraEnv = {}) {
@@ -92,18 +108,41 @@ async function main() {
   }
 
   let fresh;
-  await test('empty database migrates both steps; run is idempotent; check is read-only', async () => {
+  await test('empty database migrates all three steps; run is idempotent; check is read-only', async () => {
     fresh = await database();
     cli(fresh, 'check', false);
     assert.equal((await sql(fresh, 'SHOW TABLES')).length, 0);
     cli(fresh, 'run');
-    assert.deepEqual(await ledger(fresh), [{ name: 'InitialSchema1791936000000' }, { name: 'WatchHistoryOwner1791936001000' }]);
-    assert.equal((await sql(fresh, 'SHOW TABLES')).length, 28);
+    assert.deepEqual(await ledger(fresh), [{ name: 'InitialSchema1791936000000' }, { name: 'WatchHistoryOwner1791936001000' }, { name: 'SearchKeywordDaily1792195200000' }]);
+    assert.equal((await sql(fresh, 'SHOW TABLES')).length, 29);
     const history = await ledger(fresh);
     cli(fresh, 'run'); cli(fresh, 'check');
     assert.deepEqual(await ledger(fresh), history);
     cli(fresh, 'run', false, { DB_SYNC: 'true' });
     assert.deepEqual(await ledger(fresh), history);
+  });
+
+  await test('existing two-step database upgrades only the aggregate table and preserves business rows', async () => {
+    const db = await twoStepDatabase();
+    const id = randomUUID();
+    await sql(db, 'INSERT INTO movies (id, title, slug) VALUES (?, ?, ?)', [id, 'existing synthetic movie', 'existing-synthetic-movie']);
+    const before = await sql(db, 'SELECT * FROM movies WHERE id = ?', [id]);
+    assert.match(cli(db, 'check', false), /SearchKeywordDaily1792195200000/);
+    cli(db, 'run'); cli(db, 'check');
+    assert.equal((await sql(db, 'SHOW TABLES')).length, 29);
+    assert.equal((await ledger(db)).length, 3);
+    assert.deepEqual(await sql(db, 'SELECT * FROM movies WHERE id = ?', [id]), before);
+    const history = await ledger(db);
+    cli(db, 'run');
+    assert.deepEqual(await ledger(db), history);
+  });
+
+  await test('an aggregate table without its migration record is rejected rather than adopted', async () => {
+    const db = await twoStepDatabase();
+    await sql(db, 'CREATE TABLE search_keyword_daily (marker int)');
+    assert.match(cli(db, 'run', false), /已存在但迁移未登记/);
+    assert.equal((await ledger(db)).length, 2);
+    assert.equal((await sql(db, "SHOW COLUMNS FROM search_keyword_daily LIKE 'marker'")).length, 1);
   });
 
   await test('unregistered legacy database is rejected; matching baseline adopts exactly one step', async () => {
@@ -306,6 +345,85 @@ async function main() {
       assert.equal(result.status, 200);
       const progress = (await result.json()).data;
       for (const key of ['progressSec', 'srcIdx', 'epIdx', 'episodeId', 'durationSec']) assert.equal(progress[key], body[key]);
+    });
+
+    const hashKeyword = keyword => createHash('sha256').update(keyword.trim(), 'utf8').digest('hex');
+    const searchNow = new Date('2026-10-17T00:00:00.000Z');
+    await test('search aggregate has an InnoDB composite key and atomic increments on eight real connections', async () => {
+      const definition = (await sql(fresh, 'SHOW CREATE TABLE search_keyword_daily'))[0]['Create Table'];
+      assert.match(definition, /ENGINE=InnoDB/);
+      const primary = await sql(fresh, "SHOW INDEX FROM search_keyword_daily WHERE Key_name = 'PRIMARY'");
+      assert.deepEqual(primary.sort((a, b) => a.Seq_in_index - b.Seq_in_index).map(row => row.Column_name), ['day', 'keywordHash']);
+      const columns = await sql(fresh, 'SHOW COLUMNS FROM search_keyword_daily');
+      assert.equal(columns.find(column => column.Field === 'keyword').Type, 'text');
+      assert.equal(columns.find(column => column.Field === 'keywordHash').Type, 'varchar(64)');
+      assert.match(columns.find(column => column.Field === 'count').Type, /^bigint(?:\(\d+\))? unsigned$/);
+      const runners = Array.from({ length: 8 }, () => ds.createQueryRunner());
+      try {
+        await Promise.all(runners.map(runner => runner.connect()));
+        const connections = await Promise.all(runners.map(runner => runner.query('SELECT CONNECTION_ID() AS id')));
+        assert.equal(new Set(connections.map(rows => rows[0].id)).size, runners.length);
+        const writers = runners.map(runner => new SearchKeywordsService(runner.manager.getRepository(SearchKeywordDaily)));
+        await Promise.all(writers.map(writer => writer.record('  并发关键词  ', searchNow)));
+        let rows = await sql(fresh, 'SELECT keyword, `count` FROM search_keyword_daily WHERE keywordHash = ?', [hashKeyword('并发关键词')]);
+        assert.equal(rows.length, 1); assert.equal(rows[0].keyword, '并发关键词'); assert.equal(Number(rows[0].count), 8);
+        await Promise.all(writers.map(writer => writer.record('并发关键词', searchNow)));
+        rows = await sql(fresh, 'SELECT keyword, `count` FROM search_keyword_daily WHERE keywordHash = ?', [hashKeyword('并发关键词')]);
+        assert.equal(rows.length, 1); assert.equal(Number(rows[0].count), 16);
+      } finally { await Promise.all(runners.map(runner => runner.release())); }
+    });
+
+    await test('search hash separates case and accents and TEXT retains the accepted emoji presentation sequence', async () => {
+      const statistics = new SearchKeywordsService(ds.getRepository(SearchKeywordDaily));
+      const keywords = ['Case', 'case', 'café', 'cafe', '😀\uFE0F'.repeat(200)];
+      for (const keyword of keywords) await statistics.record(keyword, searchNow);
+      for (const keyword of keywords) {
+        const rows = await sql(fresh, 'SELECT keyword, `count` FROM search_keyword_daily WHERE keywordHash = ?', [hashKeyword(keyword)]);
+        assert.equal(rows.length, 1); assert.equal(rows[0].keyword, keyword); assert.equal(Number(rows[0].count), 1);
+      }
+      const top = await statistics.getTop(searchNow);
+      for (const keyword of keywords) assert.equal(top.items.find(item => item.keyword === keyword)?.count, 1);
+      assert.equal(top.items.find(item => item.keyword === '并发关键词')?.count, 16);
+    });
+
+    await test('search uses Shanghai midnight, includes exactly seven calendar days and returns only top20', async () => {
+      await sql(fresh, 'DELETE FROM search_keyword_daily');
+      const statistics = new SearchKeywordsService(ds.getRepository(SearchKeywordDaily));
+      await statistics.record('跨日词', new Date('2026-10-16T15:59:59.999Z'));
+      await statistics.record('跨日词', new Date('2026-10-16T16:00:00.000Z'));
+      const days = await sql(fresh, 'SELECT CAST(day AS CHAR) AS day, `count` FROM search_keyword_daily ORDER BY day');
+      assert.deepEqual(days.map(row => [row.day, Number(row.count)]), [['2026-10-16', 1], ['2026-10-17', 1]]);
+      for (const [day, keyword, count] of [['2026-10-10', '已过期', 1000], ['2026-10-11', '窗口首日', 8], ['2026-10-18', '未来行', 2000]]) {
+        await sql(fresh, 'INSERT INTO search_keyword_daily (day, keywordHash, keyword, `count`) VALUES (?, ?, ?, ?)', [day, hashKeyword(keyword), keyword, count]);
+      }
+      const top = await statistics.getTop(searchNow);
+      assert.deepEqual({ from: top.from, to: top.to, timeZone: top.timeZone }, { from: '2026-10-11', to: '2026-10-17', timeZone: 'Asia/Shanghai' });
+      assert.deepEqual(top.items, [{ keyword: '窗口首日', count: 8 }, { keyword: '跨日词', count: 2 }]);
+      for (let i = 1; i <= 21; i++) {
+        const keyword = `排名词${i}`;
+        await sql(fresh, 'INSERT INTO search_keyword_daily (day, keywordHash, keyword, `count`) VALUES (?, ?, ?, ?)', ['2026-10-17', hashKeyword(keyword), keyword, 100 + i]);
+      }
+      const ranked = await statistics.getTop(searchNow);
+      assert.equal(ranked.items.length, 20);
+      assert.deepEqual(ranked.items.map(item => item.count), Array.from({ length: 20 }, (_, i) => 121 - i));
+    });
+
+    await test('search expiry cleanup deletes at most500 per minute and reads still exclude the remainder', async () => {
+      await sql(fresh, 'DELETE FROM search_keyword_daily');
+      const old = Array.from({ length: 501 }, (_, i) => ['2026-10-01', hashKeyword(`旧词${i}`), `旧词${i}`, 100]);
+      await sql(fresh, 'INSERT INTO search_keyword_daily (day, keywordHash, keyword, `count`) VALUES ' + old.map(() => '(?, ?, ?, ?)').join(', '), old.flat());
+      const statistics = new SearchKeywordsService(ds.getRepository(SearchKeywordDaily));
+      await statistics.record('当前词', searchNow);
+      const oldCount = async () => Number((await sql(fresh, "SELECT COUNT(*) AS count FROM search_keyword_daily WHERE day < '2026-10-11'"))[0].count);
+      assert.equal(await oldCount(), 1);
+      const top = await statistics.getTop(searchNow);
+      assert.deepEqual(top.items, [{ keyword: '当前词', count: 1 }]);
+      assert.equal(await oldCount(), 1, 'Immediate read must not launch another cleanup batch');
+      await statistics.record('当前词', new Date(searchNow.getTime() + 59_999));
+      assert.equal(await oldCount(), 1);
+      await statistics.record('当前词', new Date(searchNow.getTime() + 60_000));
+      assert.equal(await oldCount(), 0);
+      assert.deepEqual((await statistics.getTop(new Date(searchNow.getTime() + 60_000))).items, [{ keyword: '当前词', count: 3 }]);
     });
   } finally {
     if (app) await app.close();

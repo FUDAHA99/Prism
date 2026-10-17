@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DEV_PORTAL_URL_FALLBACK, portalUrl } from './portal-url'
+import { DEV_PORTAL_URL_FALLBACK, portalMovieSearchUrl, portalUrl } from './portal-url'
 
 describe('portalUrl（顶栏「访问前台」）', () => {
   it('生产环境打开同源站点根路径，不受 VITE_PORTAL_URL 影响', () => {
@@ -28,5 +28,25 @@ describe('portalUrl（顶栏「访问前台」）', () => {
   it('默认读 import.meta.env（vitest 下不是生产）', () => {
     expect(import.meta.env.PROD).toBe(false)
     expect(portalUrl()).toBe(import.meta.env.VITE_PORTAL_URL?.trim() || DEV_PORTAL_URL_FALLBACK)
+  })
+})
+
+describe('portalMovieSearchUrl', () => {
+  it('keeps production searches on the same origin and encodes only the q parameter', () => {
+    const keyword = '中文 & + /?# <script>'
+    const href = portalMovieSearchUrl(keyword, { PROD: true, VITE_PORTAL_URL: 'https://ignored.test' })
+    const url = new URL(href, 'https://cms.test')
+    expect(href.startsWith('/movies?')).toBe(true)
+    expect(url.origin).toBe('https://cms.test')
+    expect(url.pathname).toBe('/movies')
+    expect([...url.searchParams]).toEqual([['q', keyword]])
+    expect(url.hash).toBe('')
+  })
+
+  it('uses the configured development portal or its existing fallback', () => {
+    expect(portalMovieSearchUrl('别名', { PROD: false, VITE_PORTAL_URL: 'http://127.0.0.1:4002/' }))
+      .toBe('http://127.0.0.1:4002/movies?q=%E5%88%AB%E5%90%8D')
+    expect(portalMovieSearchUrl('title', { PROD: false })).toBe(`${DEV_PORTAL_URL_FALLBACK}/movies?q=title`)
+    expect(portalMovieSearchUrl('title', { PROD: false, VITE_PORTAL_URL: '/' })).toBe('/movies?q=title')
   })
 })

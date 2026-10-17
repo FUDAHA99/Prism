@@ -9,12 +9,14 @@ import { Novel } from '../novel/entities/novel.entity';
 import { Comic } from '../comic/entities/comic.entity';
 import { StatsService } from './stats.service';
 import { StatsController } from './stats.controller';
+import { SearchKeywordDaily } from './entities/search-keyword-daily.entity';
+import { SearchKeywordsService } from './search-keywords.service';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Content, User, MediaFile, Comment, Movie, Novel, Comic]),
+    TypeOrmModule.forFeature([Content, User, MediaFile, Comment, Movie, Novel, Comic, SearchKeywordDaily]),
   ],
   controllers: [StatsController],
-  providers: [StatsService],
+  providers: [StatsService, SearchKeywordsService],
 })
 export class StatsModule {}

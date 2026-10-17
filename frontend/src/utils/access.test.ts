@@ -224,7 +224,7 @@ describe('App.tsx 的每条后台路由都在 PAGE_ACCESS 里显式登记', () =
  * admin 页面要有 admin 级别的接口，且不能有 staff 级别的（否则说明 editor 本可以用这个页面，应当放开）。
  */
 const PAGE_RESOURCES: Record<string, string[]> = {
-  '/': ['/stats'],
+  '/': ['/stats/dashboard', '/stats/system'],
   '/settings': ['/auth/me', '/auth/change-password'],
   '/contents': ['/contents'],
   '/categories': ['/categories'],
@@ -266,6 +266,11 @@ describe('与后端路由矩阵（route-access.spec.ts 的 MATRIX）一致', () 
   it('读到了完整的矩阵', () => {
     expect(matrix.size).toBeGreaterThan(120)
     expect(new Set(matrix.values())).toEqual(new Set(['public', 'optional', 'authenticated', 'staff', 'admin']))
+  })
+
+  it('搜索榜单仅管理员读取，门户显式提交单独公开上报', () => {
+    expect(matrix.get('GET /api/v1/stats/search-keywords')).toBe('admin')
+    expect(matrix.get('POST /api/v1/stats/search-keywords')).toBe('public')
   })
 
   it('PAGE_RESOURCES 覆盖每个页面', () => {

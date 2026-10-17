@@ -51,6 +51,7 @@ async function createFixture() {
   const progress = new Map()
   const comments = []
   const commentState = { status: 'pending' }
+  const searchReportState = { status: 204 }
   const listItems = new Map(Object.entries({ '/movies': movie, '/novels': novel, '/comics': comic, '/contents': article }))
   // Unlinked slugs avoid browser prefetch warming the cache before the test does.
   const cacheStates = new Map([
@@ -94,6 +95,10 @@ async function createFixture() {
       return
     }
     const route = url.pathname.replace(/^\/api\/v1/, '')
+    if (route === '/stats/search-keywords' && req.method === 'POST') {
+      entry.hasCookie = Boolean(req.headers.cookie)
+      res.writeHead(searchReportState.status); res.end(); return
+    }
     if (route === '/watch-history' || route === '/watch-history/report') {
       if (entry.authorized) { envelope(res, null, 401); return }
       if (req.method === 'POST') {
@@ -135,7 +140,7 @@ async function createFixture() {
   })
   const origin = await listen(server)
   server.origin = origin
-  return { origin, server, requests, progress, commentState, cacheStates, listItems }
+  return { origin, server, requests, progress, commentState, searchReportState, cacheStates, listItems }
 }
 
 module.exports = { createFixture, listen, movie, novel, comic, article, novelChapters, comicChapters }

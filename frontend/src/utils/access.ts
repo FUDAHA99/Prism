@@ -3,7 +3,7 @@
  * 登录后的后台准入（Login、ProtectedRoute）都读这里，不在各处另写角色判断。
  *
  * 与后端路由矩阵一致（backend/src/common/authz/route-access.spec.ts 的 MATRIX；1-F 的角色模型）：
- * - staff（admin、editor）：控制台（/stats/* 是 staff）、内容 / 影视 / 小说 / 漫画 / 分类 / 标签 / 媒体 / 评论 / 公告，
+ * - staff（admin、editor）：控制台通用统计（搜索提交榜单独限 admin）、内容 / 影视 / 小说 / 漫画 / 分类 / 标签 / 媒体 / 评论 / 公告，
  *   以及个人设置（/auth/me 只要登录，但后台本身只对 staff 开放）
  * - admin：用户 / 角色 / 操作日志 / 系统配置 / 采集 / 导航菜单 / 广告 / 友链
  * access.test.ts 读取后端的 MATRIX 逐项核对：staff 页面用到的接口里没有 admin 级别的，admin 页面的管理接口都是 admin 级别。
