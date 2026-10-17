@@ -39,7 +39,7 @@ function cleanup() {
     } catch (error) { report.cleanupErrors.push(String(error)) }
     finally { clearTimeout(closeTimer) }
     for (const child of children.reverse()) {
-      if (child.exitCode !== null) continue
+      if (child.exitCode !== null || child.signalCode !== null) continue
       try {
         if (process.platform === 'win32') execFileSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
         else {
@@ -47,7 +47,17 @@ function cleanup() {
           await Promise.race([new Promise(resolve => child.once('exit', resolve)), pause(3000)])
           if (child.exitCode === null) child.kill('SIGKILL')
         }
-      } catch (error) { if (child.exitCode === null) report.cleanupErrors.push(String(error)) }
+      } catch (error) {
+        // Synchronous taskkill can return before Node dispatches an already-exited child's exit event.
+        if (child.exitCode === null && child.signalCode === null) {
+          await new Promise(resolve => {
+            const finish = () => { clearTimeout(timer); child.off('exit', finish); resolve() }
+            const timer = setTimeout(finish, 1000)
+            child.once('exit', finish)
+          })
+        }
+        if (child.exitCode === null && child.signalCode === null) report.cleanupErrors.push(String(error))
+      }
     }
     for (const server of servers.reverse()) {
       server.closeAllConnections()
@@ -305,6 +315,139 @@ test('portal HTTP and browser regression', { timeout: 360000 }, async t => {
         assert(fixture.requests.some(item => item.path === '/api/v1/contents' && item.query.page === '2' && item.query.limit === '2' && item.query.categoryId))
         assert(fixture.requests.some(item => item.path === '/api/v1/contents' && item.query.page === '2' && item.query.tagId))
         entry.pagination = 'Six lists, movie filters and invalid-page fallback passed'
+      })
+    })
+    await t.test('movie search uses GET and preserves filters across pagination and clearing', async () => {
+      await scenario('movie-search', origin, async (page, _context, entry, screenshot) => {
+        const start = fixture.requests.length
+        const term = '中文 & + ?/#'
+        await goto(page, origin, '/movies?type=tv&region=%E5%A4%A7%E9%99%86&year=2026&page=2&q=previous-search', '影视')
+        await page.getByText('回归影视第2页', { exact: true }).waitFor()
+        const input = page.getByRole('searchbox', { name: '搜索影视', exact: true })
+        const form = page.locator('form[action="/movies"]')
+        assert.equal(await input.inputValue(), 'previous-search')
+        assert.equal(await form.getAttribute('method'), 'get')
+        assert.equal(await form.locator('[name="page"]').count(), 0)
+        await input.fill(`  ${term}  `)
+        const navigation = page.waitForRequest(request => request.isNavigationRequest() && new URL(request.url()).pathname === '/movies')
+        await page.getByRole('button', { name: '搜索', exact: true }).click()
+        const submitted = await navigation
+        assert.equal(submitted.method(), 'GET')
+        const submittedParams = new URL(submitted.url()).searchParams
+        assert.equal(submittedParams.get('q').trim(), term)
+        assert.equal(submittedParams.has('page'), false)
+        for (const [key, value] of Object.entries({ type: 'tv', region: '大陆', year: '2026' })) assert.equal(submittedParams.get(key), value)
+        await page.waitForFunction(expected => document.querySelector('#movie-search')?.value === expected, term)
+        await page.getByText('共 48 条匹配结果', { exact: true }).waitFor()
+        assert(fixture.requests.slice(start).some(item => item.path === '/api/v1/movies' && item.query.search === term && item.query.page === '1' && item.query.movieType === 'tv' && item.query.region === '大陆' && item.query.year === '2026'))
+        const nextTerm = '后退回填 B & +'
+        await input.fill(nextTerm)
+        const nextNavigation = page.waitForRequest(request => request.isNavigationRequest() && new URL(request.url()).pathname === '/movies')
+        await page.getByRole('button', { name: '搜索', exact: true }).click()
+        assert.equal((await nextNavigation).method(), 'GET')
+        await page.waitForURL(url => url.searchParams.get('q') === nextTerm)
+        await page.waitForFunction(expected => document.querySelector('#movie-search')?.value === expected, nextTerm)
+        await page.goBack({ waitUntil: 'load' })
+        await page.waitForURL(url => url.searchParams.get('q')?.trim() === term)
+        await page.waitForFunction(expected => document.querySelector('#movie-search')?.value === expected, term)
+        assert.equal(await input.inputValue(), term)
+        entry.historyRestoredQuery = term
+        await page.getByRole('link', { name: '电影', exact: true }).click()
+        await page.waitForURL(url => url.searchParams.get('type') === 'movie' && !url.searchParams.has('page'))
+        assert.equal(await input.inputValue(), term)
+        await page.getByRole('link', { name: '下一页', exact: true }).click()
+        await page.getByText('回归影视第2页', { exact: true }).waitFor()
+        for (const [key, value] of Object.entries({ type: 'movie', region: '大陆', year: '2026', q: term, page: '2' })) assert.equal(new URL(page.url()).searchParams.get(key), value)
+        assert.equal(await input.inputValue(), term)
+        await screenshot('encoded-query-page-2')
+        // Clearing must discard an unsent draft as well as the query in the URL.
+        await input.fill('unsent draft')
+        const clear = page.getByRole('link', { name: '清空搜索', exact: true })
+        const clearedParams = new URL(await clear.getAttribute('href'), origin).searchParams
+        assert.equal(clearedParams.has('q'), false)
+        assert.equal(clearedParams.has('page'), false)
+        for (const [key, value] of Object.entries({ type: 'movie', region: '大陆', year: '2026' })) assert.equal(clearedParams.get(key), value)
+        await clear.click()
+        await page.waitForURL(url => !url.searchParams.has('q') && !url.searchParams.has('page'))
+        await page.getByText('回归影视', { exact: true }).waitFor()
+        assert.equal(await input.inputValue(), '')
+        entry.search = { term, submittedMethod: submitted.method(), submittedQuery: Object.fromEntries(submittedParams), clearedQuery: Object.fromEntries(clearedParams) }
+      })
+    })
+    await t.test('movie search rejects ambiguous and oversized queries before calling the API', async () => {
+      await scenario('movie-search-validation', origin, async (page, _context, entry, screenshot) => {
+        // Includes both a surrogate pair and a presentation selector: the backend counts each as one character.
+        const accepted = '🛰️'.repeat(200)
+        await goto(page, origin, '/movies?' + new URLSearchParams({ q: accepted }), '影视')
+        await page.getByText('共 48 条匹配结果', { exact: true }).waitFor()
+        assert.equal(await page.getByRole('searchbox', { name: '搜索影视', exact: true }).inputValue(), accepted)
+        assert(fixture.requests.some(item => item.path === '/api/v1/movies' && item.query.search === accepted))
+        const oversized = '🛰️'.repeat(201)
+        const invalidCases = [
+          { params: new URLSearchParams({ q: oversized }), value: oversized, message: '搜索词不能超过 200 个字符，请缩短后重新搜索。', matches: value => value === oversized },
+          { params: new URLSearchParams([['q', 'duplicate-search-one'], ['q', 'duplicate-search-two'], ['type', 'tv'], ['region', '大陆'], ['year', '2026'], ['page', '9']]), value: 'duplicate-search-one', message: '搜索参数 q 不能重复，请修改后重新搜索。', matches: value => value?.includes('duplicate-search-') },
+        ]
+        for (const invalid of invalidCases) {
+          const start = fixture.requests.length
+          await goto(page, origin, '/movies?' + invalid.params, '影视')
+          await page.locator('main').getByRole('alert').waitFor()
+          assert.equal(await page.locator('main').getByRole('alert').innerText(), invalid.message)
+          const input = page.getByRole('searchbox', { name: '搜索影视', exact: true })
+          assert.equal(await input.inputValue(), invalid.value)
+          assert.equal(await input.getAttribute('aria-invalid'), 'true')
+          assert.equal(await page.getByText('影视加载失败，请稍后重试。', { exact: true }).count(), 0)
+          assert.deepEqual(fixture.requests.slice(start).filter(item => item.path === '/api/v1/movies' && invalid.matches(item.query.search)), [])
+        }
+        await screenshot('duplicate-query-error')
+        const clear = page.getByRole('link', { name: '清空搜索', exact: true })
+        const clearedParams = new URL(await clear.getAttribute('href'), origin).searchParams
+        assert.deepEqual(Object.fromEntries(clearedParams), { type: 'tv', region: '大陆', year: '2026' })
+        await clear.click()
+        await page.getByText('共 48 条匹配结果', { exact: true }).waitFor()
+        assert.equal(await page.locator('main').getByRole('alert').count(), 0)
+        assert.equal(await page.getByRole('searchbox', { name: '搜索影视', exact: true }).inputValue(), '')
+        const whitespaceStart = fixture.requests.length
+        await goto(page, origin, '/movies?' + new URLSearchParams({ q: ' \t　 ', region: '香港', year: '2025' }), '影视')
+        await page.getByText('共 48 条匹配结果', { exact: true }).waitFor()
+        assert.equal(await page.getByRole('searchbox', { name: '搜索影视', exact: true }).inputValue(), '')
+        assert(fixture.requests.slice(whitespaceStart).some(item => item.path === '/api/v1/movies' && item.query.region === '香港' && item.query.year === '2025' && !Object.hasOwn(item.query, 'search')))
+        entry.validation = '200 presentation-selector emoji accepted; 201 and duplicate q rejected without corresponding API calls; clearing recovers and whitespace omits search'
+      })
+    })
+    await t.test('movie search distinguishes no matches, an empty page and an API failure', async () => {
+      await scenario('movie-search-results', origin, async (page, _context, entry, screenshot) => {
+        const previous = fixture.cacheStates.get('/movies')
+        const noMatches = '没有匹配的影视，请尝试其他关键词或筛选条件。'
+        const emptyPage = '当前页没有结果，共 3 条匹配结果。'
+        const failed = '影视加载失败，请稍后重试。'
+        const observations = []
+        try {
+          for (const state of [
+            { q: 'search-zero-matches', page: 1, status: 200, total: 0, message: noMatches },
+            { q: 'search-beyond-last-page', page: 99, status: 200, total: 3, message: emptyPage },
+            { q: 'search-api-failure', page: 1, status: 503, total: null, message: failed },
+          ]) {
+            fixture.cacheStates.set('/movies', { status: state.status, data: { data: [], meta: { page: state.page, limit: 24, total: state.total, totalPages: state.total ? 1 : 0 } } })
+            const start = fixture.requests.length
+            await goto(page, origin, '/movies?' + new URLSearchParams({ q: state.q, page: String(state.page), type: 'anime', region: '日本', year: '2026' }), '影视')
+            await page.getByText(state.message, { exact: true }).waitFor()
+            for (const other of [noMatches, emptyPage, failed].filter(value => value !== state.message)) assert.equal(await page.getByText(other, { exact: true }).count(), 0)
+            if (state.total !== null) await page.getByText(`共 ${state.total} 条匹配结果`, { exact: true }).waitFor()
+            else assert.equal(await page.getByText('共 0 条匹配结果', { exact: true }).count(), 0)
+            if (state.page === 99) {
+              const firstPage = new URL(await page.getByRole('link', { name: '返回第 1 页', exact: true }).getAttribute('href'), origin)
+              assert.deepEqual(Object.fromEntries(firstPage.searchParams), { type: 'anime', region: '日本', year: '2026', q: state.q })
+            }
+            const call = fixture.requests.slice(start).find(item => item.path === '/api/v1/movies' && item.query.search === state.q && item.query.page === String(state.page))
+            assert(call?.completedAt && call.status === state.status)
+            observations.push({ q: state.q, page: state.page, total: state.total, apiStatus: call.status, message: state.message })
+            await screenshot(state.q)
+          }
+        } finally {
+          if (previous) fixture.cacheStates.set('/movies', previous)
+          else fixture.cacheStates.delete('/movies')
+        }
+        entry.results = observations
       })
     })
     await t.test('article, novel and comic readers', async () => {

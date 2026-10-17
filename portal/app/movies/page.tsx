@@ -3,7 +3,7 @@
 import Link from 'next/link'
 import type { Metadata } from 'next'
 import { getMovies } from '@/lib/api'
-import { parsePageParam } from '@/lib/page-param'
+import { normalizeMovieSearchParams, type MovieSearchParams } from '@/lib/movie-search'
 import PosterCard from '@/components/PosterCard'
 import Pagination from '@/components/Pagination'
 import type { MovieType } from '@/lib/types'
@@ -11,13 +11,7 @@ import type { MovieType } from '@/lib/types'
 export const metadata: Metadata = { title: '影视' }
 
 interface PageProps {
-  searchParams: Promise<{
-    page?: string
-    type?: MovieType | 'all'
-    region?: string
-    year?: string
-    q?: string
-  }>
+  searchParams: Promise<MovieSearchParams>
 }
 
 const TYPE_TABS: { key: MovieType | 'all'; label: string }[] = [
@@ -31,17 +25,9 @@ const TYPE_TABS: { key: MovieType | 'all'; label: string }[] = [
 
 export default async function MoviesPage({ searchParams: searchParamsPromise }: PageProps) {
   const searchParams = await searchParamsPromise
-  // 查询串来自地址栏，先收成后端认的值：后端对非法 page / year / 类型返回 400，原样透传会让整页显示「加载失败」
-  const page = parsePageParam(searchParams.page)
-  const movieType = TYPE_TABS.some((t) => t.key !== 'all' && t.key === searchParams.type)
-    ? (searchParams.type as MovieType)
-    : undefined
-  const region = searchParams.region || undefined
-  const parsedYear = searchParams.year ? parseInt(searchParams.year, 10) : NaN
-  const year = parsedYear >= 0 && parsedYear <= 9999 ? parsedYear : undefined
-  const search = searchParams.q || undefined
+  const { page, movieType, region, year, search, inputValue, error: searchError } = normalizeMovieSearchParams(searchParams)
 
-  const list = await getMovies({
+  const list = searchError ? null : await getMovies({
     page, limit: 24, movieType, region, year, search,
   }).catch(() => null)
 
@@ -51,10 +37,15 @@ export default async function MoviesPage({ searchParams: searchParamsPromise }: 
   // 构造保留筛选参数的链接
   const buildHref = (overrides: Record<string, string | undefined>) => {
     const next = new URLSearchParams()
-    if (searchParams.type && searchParams.type !== 'all') next.set('type', searchParams.type)
-    if (searchParams.region) next.set('region', searchParams.region)
-    if (searchParams.year) next.set('year', searchParams.year)
-    if (searchParams.q) next.set('q', searchParams.q)
+    if (movieType) next.set('type', movieType)
+    if (region) next.set('region', region)
+    if (year !== undefined) next.set('year', String(year))
+    if (search) next.set('q', search)
+    // 错误参数保持可见，切换筛选不能悄悄把重复 / 超长词变成另一项有效搜索。
+    if (searchError) {
+      const values = Array.isArray(searchParams.q) ? searchParams.q : [searchParams.q ?? '']
+      values.forEach((value) => next.append('q', value))
+    }
     Object.entries(overrides).forEach(([k, v]) => {
       if (v == null || v === '') next.delete(k)
       else next.set(k, v)
@@ -72,6 +63,31 @@ export default async function MoviesPage({ searchParams: searchParamsPromise }: 
     <div className="max-w-6xl mx-auto px-4 py-6">
       <h1 className="text-2xl font-bold text-gray-900 mb-4">影视</h1>
 
+      <form key={JSON.stringify(searchParams)} action="/movies" method="get" className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 mb-5">
+        <label htmlFor="movie-search" className="block text-sm font-medium text-gray-700 mb-2">搜索影视</label>
+        <div className="flex flex-wrap items-center gap-2">
+          {/* 避免历史返回恢复离开前的输入草稿，回填仍以 URL 为准。 */}
+          <input
+            id="movie-search"
+            name="q"
+            type="search"
+            autoComplete="off"
+            defaultValue={inputValue}
+            placeholder="片名、别名、导演或演员"
+            aria-describedby={searchError ? 'movie-search-help movie-search-error' : 'movie-search-help'}
+            aria-invalid={searchError ? true : undefined}
+            className="min-w-0 flex-1 basis-48 rounded border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:border-brand-500"
+          />
+          {movieType && <input type="hidden" name="type" value={movieType} />}
+          {region && <input type="hidden" name="region" value={region} />}
+          {year !== undefined && <input type="hidden" name="year" value={year} />}
+          <button type="submit" className="rounded bg-brand-600 px-4 py-2 text-sm text-white hover:bg-brand-700">搜索</button>
+          <a href={buildHref({ q: undefined })} className="px-2 py-2 text-sm text-gray-600 hover:text-brand-600">清空搜索</a>
+        </div>
+        <p id="movie-search-help" className="mt-2 text-xs text-gray-500">支持片名、别名、导演或演员，最多 200 个字符。</p>
+        {searchError && <p id="movie-search-error" role="alert" className="mt-2 text-sm text-red-600">{searchError}</p>}
+      </form>
+
       {/* 筛选条 */}
       <div className="bg-white rounded-lg shadow-sm border border-gray-200 mb-5 divide-y">
         <FilterRow label="类型">
@@ -79,9 +95,7 @@ export default async function MoviesPage({ searchParams: searchParamsPromise }: 
             <FilterPill
               key={t.key}
               active={
-                t.key === 'all'
-                  ? !searchParams.type || searchParams.type === 'all'
-                  : searchParams.type === t.key
+                t.key === 'all' ? !movieType : movieType === t.key
               }
               href={buildHref({ type: t.key === 'all' ? undefined : t.key, page: undefined })}
             >
@@ -91,24 +105,24 @@ export default async function MoviesPage({ searchParams: searchParamsPromise }: 
         </FilterRow>
 
         <FilterRow label="地区">
-          <FilterPill active={!searchParams.region} href={buildHref({ region: undefined, page: undefined })}>
+          <FilterPill active={!region} href={buildHref({ region: undefined, page: undefined })}>
             全部
           </FilterPill>
           {regions.map((r) => (
-            <FilterPill key={r} active={searchParams.region === r} href={buildHref({ region: r, page: undefined })}>
+            <FilterPill key={r} active={region === r} href={buildHref({ region: r, page: undefined })}>
               {r}
             </FilterPill>
           ))}
         </FilterRow>
 
         <FilterRow label="年份">
-          <FilterPill active={!searchParams.year} href={buildHref({ year: undefined, page: undefined })}>
+          <FilterPill active={year === undefined} href={buildHref({ year: undefined, page: undefined })}>
             全部
           </FilterPill>
           {years.map((y) => (
             <FilterPill
               key={y}
-              active={searchParams.year === String(y)}
+              active={year === y}
               href={buildHref({ year: String(y), page: undefined })}
             >
               {y}
@@ -117,13 +131,24 @@ export default async function MoviesPage({ searchParams: searchParamsPromise }: 
         </FilterRow>
       </div>
 
+      {!searchError && (
+        <div className="mb-4 text-sm text-gray-600 break-words">
+          <p>{search ? `搜索“${search}”` : '全部影视'}{movieType && ` · 类型：${TYPE_TABS.find((t) => t.key === movieType)?.label}`}{region && ` · 地区：${region}`}{year !== undefined && ` · 年份：${year}`}</p>
+          {meta && <p className="mt-1">共 {meta.total} 条匹配结果</p>}
+        </div>
+      )}
+
       {/* 结果 */}
-      {!list ? (
-        <div className="text-gray-500 text-sm py-12 text-center">加载失败</div>
+      {searchError ? null : !list ? (
+        <div role="alert" className="text-gray-500 text-sm py-12 text-center">影视加载失败，请稍后重试。</div>
+      ) : meta?.total === 0 ? (
+        <div className="text-gray-500 text-sm py-12 text-center">
+          没有匹配的影视，请尝试其他关键词或筛选条件。
+        </div>
       ) : items.length === 0 ? (
         <div className="text-gray-500 text-sm py-12 text-center">
-          暂无符合条件的影视，
-          <Link href="/movies" className="text-brand-600 hover:underline">查看全部</Link>
+          <p>当前页没有结果，共 {meta?.total} 条匹配结果。</p>
+          <Link href={buildHref({ page: undefined })} className="inline-block mt-2 text-brand-600 hover:underline">返回第 1 页</Link>
         </div>
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3 sm:gap-4">
