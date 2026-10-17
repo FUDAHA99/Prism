@@ -280,6 +280,10 @@ describe('AuditService 脱敏、截断与列表字段', () => {
           return saved;
         },
         findOne: async ({ where }: any) => ({ ...sources.get(where.id), categoryMappings: [] }),
+        update: async (id: string, patch: any) => {
+          sources.set(id, { ...sources.get(id), ...patch });
+          return { affected: 1 };
+        },
       };
       const mappingRepo = {
         findOne: async () => null,

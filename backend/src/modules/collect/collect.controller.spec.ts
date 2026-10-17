@@ -53,6 +53,10 @@ describe('CollectController（HTTP）', () => {
     create: jest.fn((x) => ({ ...x })),
     save: jest.fn(async (x) => ({ id: SOURCE_ID, ...x })),
     findOne: jest.fn(async () => stored),
+    update: jest.fn(async (_id: string, patch: Partial<CollectSource>) => {
+      stored = { ...stored, ...patch };
+      return { affected: 1 };
+    }),
     remove: jest.fn(),
     createQueryBuilder: jest.fn(),
   };
@@ -149,6 +153,7 @@ describe('CollectController（HTTP）', () => {
       .patch(`/collect/sources/${SOURCE_ID}`)
       .send({ ...uiCreatePayload, userAgent: null, defaultPlayFrom: null, remark: null });
     expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ id: SOURCE_ID, name: uiCreatePayload.name, userAgent: null, defaultPlayFrom: null, remark: null, categoryMappings: [] });
   });
 
   it('PATCH /collect/sources/:id：改成元数据地址 → 400，不落库', async () => {
@@ -156,7 +161,7 @@ describe('CollectController（HTTP）', () => {
       .patch(`/collect/sources/${SOURCE_ID}`)
       .send({ apiUrl: 'http://100.100.100.200/latest/meta-data/' });
     expect(res.status).toBe(400);
-    expect(sourceRepo.save).not.toHaveBeenCalled();
+    expect(sourceRepo.update).not.toHaveBeenCalled();
   });
 
   it('POST /collect/sources/:id/test：库里的元数据地址 → ok:false + 固定文案', async () => {
@@ -266,9 +271,8 @@ describe('CollectController（HTTP）', () => {
     expect(created).toMatchObject({ name: uiCreatePayload.name, apiUrl: uiCreatePayload.apiUrl });
 
     await service.update(SOURCE_ID, { remark: '备注', id: 'hijack', totalCollected: 999 } as never, 'admin-id');
-    const saved = sourceRepo.save.mock.calls[sourceRepo.save.mock.calls.length - 1][0];
-    expect(saved).toMatchObject({ id: SOURCE_ID, remark: '备注' });
-    expect(saved).not.toHaveProperty('totalCollected');
+    expect(sourceRepo.update).toHaveBeenCalledWith(SOURCE_ID, { remark: '备注' });
+    expect(sourceRepo.save).toHaveBeenCalledTimes(1); // 只有上面的create使用save。
   });
 
   describe('GET /collect/logs', () => {

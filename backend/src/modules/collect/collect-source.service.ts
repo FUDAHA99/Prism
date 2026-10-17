@@ -143,15 +143,17 @@ export class CollectSourceService {
   async update(id: string, dto: UpdateCollectSourceDto, userId: string) {
     const item = await this.findOne(id);
     const patch = pickSourceFields(dto);
-    // 必须在 Object.assign 之前算：之后 item 已是新值
     const changedFields = changedAuditFields(item, patch);
-    Object.assign(item, patch);
-    const saved = await this.sourceRepo.save(item);
+    // 只写配置列，避免旧实体覆盖采集统计或级联回写分类映射。
+    if (Object.keys(patch).length > 0) {
+      await this.sourceRepo.update(item.id, patch);
+    }
+    const saved = await this.findOne(item.id);
     // 不记请求体原文：只记变更字段名，
     // apiUrl 只记 host、请求头只记名称
     const newValues: Record<string, unknown> = { changedFields };
-    if (changedFields.includes('apiUrl')) newValues.apiHost = auditUrlHost(saved.apiUrl);
-    if (changedFields.includes('extraHeaders')) newValues.extraHeaders = auditKeysOnly(saved.extraHeaders);
+    if (changedFields.includes('apiUrl')) newValues.apiHost = auditUrlHost(patch.apiUrl);
+    if (changedFields.includes('extraHeaders')) newValues.extraHeaders = auditKeysOnly(patch.extraHeaders);
     await this.auditService.log({
       userId,
       action: 'UPDATE',
