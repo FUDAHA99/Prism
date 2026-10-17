@@ -37,6 +37,7 @@
 - **Phase 2-A（仅影视）**：既有别名字段与采集填充已接通后台编辑、输入校验和列表搜索，验收范围见下节。
 - **Phase 2-B**：采集详情接入 SSE 统计快照、断线恢复和终态日志刷新；补充同源互斥及重启中断状态处理。适用单后端进程，本地验证记录见[维护记录](maintenance-plan.md)。
 - **Phase 3-A（首批）**：后台单线路手动 HTTP 诊断已实现，结果仅保留在当前页面；持久化、巡检及自动切换留待后续设计，本地验收见[维护记录](maintenance-plan.md)。
+- **Phase 3-B**：现状核查完成，搜索入口和统计尚未实现；下一批先补影视门户搜索入口，再接入明确提交动作的次数榜，见下节。
 - **封面三态筛选**已在此前修复；历史维护计划中的“筛选失效”不是当前待办。
 - 其他阶段下文仍保留设计方案，不能据此推断已实现或已部署。小说 / 漫画别名不纳入本次范围。
 
@@ -335,46 +336,62 @@ HEAD 200 可能是 HTML 页面，首集正常也不能代表其他集正常。�
 
 ## Phase 3-B：搜索词统计
 
-### 目标
-记录用户搜索词，Dashboard 展示 Top 20，辅助站长决策补采集源。
+### 当前事实与统计口径（2026-10-17 核查）
 
-### 新增数据库表
+基于 `a63f0c3`：没有搜索日志实体、迁移、聚合服务、统计接口或 Dashboard 关键词榜。
+门户 Header 和列表没有搜索表单；影视、小说、漫画仅消费地址栏 `q`，文章列表未接入搜索。
+影视已有标题 / 原名 / 别名 / 导演 / 主演搜索能力，因此先让门户访客能实际使用它。
 
-```sql
-CREATE TABLE search_logs (
-  id          BIGINT AUTO_INCREMENT PRIMARY KEY,
-  keyword     VARCHAR(200) NOT NULL,
-  contentType VARCHAR(20)  NULL,
-  resultCount INT          NOT NULL DEFAULT 0,
-  createdAt   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  INDEX idx_keyword (keyword),
-  INDEX idx_created (createdAt)
-);
-```
+原方案“所有 `findAll()` 有 search 就记一次”不作为实现要求：
 
-### 后端改动
+- 后台四类列表按输入变化查询，还会因翻页、筛选及缓存失效重新取数；这些不是门户用户主动提交。
+- 四类列表共用 optional-auth 接口，后台可搜草稿 / 归档 / 未到发布时间内容，公开视图只含已发布、到期、未删除内容。
+  相同词在不同身份、类型和过滤条件下的结果总数不可混称“全站搜索结果”。
+- 门户列表显式配置 30 秒 fetch revalidate，筛选与分页使用 Next Link；实际缓存命中和预取须在运行时观察，
+  不能仅凭 `force-dynamic` 或服务端调用次数推断提交次数。普通列表读取不应增加统计副作用。
+- `data.length` 是本页条数，`meta.total` 才是该次查询的匹配总数；第 99 页为空不代表没有匹配内容。
+  小说 / 漫画查完总数后还会查询公开章节统计，此处失败也不能记作成功或零结果。
+- 后台影视列表不读取 URL 的 `search` 参数，门户使用的是 `q`；原计划的 `/movies?search=...` 点击跳转不成立。
+  小说 / 漫画分页目前还会丢掉 `q`，接入它们前需要单独修复。
 
-各 service（`movie/novel/comic/content`）`findAll()` 有 search 时异步写入 search_logs
+相关入口：`portal/app/movies/page.tsx`、`portal/lib/api.ts`、`frontend/src/pages/Movie/index.tsx`、
+四类后端 service 与 `backend/src/modules/stats/stats.controller.ts`。受控 HTTP 证据见[维护记录](maintenance-plan.md)。
 
-**新增 `SearchLogService`**
-```
-record(keyword, contentType, resultCount): Promise<void>
-getTopKeywords(days=7, limit=20): Promise<{ keyword, count, avgResultCount }[]>
-```
+### 下一批：先补影视门户搜索入口（待实现）
 
-**`stats.controller.ts` 新增**
-```ts
-@Get('search-keywords')
-getSearchKeywords(@Query('days') days = 7)
-```
+这是可独立交付的第一步，不要求同时改数据库或 Dashboard。
 
-### 管理后台 Dashboard
+1. 在 `/movies` 增加带可访问标签的搜索框和提交按钮，优先使用原生 GET 表单，沿用 `q` 参数和现有公开搜索接口。
+   支持搜索片名、别名、导演或主演；不新建统一搜索页，也不改后台管理搜索。
+2. 从地址栏回填关键词；提交或清空时回到第 1 页，保留当前有效的类型、地区、年份筛选。
+   翻页继续保留关键词及筛选；空白词去掉首尾空白后按未搜索处理，不静默截断超长词。
+3. 与现有后端 200 字符上限一致；直接输入超长或重复 `q` 参数时提供明确提示，
+   不把非法搜索参数发给后端，不因参数异常让页面崩溃。沿用现有匹配语义，不另加分词或大小写转换。
+4. 显示当前搜索条件与匹配总数；真正无匹配和结果加载失败分开呈现。
+   越界页即使没有当前页条目，也不能把非零 `meta.total` 标成“没有匹配内容”。
 
-`frontend/src/pages/Dashboard/index.tsx` 底部新增 Card
-- 标题："热门搜索词（近7日）"
-- 内容：Table（keyword / 搜索次数 / 平均结果数）
-- **avgResultCount=0 的词红色标注**（用户搜不到 → 运营价值最高）
-- 点击关键词 → 跳转 `/movies?search=xxx`
+**验收**：真实公开 HTTP 夹具 + 门户浏览器，覆盖片名 / 别名命中、草稿不可见、中文和特殊字符编码、
+空白 / 清空 / 超长 / 重复参数、保留筛选且重置页码、翻页 / 返回回填、无匹配 / 越界页 / 接口失败。
+验证桌面和窄屏的表单可用性、相关回归及门户构建。使用隔离副本与合成数据；此步不记录搜索行为、不改 schema、不安装依赖。
+
+### 随后：影视搜索提交次数榜（待实现）
+
+- 仅由影视门户的明确提交动作触发单独写入口；后台逐字查询、普通 GET、翻页、筛选、刷新和预取不触发上报。
+  只接收受校验的关键词，类型由首批影视范围固定；不接受客户端 `resultCount`、用户 ID、时间或增量次数。
+- 首批只展示近 7 日、Top 20 的**有效上报次数**，不宣称独立访客数或严格恰好一次。
+  无 JavaScript、网络失败或进程中断可能漏记，公众也可能重复提交；统计失败不影响搜索，客户端不自动重试上报。
+  暂不加入平均结果数、零结果标红、多类型搜索或自动补采建议。
+- 拟按“日期 + 规范化关键词”聚合，日期采用 `Asia/Shanghai`，保留含当天的 7 个自然日；
+  规范化先仅去除首尾空白，数据库唯一键语义须与此一致，不能由默认排序规则偷偷合并其他词。
+  并发计数用数据库原子更新，不保存逐次日志、IP、用户 / 游客标识或 UA；词本身仍可能包含个人信息，不称匿名数据。
+- `GET /stats/search-keywords` 和榜单首批仅管理员可用；需在现有类级 `staff` 之上显式声明 `admin`，并纳入权限矩阵。
+  点击关键词通过既有门户地址解析工具打开 `/movies?q=...` 的公开结果，不能使用后台不消费的 `search` 参数。
+- 写入口保留请求限流，捕获写入错误且不打印原词；不用无界内存队列或未处理的异步 Promise。
+  实施时补充过期清理触发点、批次上限和失败行为；七日聚合并不是硬行数上限，无流量时也不承诺准时物理删除。
+- 新增第三条显式 migration，不修改冻结基线或续播迁移；同步 MySQL / MariaDB 验收中“两条记录 / 28 张表”的现有断言，
+  覆盖空库及已有两条迁移的升级、并发计数、日期边界和重复执行。已有数据卷的部署只检查迁移状态，不会自动升级。
+
+本轮只完成核查与范围修订，上述入口、榜单及新迁移均未实现。小说 / 漫画及文章在后续批次独立接入。
 
 ---
 
@@ -387,9 +404,9 @@ getSearchKeywords(@Query('days') days = 7)
 | `comics` | ADD | `aliases` |
 | `movie_sources` | 后续批次待设计 | 原设想 `isAlive` / `lastCheckedAt` / `failCount`；当前手动诊断首批不改表 |
 | `watch_history` | CREATE | 全新表 |
-| `search_logs` | CREATE | 全新表 |
+| 搜索词统计表 | 后续批次待实施 | 原 `search_logs` 逐次明细方案撤回；拟按日聚合，新增迁移，不改冻结基线 |
 
-## 文件变动汇总
+## 文件变动汇总（原始构想，非已交付清单）
 
 ### 新增（10个）
 ```
