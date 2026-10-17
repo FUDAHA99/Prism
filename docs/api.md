@@ -1177,6 +1177,7 @@ data: {"logId":"任务 UUID","status":"running","totalCount":12,"insertedCount":
   `currentPage` 为当前正在请求或处理的页码；单条模式及历史终态为 `null`。耗时以快照生成时刻为准。
 - `progress` 提供完整快照，重连从最新值继续，不需要 `Last-Event-ID`，也不回放每条历史事件。
   `done` 使用同一数据结构，status 为 `success` / `partial` / `failed` / `cancelled`，表示任务终态已经保存；
+  正常执行路径会等终态日志与现存源统计一起提交后发送，历史及重启恢复的日志仍按数据库中的终态回放。
   收到后关闭监听并重新读取 `GET /collect/logs/:id`，取得完成时间和错误信息。
 - `unavailable` 的数据为 `{ "logId": "任务 UUID", "message": "说明" }`，表示当前进程无法继续提供进度，
   客户端停止自动重连并展示说明。它不改变数据库中的任务状态，也不代表任务已完成。
@@ -1189,8 +1190,11 @@ data: {"logId":"任务 UUID","status":"running","totalCount":12,"insertedCount":
 附重启中断说明，再开始接受请求；已保存终态通过 `done` 回放。此操作不恢复采集，也不回滚已入库内容。
 中断任务的计数和耗时仅保留已保存值，可能不完整；`finishedAt` 是启动时确认中断的时间，不是实际进程退出时间。
 未保存的过程统计和源累计数不会根据已有内容自动回算。
-任务终态与源累计写入不在同一事务中；进程恰在两次写入之间退出时，日志可能已结束但源累计尚未更新。
-同进程最终日志保存失败时仍可能返回 `unavailable`。
+任务执行结束时，终态与源累计数 / 最近运行时间在同一短事务内写入，提交确认后才发送 `done`。
+提交前中断时，两份收尾写入一起回滚；已经入库的内容不在这个事务内，仍然保留。
+提交成功但尚未发出通知时中断，重新连接可从数据库回放终态，不会再次增加源累计数。
+任一收尾写入失败或提交结果无法确认时返回 `unavailable`，不自动重试增量；这不等于事务一定回滚，需重新读取日志核对数据库结果。
+运行中已删除源时，仍保存历史终态日志，不重建源。
 现有 nginx 模板使用上游的 `X-Accel-Buffering: no` 禁用该响应的缓冲，心跳短于 60 秒代理读超时。
 无需额外开放端口或增加生产配置；本地验证不代表生产已更新。
 参考：[NestJS SSE](https://docs.nestjs.com/techniques/server-sent-events)、[SSE 消息格式](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events)。
@@ -1205,4 +1209,4 @@ data: {"logId":"任务 UUID","status":"running","totalCount":12,"insertedCount":
 不会自动重跑或从断点续采；手动重试按本次提交的请求范围从头采集，已有内容仍可能被上游值覆盖。
 互斥与启动恢复仅适用单后端进程，不支持共享数据库的多 worker / 多实例 / 滚动重叠启动。
 
-*本节最后更新：2026-10-16*
+*本节最后更新：2026-10-17*

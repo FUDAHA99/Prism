@@ -5,7 +5,7 @@ import * as zlib from 'zlib';
 import { classifyIp } from '../../common/net/address-policy';
 import { createSafeFetch } from '../../common/net/safe-fetch';
 import { CollectSource, CollectSourceType, CollectContentType } from './entities/collect-source.entity';
-import { CollectLogStatus, CollectMode } from './entities/collect-log.entity';
+import { CollectLog, CollectLogStatus, CollectMode } from './entities/collect-log.entity';
 import * as maccms from './maccms-client';
 import { CollectError, collectErrorMessage, fetchMacCmsList } from './maccms-client';
 import { CollectSourceService } from './collect-source.service';
@@ -246,6 +246,14 @@ describe('CollectExecutorService 执行采集', () => {
       update: jest.fn().mockResolvedValue(undefined),
     };
     const sourceSvc = { getEnabledMappingMap: jest.fn().mockResolvedValue(new Map([['6', null]])) };
+    const manager = {
+      update: jest.fn((entity: typeof CollectLog | typeof CollectSource, id: string, patch: object) => {
+        if (entity === CollectLog) return logRepo.update(id, patch);
+        if (entity === CollectSource) return sourceRepo.update(id, patch);
+        throw new Error('Unexpected finalization entity');
+      }),
+    };
+    const dataSource = { transaction: jest.fn(async (work: (transactionManager: typeof manager) => Promise<unknown>) => work(manager)) };
     const executor = new CollectExecutorService(
       sourceRepo as any,
       logRepo as any,
@@ -254,7 +262,7 @@ describe('CollectExecutorService 执行采集', () => {
       {} as any,
       {} as any,
       {} as any,
-      {} as any,
+      dataSource as any,
       sourceSvc as any,
       {} as any,
       { invalidate: jest.fn().mockResolvedValue(undefined) } as any,
@@ -262,13 +270,15 @@ describe('CollectExecutorService 执行采集', () => {
 
     const { logId } = await executor.startRun(src.id, { mode: CollectMode.HOURS, hours: 24 }, 'admin-id');
     expect(logId).toBe('log-1');
-    for (let i = 0; i < 100 && logRepo.update.mock.calls.length === 0; i++) {
+    for (let i = 0; i < 100 && sourceRepo.update.mock.calls.length === 0; i++) {
       await new Promise((r) => setTimeout(r, 10));
     }
     expect(logRepo.update).toHaveBeenCalledWith(
       'log-1',
       expect.objectContaining({ status: CollectLogStatus.FAILED, errorMessage: BLOCKED }),
     );
+    expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+    expect(manager.update.mock.calls.map(([entity]) => entity)).toEqual([CollectLog, CollectSource]);
     expect(hits).toEqual([]);
   });
 });

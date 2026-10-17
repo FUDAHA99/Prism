@@ -150,7 +150,7 @@ export class CollectExecutorService implements OnApplicationBootstrap {
 
       // 后台跑（不阻塞 HTTP 响应）；源统计也写完或失败后才释放互斥锁。
       this.runInBackground(source, dto, saved.id).catch((e) => {
-        // 日志已保存后源统计更新失败，不能把已发布的 done 改成不可用。
+        // 收尾事务未确认提交时不发送 done，持久结果以重新读取日志为准。
         if (!events.isStopped) events.next(this.unavailable(saved.id));
         this.logger.error(`采集任务 ${saved.id} 异常: ${collectErrorLogDetail(e)}`);
       }).finally(() => {
@@ -254,28 +254,30 @@ export class CollectExecutorService implements OnApplicationBootstrap {
     if (note) errorMessage = errorMessage ? `${errorMessage}\n${note}` : note;
 
     const durationMs = Date.now() - startedAt;
-    await this.logRepo.update(logId, {
-      status: finalStatus,
-      totalCount: stats.total,
-      insertedCount: stats.inserted,
-      updatedCount: stats.updated,
-      skippedCount: stats.skipped,
-      failedCount: stats.failed,
-      errorMessage: errorMessage ?? '',
-      finishedAt: new Date(),
-      durationMs,
+    const finishedAt = new Date();
+    // 只将收尾两次写入放在同一事务，已采集入库的内容不随收尾失败回滚。
+    await this.dataSource.transaction(async (manager) => {
+      await manager.update(CollectLog, logId, {
+        status: finalStatus,
+        totalCount: stats.total,
+        insertedCount: stats.inserted,
+        updatedCount: stats.updated,
+        skippedCount: stats.skipped,
+        failedCount: stats.failed,
+        errorMessage: errorMessage ?? '',
+        finishedAt,
+        durationMs,
+      });
+      await manager.update(CollectSource, source.id, {
+        lastRunAt: finishedAt,
+        // 增量仅来自本次内部计数；不用启动时读到的旧实体覆盖数据库当前值。
+        totalCollected: () => `totalCollected + ${stats.inserted + stats.updated}`,
+      });
     });
     const events = this.activeRuns.get(logId);
     events?.next({ type: 'done', data: { ...snapshot(finalStatus), durationMs } });
     events?.complete();
     this.activeRuns.delete(logId);
-
-    // 更新源的统计
-    await this.sourceRepo.update(source.id, {
-      lastRunAt: new Date(),
-      // 增量仅来自本次内部计数；不用启动时读到的旧实体覆盖数据库当前值。
-      totalCollected: () => `totalCollected + ${stats.inserted + stats.updated}`,
-    });
   }
 
   private async processBatch(

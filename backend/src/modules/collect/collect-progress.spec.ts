@@ -51,15 +51,33 @@ function fixture() {
       return { affected: matches.length };
     }),
   };
+  const manager = {
+    update: jest.fn((entity: typeof CollectLog | typeof CollectSource, id: string, patch: any) => {
+      if (entity === CollectLog) return logRepo.update(id, patch);
+      if (entity === CollectSource) return sourceRepo.update(id, patch);
+      throw new Error('Unexpected finalization entity');
+    }),
+  };
+  const dataSource = {
+    transaction: jest.fn(async (work: (transactionManager: typeof manager) => Promise<unknown>) => {
+      const before = new Map([...logs].map(([id, log]) => [id, { ...log }]));
+      try { return await work(manager); }
+      catch (error) {
+        logs.clear();
+        for (const [id, log] of before) logs.set(id, log);
+        throw error;
+      }
+    }),
+  };
   const executor = new CollectExecutorService(sourceRepo as any, logRepo as any,
-    {} as any, {} as any, {} as any, {} as any, {} as any, {} as any,
+    {} as any, {} as any, {} as any, {} as any, {} as any, dataSource as any,
     { getEnabledMappingMap: async () => new Map([['6', null]]) } as any,
     {} as any, { invalidate: async () => undefined } as any);
   const upsert = jest.spyOn(executor as any, 'upsertOne').mockImplementation(async (...args: any[]) => {
     if (args[1].vod_id === 11) throw new Error('private database detail');
     return args[1].vod_id % 2 ? 'updated' : 'inserted';
   });
-  return { executor, logs, logRepo, sourceRepo, upsert };
+  return { executor, logs, logRepo, sourceRepo, dataSource, manager, upsert };
 }
 
 describe('采集实时快照与任务生命周期', () => {
@@ -70,9 +88,18 @@ describe('采集实时快照与任务生命周期', () => {
     const fetchGate = deferred<maccms.MacCmsListResponse>();
     const saveGate = deferred();
     const saved = deferred();
+    const commitGate = deferred();
+    const commitStarted = deferred();
     jest.spyOn(maccms, 'fetchMacCmsList').mockReturnValue(fetchGate.promise);
     const update = f.logRepo.update.getMockImplementation()!;
     f.logRepo.update.mockImplementation(async (...args) => { saved.resolve(); await saveGate.promise; return update(...args); });
+    const transaction = f.dataSource.transaction.getMockImplementation()!;
+    f.dataSource.transaction.mockImplementation(async (work) => {
+      const result = await transaction(work);
+      commitStarted.resolve();
+      await commitGate.promise;
+      return result;
+    });
     const { logId } = await f.executor.startRun(SOURCE.id, DTO, 'admin');
     const events: MessageEvent[] = [];
     const complete = deferred();
@@ -86,6 +113,12 @@ describe('采集实时快照与任务生命周期', () => {
     expect(latest).toEqual(events[3]);
     expect(latest).toMatchObject({ data: { status: 'running', totalCount: 23, skippedCount: 10, failedCount: 1, insertedCount: 6, updatedCount: 6, currentPage: 2 } });
     saveGate.resolve();
+    await commitStarted.promise;
+    expect(f.dataSource.transaction).toHaveBeenCalledTimes(1);
+    expect(f.manager.update.mock.calls.map(([entity]) => entity)).toEqual([CollectLog, CollectSource]);
+    expect(f.sourceRepo.update).toHaveBeenCalledWith(SOURCE.id, expect.objectContaining({ lastRunAt: expect.any(Date), totalCollected: expect.any(Function) }));
+    expect(events.some((event) => event.type === 'done')).toBe(false); // 两次写入已完成，transaction promise 尚未提交。
+    commitGate.resolve();
     await complete.promise;
     expect(f.logs.get(logId)?.status).toBe(CollectLogStatus.PARTIAL);
     expect(events.at(-1)).toMatchObject({ type: 'done', data: { status: 'partial', totalCount: 23, currentPage: 2 } });
@@ -115,7 +148,7 @@ describe('采集实时快照与任务生命周期', () => {
     expect(JSON.stringify(result)).not.toContain('private');
   });
 
-  it('最终日志写失败为unavailable；源统计写失败不覆盖已保存done', async () => {
+  it('最终日志或源统计写失败均回滚为running并发布unavailable，重连不误报done', async () => {
     for (const failLog of [true, false]) {
       const f = fixture();
       const gate = deferred<maccms.MacCmsListResponse>();
@@ -126,9 +159,12 @@ describe('采集实时快照与任务生命周期', () => {
       const events = lastValueFrom((await f.executor.streamLog(logId)).pipe(toArray()));
       gate.resolve(page(0));
       const result = await events;
-      expect(result.at(-1)?.type).toBe(failLog ? 'unavailable' : 'done');
+      expect(result.at(-1)?.type).toBe('unavailable');
+      expect(result.some((event) => event.type === 'done')).toBe(false);
+      expect(f.logs.get(logId)?.status).toBe(CollectLogStatus.RUNNING);
+      expect(f.logs.get(logId)?.finishedAt).toBeUndefined();
       expect((f.executor as any).activeRuns.size).toBe(0);
-      expect((await firstValueFrom(await f.executor.streamLog(logId))).type).toBe(failLog ? 'unavailable' : 'done');
+      expect((await firstValueFrom(await f.executor.streamLog(logId))).type).toBe('unavailable');
     }
   });
 

@@ -1,7 +1,7 @@
 import 'reflect-metadata';
 import { Test } from '@nestjs/testing';
 import { Logger } from '@nestjs/common';
-import { DataSource, getMetadataArgsStorage, Repository } from 'typeorm';
+import { DataSource, EntityManager, getMetadataArgsStorage, Repository } from 'typeorm';
 import { lastValueFrom, toArray } from 'rxjs';
 import { CollectExecutorService } from './collect-executor.service';
 import { CollectSource, CollectContentType } from './entities/collect-source.entity';
@@ -75,7 +75,7 @@ describe('采集任务互斥、累计数与冷启动恢复', () => {
 
   async function finish(logId: string) {
     const events = await lastValueFrom((await executor.streamLog(logId)).pipe(toArray()));
-    await new Promise((done) => setImmediate(done)); // 等源统计写入及后台 finally，而非只等 SSE done。
+    await new Promise((done) => setImmediate(done)); // 终态已提交，再等后台 finally 释放同源锁。
     return events;
   }
 
@@ -135,19 +135,23 @@ describe('采集任务互斥、累计数与冷启动恢复', () => {
     await finish(b.logId);
   });
 
-  it('done 后源统计仍在await时不能重启同源；统计写完才允许下一次执行', async () => {
+  it('源统计仍在await时不发布done且不能重启同源；提交后才允许下一次执行', async () => {
     const entered = gate();
     const write = gate();
-    const update = sources.update.bind(sources);
-    jest.spyOn(sources, 'update').mockImplementationOnce(async (...args) => {
-      entered.resolve();
-      await write.promise;
-      return update(...args);
+    const update = EntityManager.prototype.update;
+    jest.spyOn(EntityManager.prototype, 'update').mockImplementation(async function (entity, criteria, patch) {
+      if (entity === CollectSource) {
+        entered.resolve();
+        await write.promise;
+      }
+      return update.call(this, entity, criteria, patch);
     });
     jest.mocked(maccms.fetchMacCmsList).mockResolvedValue({ ...EMPTY, total: 1, list: [{ vod_id: 1, type_id: 6 }] as maccms.MacCmsItem[] });
     const { logId } = await executor.startRun(SOURCE_ID, DTO, 'admin');
     await entered.promise;
-    expect((await logs.findOneByOrFail({ id: logId })).status).toBe(CollectLogStatus.SUCCESS);
+    const events: string[] = [];
+    (await executor.streamLog(logId)).subscribe((event) => events.push(event.type!));
+    expect(events).not.toContain('done');
     await expect(executor.startRun(SOURCE_ID, DTO, 'admin')).rejects.toMatchObject({ status: 409 });
     write.resolve();
     await finish(logId);
@@ -160,13 +164,13 @@ describe('采集任务互斥、累计数与冷启动恢复', () => {
   it('源快照过时时仍按数据库当前值累加，SQL表达式兼容MySQL生成器', async () => {
     const upstream = gate<maccms.MacCmsListResponse>();
     jest.mocked(maccms.fetchMacCmsList).mockReturnValue(upstream.promise);
-    const update = jest.spyOn(sources, 'update');
+    const update = jest.spyOn(EntityManager.prototype, 'update');
     const { logId } = await executor.startRun(SOURCE_ID, DTO, 'admin');
     await sources.update(SOURCE_ID, { totalCollected: 50 });
     upstream.resolve({ ...EMPTY, total: 1, list: [{ vod_id: 1, type_id: 6 }] as maccms.MacCmsItem[] });
     await finish(logId);
     expect((await sources.findOneByOrFail({ id: SOURCE_ID })).totalCollected).toBe(51);
-    const patch = update.mock.calls.at(-1)![1];
+    const patch = update.mock.calls.filter(([entity]) => entity === CollectSource).at(-1)![2];
     const mysql = new DataSource({ type: 'mysql', database: 'sql_generation_only', entities: [CollectSource, CollectCategoryMapping] });
     // 只构建元数据与SQL，不 initialize，不连接任何MySQL。
     await (mysql as any).buildMetadatas();
@@ -177,11 +181,18 @@ describe('采集任务互斥、累计数与冷启动恢复', () => {
   });
 
   it.each(['log', 'source'])('%s最终写入异常也释放锁并允许手动重试', async (target) => {
-    if (target === 'log') jest.spyOn(logs, 'update').mockRejectedValueOnce(new Error('test final log failure'));
-    else jest.spyOn(sources, 'update').mockRejectedValueOnce(new Error('test source count failure'));
+    const update = EntityManager.prototype.update;
+    let rejected = false;
+    jest.spyOn(EntityManager.prototype, 'update').mockImplementation(async function (entity, criteria, patch) {
+      if (!rejected && entity === (target === 'log' ? CollectLog : CollectSource)) {
+        rejected = true;
+        throw new Error(`test final ${target} failure`);
+      }
+      return update.call(this, entity, criteria, patch);
+    });
     const first = await executor.startRun(SOURCE_ID, DTO, 'admin');
     const events = await finish(first.logId);
-    expect(events.at(-1)?.type).toBe(target === 'log' ? 'unavailable' : 'done');
+    expect(events.at(-1)?.type).toBe('unavailable');
     const retry = await executor.startRun(SOURCE_ID, DTO, 'admin');
     await finish(retry.logId);
     expect((await logs.findOneByOrFail({ id: retry.logId })).status).toBe(CollectLogStatus.SUCCESS);

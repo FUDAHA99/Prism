@@ -1,7 +1,7 @@
 import 'reflect-metadata';
 import { DataSource, DataSourceOptions, Repository } from 'typeorm';
 import { CollectSource, CollectContentType, CollectSourceType } from './entities/collect-source.entity';
-import { CollectMode } from './entities/collect-log.entity';
+import { CollectLog, CollectMode } from './entities/collect-log.entity';
 import * as maccms from './maccms-client';
 import { MacCmsItem } from './maccms-client';
 import { CollectExecutorService } from './collect-executor.service';
@@ -89,6 +89,19 @@ describe('CollectExecutorService 采集落库', () => {
     });
     const logRepo = { update: jest.fn(async (_id: string, patch: Record<string, unknown>) => void logUpdates.push(patch)) };
     const sourceRepo = { update: jest.fn().mockResolvedValue(undefined) };
+    // 内容仍走上面的真实 SQLite 仓库；仅日志与源统计的末尾事务使用原有假仓库。
+    const manager = {
+      update: async (entity: typeof CollectLog | typeof CollectSource, id: string, patch: Record<string, unknown>) => {
+        if (entity === CollectLog) return logRepo.update(id, patch);
+        if (entity === CollectSource) return sourceRepo.update(id, patch);
+        throw new Error('Unexpected finalization entity');
+      },
+    };
+    const dataSource = { transaction: async (work: (transactionManager: typeof manager) => Promise<unknown>) => {
+      const before = logUpdates.length;
+      try { return await work(manager); }
+      catch (error) { logUpdates.length = before; throw error; }
+    } };
     const sourceService = { getEnabledMappingMap: jest.fn().mockResolvedValue(new Map([['6', null]])) };
     const posterChecker = { checkAndMark: jest.fn().mockResolvedValue(undefined) };
     const executor = new CollectExecutorService(
@@ -99,7 +112,7 @@ describe('CollectExecutorService 采集落库', () => {
       ds.getRepository(MovieEpisode),
       novels,
       comics,
-      ds,
+      dataSource as any,
       sourceService as any,
       posterChecker as any,
       portalCache as any,
