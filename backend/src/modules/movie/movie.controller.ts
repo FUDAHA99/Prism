@@ -9,6 +9,7 @@ import {
   Query,
   HttpCode,
   HttpStatus,
+  BadRequestException,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -18,6 +19,7 @@ import {
 } from '@nestjs/swagger';
 
 import { MovieService } from './movie.service';
+import { SourceHealthService } from './source-health.service';
 import { QueryMovieDto } from './dto/query-movie.dto';
 import { CreateMovieDto, CreateMovieEpisodeDto, CreateMovieSourceDto } from './dto/create-movie.dto';
 import { UpdateMovieDto, UpdateMovieEpisodeDto, UpdateMoviePosterDto } from './dto/update-movie.dto';
@@ -29,7 +31,10 @@ import { CurrentViewer, Viewer } from '../../common/authz/viewer';
 @ApiTags('影视管理')
 @Controller('movies')
 export class MovieController {
-  constructor(private readonly movieService: MovieService) {}
+  constructor(
+    private readonly movieService: MovieService,
+    private readonly sourceHealthService: SourceHealthService,
+  ) {}
 
   @Post()
   @Access('staff')
@@ -120,6 +125,18 @@ export class MovieController {
   }
 
   // ============ Sources ============
+
+  @Post('sources/:sourceId/check')
+  @Access('staff')
+  @ApiBearerAuth()
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: '对播放线路的首个样本执行本次 HEAD 诊断，不验证播放能力' })
+  async checkSource(@Param('sourceId') sourceId: string, @Body() body: unknown) {
+    if (body !== undefined && (body === null || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length > 0)) {
+      throw new BadRequestException('诊断请求不接受参数，请使用空请求体');
+    }
+    return this.sourceHealthService.check(sourceId);
+  }
 
   @Post(':id/sources')
   @Access('staff')

@@ -152,6 +152,7 @@ const MATRIX: Record<string, AccessLevel> = {
   'GET /api/v1/movies/slug/:slug': 'public',
   'DELETE /api/v1/movies/sources/:sourceId': 'staff',
   'POST /api/v1/movies/sources/:sourceId/episodes': 'staff',
+  'POST /api/v1/movies/sources/:sourceId/check': 'staff',
   // NoticeController
   'GET /api/v1/notices': 'staff',
   'POST /api/v1/notices': 'staff',

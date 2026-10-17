@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { MovieService } from './movie.service';
+import { SourceHealthService } from './source-health.service';
 import { MovieController } from './movie.controller';
 import { Movie } from './entities/movie.entity';
 import { MovieSource } from './entities/movie-source.entity';
@@ -14,7 +15,7 @@ import { AuditModule } from '../audit/audit.module';
     AuditModule,
   ],
   controllers: [MovieController],
-  providers: [MovieService],
+  providers: [MovieService, SourceHealthService],
   exports: [MovieService],
 })
 export class MovieModule {}

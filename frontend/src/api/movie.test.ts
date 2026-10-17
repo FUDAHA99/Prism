@@ -1,24 +1,51 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { InternalAxiosRequestConfig } from 'axios'
 import { apiClient } from './client'
-import { createMovie, getMovie, getMovies, updateMovie } from './movie'
+import { checkMovieSource, createMovie, getMovie, getMovies, updateMovie } from './movie'
 
 const originalAdapter = apiClient.defaults.adapter
 let sent: InternalAxiosRequestConfig[] = []
+let responseData: unknown
 
 beforeEach(() => {
   sent = []
+  responseData = { id: 'movie-1', aliases: '旧名,另一译名' }
   vi.stubGlobal('localStorage', { getItem: () => null })
   apiClient.defaults.adapter = async (config) => {
     sent.push(config)
     return {
-      data: { success: true, data: { id: 'movie-1', aliases: '旧名,另一译名' }, timestamp: '' },
+      data: { success: true, data: responseData, timestamp: '' },
       status: 200,
       statusText: 'OK',
       headers: {},
       config,
     }
   }
+})
+
+describe('single movie source HTTP check request', () => {
+  it('sends one authenticated POST without a body and unwraps the diagnostic response', async () => {
+    vi.stubGlobal('localStorage', { getItem: () => 'check-test-token' })
+    const controller = new AbortController()
+    responseData = {
+      sourceId: 'source-1', checkedAt: '2026-10-17T00:00:00.000Z', status: 'responded',
+      message: '样本地址已响应', httpStatus: 200, sample: { id: 'episode-1', title: '首集', episodeNumber: 1 },
+    }
+    expect(await checkMovieSource('source-1', controller.signal)).toEqual(responseData)
+    expect(sent).toHaveLength(1)
+    expect(sent[0].method).toBe('post')
+    expect(sent[0].url).toBe('/movies/sources/source-1/check')
+    expect(sent[0].data).toBeUndefined()
+    expect(sent[0].headers.get('Authorization')).toBe('Bearer check-test-token')
+    expect(sent[0].signal).toBe(controller.signal)
+  })
+
+  it('does not send a check after its card has been cancelled', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    await expect(checkMovieSource('source-1', controller.signal)).rejects.toMatchObject({ code: 'ERR_CANCELED' })
+    expect(sent).toHaveLength(0)
+  })
 })
 
 afterEach(() => {

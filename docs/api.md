@@ -893,6 +893,38 @@ javascript: / data: / vbscript: / file: 等其他协议不入库（影视同时�
 | `PATCH /movies/episodes/:episodeId` | 同上，全部可选；`title` / `url` / `episodeNumber` / `sortOrder` 不能为 `null`；带 `sourceId` / `id` 一律 `400`（剧集不能改挂到别的线路）|
 | `DELETE /movies/episodes/:episodeId` | — |
 
+### 15.9 单线路 HTTP 诊断
+
+`POST /movies/sources/:sourceId/check`  🔒 后台角色（admin / editor）
+
+不带请求体，不能指定 URL、请求头或批量目标。服务端读取未删除影视的现存播放线路，
+按 `episodeNumber ASC, id ASC` 选第一集，发起一次安全 HEAD 检查（总超时 8 秒，最多 3 次重定向）。
+下载线路、无剧集或首集不是 HTTP(S) 绝对地址时不出站，也不改测其他集。
+
+成功处理返回 `200`，普通响应包装中的 `data` 字段为：
+
+| 字段 | 含义 |
+|---|---|
+| `sourceId` | 被检查的线路 ID |
+| `checkedAt` | 本次诊断结束时间（ISO 字符串） |
+| `sample` | `{ id, title, episodeNumber }`，无样本时为 `null`；不包含 URL |
+| `httpStatus` | 观测到的 HTTP 状态码，未完成请求或结果过期时为 `null` |
+| `status` | 见下表；不保存为线路健康状态 |
+| `message` | 固定安全说明，不含上游响应体或底层网络错误细节 |
+
+| `status` | 语义 |
+|---|---|
+| `responded` | HEAD 2xx，只说明本次 HTTP 响应正常 |
+| `http_error` | 404 / 5xx 等非成功响应 |
+| `inconclusive` | 401 / 403 / 405 / 501，或超时、DNS、TLS、地址策略拦截等请求未完成情况 |
+| `not_applicable` | 下载线路、无样本或不支持的样本地址 |
+| `stale` | 请求期间所属影视、线路或首样本变化，本次结果已过期 |
+
+线路或所属影视不存在 / 已删除返回 `404`；同线路已有检查返回 `409`；进程内 4 个检查名额已占满返回 `503`。
+所有结束路径释放名额，不排队；现有请求限流仍然生效。网络完成后重查首样本及 URL，过期结果不保留 HTTP 状态码。
+后台结果只保留在当前页面，刷新、离开或相关编辑后需重新检测。
+**HTTP 响应不代表播放验证**：不验证媒体格式、解码、全部剧集或浏览器 CORS，不自动隐藏或切换线路。
+
 ---
 
 ## 十六、小说模块 `/novels`

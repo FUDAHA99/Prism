@@ -100,6 +100,7 @@
 | PATCH | `/api/v1/movies/episodes/:episodeId` | MovieController.updateEpisode | authenticated | **staff:admin,editor** | add-guard+fix-dto |
 | GET | `/api/v1/movies/slug/:slug` | MovieController.findBySlug | public | **public-filtered** | filter |
 | DELETE | `/api/v1/movies/sources/:sourceId` | MovieController.removeSource | authenticated | **staff:admin,editor** | add-guard |
+| POST | `/api/v1/movies/sources/:sourceId/check` | MovieController.checkSource | 2026-10-17 新增 | **staff:admin,editor** | 手动抽样 HEAD，空请求体，临时结果 |
 | POST | `/api/v1/movies/sources/:sourceId/episodes` | MovieController.addEpisode | authenticated | **staff:admin,editor** | add-guard+fix-dto |
 | GET | `/api/v1/notices` | NoticeController.findAll | authenticated | **staff:admin,editor** | add-guard+fix-dto |
 | POST | `/api/v1/notices` | NoticeController.create | authenticated | **staff:admin,editor** | add-guard+fix-dto |

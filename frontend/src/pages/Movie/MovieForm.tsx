@@ -47,6 +47,8 @@ import PageHeader from '../../components/common/PageHeader'
 import QueryErrorResult from '../../components/common/QueryErrorResult'
 import MediaPicker from '../../components/media/MediaPicker'
 import { generateSlug } from '../../utils'
+import SourceHttpCheck from './SourceHttpCheck'
+import { sourceCheckSnapshot } from './source-http-check'
 
 interface FormValues extends Omit<CreateMovieData, 'sources'> {}
 
@@ -386,7 +388,7 @@ export default function MovieForm() {
                 {
                   key: 'sources',
                   label: '播放线路与剧集',
-                  children: <SourcesPanel movie={movie!} />,
+                  children: <SourcesPanel key={movie!.id} movie={movie!} />,
                 },
               ]
             : []),
@@ -406,9 +408,12 @@ function SourcesPanel({ movie }: { movie: Movie }) {
   const [sourceModal, setSourceModal] = useState(false)
   const [episodeModal, setEpisodeModal] = useState<MovieSource | null>(null)
   const [editingEpisode, setEditingEpisode] = useState<MovieEpisode | null>(null)
+  const [checkRevision, setCheckRevision] = useState(0)
 
-  const refresh = () =>
+  const refresh = () => {
+    setCheckRevision((revision) => revision + 1)
     queryClient.invalidateQueries({ queryKey: ['movie', movie.id] })
+  }
 
   const sources = movie.sources ?? []
 
@@ -526,6 +531,12 @@ function SourcesPanel({ movie }: { movie: Movie }) {
             </Space>
           }
         >
+          {src.kind === 'play' && (
+            <SourceHttpCheck
+              key={`${checkRevision}:${sourceCheckSnapshot(movie.id, src).key}`}
+              source={src}
+            />
+          )}
           <Table<MovieEpisode>
             size="small"
             rowKey="id"

@@ -24,6 +24,15 @@ export interface MovieSource {
   episodes?: MovieEpisode[]
 }
 
+export interface MovieSourceCheckResult {
+  sourceId: string
+  checkedAt: string
+  status: 'responded' | 'http_error' | 'inconclusive' | 'not_applicable' | 'stale'
+  message: string
+  httpStatus: number | null
+  sample: { id: string; title: string; episodeNumber: number } | null
+}
+
 export interface Movie {
   id: string
   title: string
@@ -169,6 +178,16 @@ export async function deleteMovie(id: string): Promise<void> {
 }
 
 // Sources / Episodes
+export async function checkMovieSource(
+  sourceId: string,
+  signal?: AbortSignal,
+): Promise<MovieSourceCheckResult> {
+  const res = await apiClient.post<MovieSourceCheckResult>(
+    `/movies/sources/${sourceId}/check`, undefined, { signal },
+  )
+  return res.data
+}
+
 export async function addMovieSource(
   movieId: string,
   data: CreateMovieSourceData,

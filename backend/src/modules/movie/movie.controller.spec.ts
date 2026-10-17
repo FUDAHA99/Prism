@@ -14,6 +14,7 @@ import * as request from 'supertest';
 
 import { MovieController } from './movie.controller';
 import { MovieService, PublicMovie } from './movie.service';
+import { SourceHealthService } from './source-health.service';
 import { Movie, MovieStatus, MovieType } from './entities/movie.entity';
 import { MovieSource, MovieSourceKind } from './entities/movie-source.entity';
 import { MovieEpisode } from './entities/movie-episode.entity';
@@ -246,6 +247,7 @@ describe('影视模块 HTTP', () => {
       controllers: [MovieController],
       providers: [
         MovieService,
+        SourceHealthService,
         { provide: PortalCacheService, useValue: portalCache },
         // 与 AppModule 相同：Access() 只写元数据，访问级别由全局 AccessGuard 执行
         { provide: APP_GUARD, useClass: AccessGuard },
