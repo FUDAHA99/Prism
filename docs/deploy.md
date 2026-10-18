@@ -378,33 +378,51 @@ Express 的查询解析显式保持 `extended`，限流 TTL 仍是毫秒，上�
 重启中断的任务也应先核对再手动重试；不会自动重跑、续采或撤销已写入内容。
 多实例或持久化队列另行设计，本批的本地验证不代表生产已更新。
 
-## 6. 数据备份
+## 6. 完整备份与恢复
 
-### 自动备份（推荐）
+### 备份范围与保留数量
 
-首次运行 `deploy.sh` 时会自动将备份任务写入 crontab（每天凌晨 2:00 执行）。
+`scripts/backup.sh` 将一次备份保存为 `backup/prism-<时间>-<随机标识>/`，包含 `mysql.sql.gz`、`uploads.tar.gz`、`redis.rdb`、`config.tar.gz`、`tls.tar.gz`、格式标记 `format` 和校验清单 `SHA256SUMS`。同一秒重复执行也使用不同目录，不覆盖已有备份。
 
-也可手动触发：
+配置范围是项目根目录及 `backend/`、`frontend/`、`portal/` 中的 `.env` / `.env.*` 文件，排除 `.example`、`.sample`、`.template` 模板；根目录 `.env.prod` 和 `docker-compose.prod.yml` 必须存在，`nginx/nginx.active.conf` 存在时一并收录。TLS 范围是 `nginx/ssl/` 整个目录；该目录必须存在，HTTP 模式允许为空。MySQL 导出覆盖当前应用库，Redis RDB 覆盖该 Redis 实例的所有逻辑数据库。脚本运行环境为 Linux，依赖 Bash、GNU tar/coreutils 和 Docker CLI，uploads 与 Redis 使用既有 named volume。
 
 ```bash
 bash scripts/backup.sh
+# 按份数保留；必须是正整数，默认 7 份
+BACKUP_KEEP=14 bash scripts/backup.sh
 ```
 
-备份文件保存在项目根目录的 `backup/` 文件夹，默认保留最近 **7 天**，自动清理旧文件。
+只有完整备份成功发布后才按 `BACKUP_KEEP` 清理最旧的完整备份。任一备份组件失败都返回非零退出码，不发布未完成的备份，也不因这次失败清理历史成功备份。若发布后的保留策略清理失败，脚本仍返回非零，但保留新生成的完整备份。旧版独立 `.sql.gz` / uploads 归档和无关文件不纳入新格式保留策略。
+
+备份含密码和私钥：备份目录权限为 `700`，备份文件为 `600`；恢复出的环境文件与私钥同样限制为 `600`。`.gitignore` 忽略实际 `.env` / `.env.*`、`backup/` 和 `nginx/ssl/`，只允许不含真实密钥的配置模板进入 Git。不要把完整备份、私钥或环境文件内容放入 Git、日志或公开附件。
+
+### 停写与自动任务
+
+首次运行 `deploy.sh` 会安装每天凌晨 2:00 的备份 cron。备份脚本自身不停止应用；MySQL 导出和 Redis 快照分别在各自服务中生成，不提供跨组件的在线一致性保证。需要可核对的整体快照时，应进入维护窗口，停止 nginx、portal、backend 及其他外部写入方，保持 MySQL 和 Redis 运行，再备份。
+
+```bash
+docker stop prism-nginx prism-portal prism-backend
+bash scripts/backup.sh
+# 确认退出码为 0，并记录脚本输出的完整备份目录，再恢复应用访问
+```
 
 ### 恢复备份
 
-```bash
-# 恢复数据库
-gunzip < backup/prism_2026-05-07_02-00.sql.gz | \
-  docker exec -i prism-mysql mysql -u cms -p<MYSQL_PASSWORD> cms_prod
+恢复流程面向同版本的既有实例：MySQL 容器及目标数据库必须存在且运行；Redis、backend、portal、nginx 必须存在且停止，其他写入方也须停写。先保留当前数据的备份，再指定一个完整备份目录。脚本在改动目标数据前校验格式、必需组件、摘要和归档内容；恢复时会替换应用库、uploads、Redis、备份范围内的配置和 TLS 文件，脚本不会自动启动应用。恢复中途失败不会自动回滚，应保持应用停止，排除故障后重新恢复并核对。
 
-# 恢复上传文件
-docker run --rm \
-  -v prism_uploads:/data \
-  -v $(pwd)/backup:/backup \
-  alpine tar xzf /backup/uploads_2026-05-07_02-00.tar.gz -C /data
+```bash
+# 此命令不依赖待恢复的 .env.prod 文件
+docker stop prism-nginx prism-portal prism-backend prism-redis
+bash scripts/restore.sh backup/prism-<时间>-<随机标识>
+
+# 恢复成功后由操作人启动、核对服务；重建 nginx 重新解析上游容器地址
+docker compose --env-file .env.prod -f docker-compose.prod.yml start redis backend portal
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --no-deps --force-recreate nginx
 ```
+
+Redis 恢复先从 RDB 离线生成 AOF，再交回原来的 `appendonly=yes` 服务；过期时间沿用备份中的绝对时间，不会让已经到期的键重新获得完整 TTL。恢复 `.env` 不会自动更改现有容器的环境变量；如果实例凭据、挂载或服务配置已经改变，需要另行制定重建与验证步骤。
+
+新恢复脚本不接收旧版单个 SQL / uploads 备份。此范围不包含项目目录外的 `/etc/letsencrypt`、ACME 账号及续签状态，也不包含 Redis 外部模块或集群配置。跨组件在线一致性、跨主机恢复、大数据量恢复耗时及完整故障回滚尚需单独验收。
 
 ---
 

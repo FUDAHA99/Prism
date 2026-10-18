@@ -6,15 +6,12 @@ node_modules/
 
 # ─── 敏感配置（绝不入库）────────────────────────────
 .env
-.env.local
-.env.*.local
-.env.development.local
-.env.test.local
-.env.production.local
-.env.production
-# 生产配置（含密钥，绝不入库）
+.env.*
+# 仅保留不含真实密钥的配置模板
+!.env*.example
+!.env*.sample
+!.env*.template
 # 注意：.gitignore 不支持行尾内联注释，注释必须单独成行
-.env.prod
 
 # ─── 构建产物 ────────────────────────────────────────
 dist/
@@ -53,7 +50,7 @@ coverage/
 # ─── TypeScript 增量编译缓存 ────────────────────────
 *.tsbuildinfo
 
-# ─── 数据库备份（含全量数据，绝不入库）───────────
+# ─── 完整备份（含数据、配置与私钥，绝不入库）──────
 backup/
 
 # ─── setup-ssl.sh 运行时生成（含服务器绝对路径）─────

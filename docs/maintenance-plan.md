@@ -962,8 +962,46 @@ Phase 3-B 影视门户搜索入口已完成本地验收；明确提交动作的�
   备份完整性为 `backup-artifacts.json`，停写 / 清空 / 恢复快照为 `snapshot-{before,empty,after}.json`，全量比较为 `restore-compare-result.json`，
   独立结构复核为 `backup-review-schema-result.json`，恢复后业务检查为 `post-restore-result.json`，清理为 `cleanup-result.json`；最终结果汇总到 `completion-summary.json`。
 - **仍未验收的边界**：公开 CA / ACME 签发、真实 DNS / 防火墙、证书续签与 cron、完整安装 / 部署脚本及失败回滚、浏览器 HSTS 执行和混合内容。
-  当前备份仅覆盖 **MySQL 与 uploads**，不包含 Redis、环境配置或证书；本轮是小量合成数据停写恢复，不代表大库在线并发备份、RTO 达标或跨机器故障灾备。
+  该轮旧脚本仅覆盖 **MySQL 与 uploads**，不包含 Redis、环境配置或证书（后续扩展见下一条记录）；本轮是小量合成数据停写恢复，不代表大库在线并发备份、RTO 达标或跨机器故障灾备。
   同分钟重复备份覆盖、保留期清理、复杂 `.env` 引号 / 含 `=` 密码解析仍未做专项验收；静态发现的限制没有在本轮宣称已修复。
+
+### 完整备份范围、保留策略与恢复 —— 本地完成 ✅（2026-10-18）
+
+- **范围与隔离**：以 `4a9c523` 为基线，使用独立项目 `prism-full-backup-qa-20261018-001`、合成配置 / 数据及本地测试证书。
+  六服务沿用本地已验证镜像，运行网络为 `internal`，仅 nginx 发布回环端口；备份脚本在 Linux runner 的独立 named volume 内实际执行。
+  仅为 runner 拉取官方基础镜像及安装工具；未执行任何远程推送、生产部署、线上服务器或 DNS / hosts 修改。
+- **产品改动**：`scripts/backup.sh` 将 MySQL、uploads、Redis RDB、配置、TLS、版本与摘要清单组成一份完整目录；
+  新增 `scripts/restore.sh` 和共用检查文件。配置覆盖根目录 / backend / frontend / portal 的 `.env` 与 `.env.*`（排除模板），
+  以及 `docker-compose.prod.yml` 和存在的 `nginx/nginx.active.conf`；TLS 覆盖 `nginx/ssl/`。认证取自既有容器环境，不执行或解析 `.env` 中的密码表达式。
+  唯一临时目录全部成功后原子发布；`BACKUP_KEEP` 为正整数、默认保留 **7 份**，只清理摘要有效的新格式完整包。
+- **保留与失败验收**：连续生成 **3 份**备份，名称均不同、前一份摘要不变；设 N=2 后仅保留最新两份，旧版 SQL 文件与无关目录保留。
+  `0 / -1 / abc / 1.5` 均非零退出且不改变已有备份；MySQL 管道、Redis 快照、uploads 归档失败同样非零，未发布残包、不清历史。
+  补充注入配置枚举、配置归档、TLS 归档失败，分别退出 **61 / 62 / 62**；发布后保留枚举失败退出 **63**，新完整包和已有包均保留。
+  未来时间但仅有格式标记的残缺包不计入 N、不自动删除，不会挤掉有效备份。
+- **恢复预检**：错误摘要、缺组件、配置 `../` 路径、TLS 符号链接、无效 RDB 共 **5/5** 被拒绝（均 exit 1）。
+  后三例重算有效摘要以确认实际内容检查生效；每例拒绝前后 SQL / uploads、Redis 卷、配置 / TLS 快照均一致，源备份未变。
+- **实际清空与恢复**：停止应用写入后备份，随后清空 QA 数据库、uploads / Redis 卷，并删除 Linux 项目与宿主运行副本中的配置 / TLS 文件。
+  中间检查证明 **0 张表、0 个上传文件、Redis 0 个键、9 个配置 / TLS 文件不存在**，再直接执行产品恢复脚本。
+  恢复后 **29 张表、28 行、3 条迁移记录、2 个上传文件**的行数 / 全行摘要及文件路径 / 字节 / uid / gid / mode 一致；
+  **9 个配置 / TLS 文件**逐字节摘要一致，包括含引号、空格、`=`、`$`、`#`、中文和 emoji 的环境配置；证书与私钥公钥匹配。
+  原始 DDL 摘要仍有显式 `CHARACTER SET utf8mb4` 的冗余差异；仅按上一条记录的精确短语归一化后，29/29 表结构摘要一致，未把原始摘要误报为相等。
+- **Redis 与权限**：DB0 / DB2 的 string / hash / list / set / zset / stream 均恢复；**10 个未到期键**的值摘要、类型和绝对过期时间一致，
+  **1 个备份后到期键未复活**。离线从 RDB 重建 AOF 后，原 `appendonly=yes` 服务启动并再次重启，数据仍一致。
+  实际 Linux 备份目录 / 文件为 **0700 / 0600**，恢复配置与私钥为 **0600**、TLS 目录 **0700**；宿主证据目录 NTFS ACL 限当前用户、SYSTEM、Administrators，25 个敏感产物已逐项核验。
+  `.gitignore` 补齐任意 `.env.*` 并保留模板；20 项忽略检查通过，未跟踪秘密文件，公开证据日志未出现本轮生成的密码或私钥。
+- **发现并修复**：消除进程替换 / `find` 中失败被吞而报告成功的问题；增加临时 Redis Unix socket 就绪等待，修复 daemon 启动与 CONFIG 命令之间的竞态。
+  总清理发现 helper 强制删除遗留匿名卷，已改 `docker rm -fv`；成功 / 失败退出专项验证均删除匿名卷且保留继承的业务 named volume。
+- **恢复后 HTTPS 与清理**：使用恢复出的配置、证书和私钥重新启动服务，迁移检查与 `nginx -t` 通过；严格校验证书的 HTTPS 登录、管理员权限、
+  中文文章 / 影视、媒体关联、搜索统计 **4 次**、续播 **123 / 456 秒**、2 个媒体下载摘要与门户文章 200 均通过。
+  主测试 **7 个容器、5 个 named volume、1 个网络**及全部探针 / 临时 helper 已移除；首轮遗留的 **27 个匿名卷**经创建时间、匿名标签、空内容及无引用核验后逐个删除，
+  回归测试新建的 **4 个匿名卷**自动清理。回环 **49244 / 49245** 均关闭；原有 7 个容器的 ID / 名称 / 状态及全部原有卷 / 网络清单完全不变。
+  保留本地 runner 镜像、受限证据与合成备份文件，未运行全局 prune。
+- **证据**：`F:/METU/.cache/prism-full-backup-qa-20261018-001/`，汇总 `completion-summary.json`；
+  `full-backup-result.json`、`extra-failure-result.json`、`reject-result.json`、`clear-full-result.json`、`restore-compare-result.json`、
+  `post-restore-result.json`、`helper-cleanup-regression-result.json`、`cleanup-result.json`；同目录保存 before / empty / after 快照、实际备份与可复现 QA 脚本。
+- **仍未覆盖**：跨组件在线一致性、大库性能 / RTO、全新或跨主机 Docker 重建、恢复中断自动回滚、凭据轮换后容器重建、Redis 集群 / 模块与不同版本兼容。
+  恢复依赖既有容器、named volume 与已存在的 MySQL 库；Redis 加载及 AOF 重建各自有约 30 秒轮询窗口，未证明大数据量适用。
+  项目范围之外的配置、`/etc/letsencrypt` / ACME 账户、公开 CA 签发和续签 cron 均未覆盖；本轮仅为本地停写合成数据验收，不代表线上或浏览器验收。
 
 ### 批次 1-C / 1-D / 1-E —— 交叉核查后的修订方案（2026-10-08）
 
