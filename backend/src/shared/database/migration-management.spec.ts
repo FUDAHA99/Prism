@@ -52,7 +52,11 @@ describe('migration configuration and read-only startup gate', () => {
 
   it('missing ledger fails without creating any table', async () => {
     const { dataSource, runner } = source([], false);
-    await expect(checkMigrationHistory(dataSource, true)).rejects.toThrow('尚未完成迁移');
+    const check = checkMigrationHistory(dataSource, true);
+    await expect(check).rejects.toThrow('尚未完成迁移');
+    await expect(check).rejects.toThrow('空库运行 migration:run 和 migration:check');
+    await expect(check).rejects.toThrow('存量库先备份、停写并按 docs/database-migrations.md 核对结构');
+    await expect(check).rejects.toThrow('migration:baseline、migration:run 和 migration:check');
     expect(runner.query).not.toHaveBeenCalled();
     expect(runner.release).toHaveBeenCalledTimes(1);
   });
@@ -73,7 +77,10 @@ describe('migration configuration and read-only startup gate', () => {
   it('a previously complete two-step database must run the new search migration before startup', async () => {
     const { dataSource } = source([baseline, owner]);
     await expect(checkMigrationHistory(dataSource, false)).resolves.toEqual([baseline, owner]);
-    await expect(checkMigrationHistory(dataSource, true)).rejects.toThrow(search.name);
+    const check = checkMigrationHistory(dataSource, true);
+    await expect(check).rejects.toThrow(search.name);
+    await expect(check).rejects.toThrow('先备份、停写，再运行 migration:run 和 migration:check');
+    await expect(check).rejects.not.toThrow('migration:baseline');
   });
 
   it.each([

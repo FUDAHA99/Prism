@@ -6,7 +6,7 @@
 
 ## 执行进度
 
-最后更新：2026-10-17
+最后更新：2026-10-18
 
 当前状态以本节各项执行记录为准；后文保留的原始方案含实施前假设，其中「零测试」、Node 20 与旧版 Vite / Vitest 的描述不再代表当前代码。
 
@@ -898,6 +898,35 @@ Phase 3-B 影视门户搜索入口已完成本地验收；明确提交动作的�
   浏览器和自建 Next / Nest / 代理均已关闭，所建两个无宿主数据卷数据库容器已移除、端口无残留监听。
   为双库验证下载官方 MariaDB 11.4 QA 镜像；未安装项目 / 浏览器依赖、读取真实 `.env`、连接业务库、推送或部署。
   Next 依赖 junction 的 standalone 文件追踪提示仍在；本次验证编译与生产服务，未重新验收 Docker / standalone 完整打包。
+
+### 部署前 Docker 验收 —— 本地完成 ✅（2026-10-18）
+
+- **范围**：以 `16cd804` 为基线，使用仓库实际 backend / frontend / portal 三份 Dockerfile 构建镜像，
+  在独立命名的 MySQL、Redis、backend、portal、frontend、nginx 六服务中验证；仅回环入口、合成数据及本批随机配置。
+- **迁移与启动**：非 root 后端镜像进程使用仅授权 QA 库的服务账号完成空库三条迁移，得到 29 张表（含账本）。
+  仅有前两条账本的旧库运行真实 AppModule 时非零退出、未开始监听，统计表未自动创建，账本和所核对的业务记录未改变。
+  手工执行第三条迁移并检查后，原合成影视记录保留，同一升级库可启动真实应用并返回 HTTP 200。
+- **镜像与缓存**：backend / portal 均为 Node **22.23.3**、uid **1001**；后端包含三条迁移，portal 运行实际 standalone `server.js`，
+  容器内缓存目录可写，不据此承诺跨容器重建保留缓存。直接改 QA 数据库仍命中旧缓存，随后真实管理员更新触发后端到门户的私有通知，
+  从预热到读到新值仅 **932 ms**，小于该详情的 **30 秒 TTL**，排除自然过期；公网 GET / POST `/api/revalidate` 均为 404，图片优化入口 GET 也返回 404。
+- **本轮修复**：已有账本但迁移未完成时，错误提示改为备份、停写后运行 `migration:run` / `migration:check`，不再错误要求重复 baseline；
+  未登记的存量库仍须按运行手册核对结构。原判定与只读门禁不变，旧代码 **2 项失败**、修复后迁移管理 **31/31** 通过并已重建镜像。
+  补齐后台静态 `favicon.svg`，真实 `/admin/favicon.svg` 返回 200，开发路径仍为 `/favicon.svg`。
+- **后台入口重定向**：修复 `/admin` 跳转丢失宿主映射端口；HTTP / HTTPS 模板的精确路径设置 `absolute_redirect off`。
+  真实 HTTP nginx 返回 **301、`Location: /admin/`**，跟随后保留原端口并返回 200；HTTP 配置、合成证书 HTTPS 配置的 `nginx -t` 及模板镜像一致性检查通过。
+  HTTPS 的既有 `listen ... http2` 弃用警告保留，本次不调整无关配置；合成证书检查不代表生产 TLS 验收。
+- **真实浏览器**：Chromium **149.0.7827.55**、**1440×1000 / 390×844**，六服务真实链路 **6/6 个流程**通过，保存 **10 张截图**。
+  门户单次搜索仅发送一次含 `keyword` 的 POST，无 Cookie / Authorization，计数 **3 → 4**；直接 GET / 刷新不增加计数，editor 不显示榜单且榜单 GET 为 0。
+  覆盖编码关键词跳转、后台深链接刷新、实际静态资源、standalone 影视 / 关于 / Markdown 页面及窄屏操作；页面、控制台、HTTP 错误与控制台警告均为 0。
+- **限流与重启**：真实运行时 **7 组**通过；经 nginx 连续 **32 次 POST** 得到 **30×204 + 2×429**，`Retry-After: 60`，实际入库次数为 **30**。
+  变化的伪造 XFF / X-Real-IP 不能换桶绕过；榜单读取 admin 200、匿名 401、editor 403，后端重启后已保存榜单仍在。
+  本次重启令后端容器 IP 从 `.6` 变为 `.5`，nginx 仍指向旧地址而出现 502；人工执行 `nginx -t` 和 reload 后恢复，才完成后续限流验证。
+  既有 `deploy.sh` 会在启动后重建 nginx 以重新解析地址，本轮未改该脚本；本次结果不代表自动恢复或零停机。
+- **清理**：本批 **6 个容器、4 个卷及 QA 网络**已清理，回环端口 **59285** 关闭；保留三份 QA 镜像与验收证据。
+- **证据与边界**：目录 `F:/METU/.cache/prism-deploy-qa-20261018-001/`，已有三端 `*-docker-build-result.json`、
+  `runtime-result.json`（含 `restartRecovery`）、`admin-redirect-green.json`、迁移运行 / 启动拒绝日志及 `migration-message-{red,green}.json`；
+  浏览器证据为 `browser-runs/fab8fa5d-28f7-4736-86f3-25ea99b1c3f0/result.json`，清理为 `cleanup-result.json`，最终汇总为 `completion-summary.json`。
+  本轮仅本地验收，未推送或部署到服务器、未执行完整 `deploy.sh`；不覆盖生产备份恢复、TLS 或真实服务器验收。
 
 ### 批次 1-C / 1-D / 1-E —— 交叉核查后的修订方案（2026-10-08）
 

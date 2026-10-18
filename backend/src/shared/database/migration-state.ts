@@ -22,7 +22,10 @@ export async function checkMigrationHistory(dataSource: DataSource, requireCompl
       }
     }
     if (requireComplete && recorded.length !== expected.length) {
-      throw new Error(`数据库尚未完成迁移：${expected.slice(recorded.length).map(item => item.name).join(', ')}。新库运行 migration:run；存量库备份、停写并核对后运行 migration:baseline，再运行 migration:run。`);
+      const guidance = recorded.length
+        ? '已有迁移记录：请先备份、停写，再运行 migration:run 和 migration:check。'
+        : '无迁移记录：空库运行 migration:run 和 migration:check；存量库先备份、停写并按 docs/database-migrations.md 核对结构，再运行 migration:baseline、migration:run 和 migration:check。';
+      throw new Error(`数据库尚未完成迁移：${expected.slice(recorded.length).map(item => item.name).join(', ')}。${guidance}`);
     }
     return recorded;
   } finally {
