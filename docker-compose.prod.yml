@@ -180,7 +180,7 @@ services:
 
   # ─────────────── Nginx 反向代理 ───────────────
   nginx:
-    image: nginx:alpine
+    image: nginx:1.29.8-alpine
     container_name: prism-nginx
     restart: unless-stopped
     ports:

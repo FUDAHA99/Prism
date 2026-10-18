@@ -28,7 +28,7 @@
 
 | 容器 | 镜像 | 说明 |
 |------|------|------|
-| nginx | nginx:alpine | 反向代理，对外唯一入口 |
+| nginx | nginx:1.29.8-alpine | 反向代理，对外唯一入口 |
 | backend | 本地构建 | NestJS API，端口 3001（仅内网） |
 | portal | 本地构建 | Next.js 门户，端口 3002（仅内网） |
 | frontend | 本地构建 | React 管理后台，端口 8080（仅内网） |
@@ -462,7 +462,7 @@ bash scripts/setup-ssl.sh admin@example.com
 
 - **不要在服务器上手改** `nginx/` 下的任何文件：`nginx.active.conf` 每次部署都会重新生成；两份受跟踪的配置手改后，HTTP 模式会原样生效且让下次 `git pull` 可能中止。改动一律走仓库提交。
 - **部署时两道 `nginx -t`**：
-  1. 部署前（`scripts/check-nginx-conf.sh`）：一次性 `nginx:alpine` 容器，不接任何网络；upstream 的 `resolve` 把 DNS 解析推迟到运行时，无需 `--add-host`。只检查语法与语义（指令、正则、证书能否加载），不依赖业务容器是否在跑，首次部署也能用。不通过则部署中止，`nginx/nginx.active.conf` 换回部署前的内容，容器一个都不动。
+  1. 部署前（`scripts/check-nginx-conf.sh`）：一次性 `nginx:1.29.8-alpine` 容器，不接任何网络；upstream 的 `resolve` 把 DNS 解析推迟到运行时，无需 `--add-host`。只检查语法与语义（指令、正则、证书能否加载），不依赖业务容器是否在跑，首次部署也能用。不通过则部署中止，`nginx/nginx.active.conf` 换回部署前的内容，容器一个都不动。
   2. 部署后：`up -d` 之后，接到 `prism-backend` 所在的真实网络、挂载与 nginx 服务一致再跑一次，通过后 `up -d --no-deps --force-recreate nginx`。失败时按实际报错检查版本、配置和挂载，脚本保留旧 nginx；两次 `nginx -t` 都不能证明运行时 DNS 或业务就绪，需另做真实请求验收。
 - **业务容器换 IP 自动恢复**：HTTP / HTTPS 配置均使用 Docker 内置 DNS `127.0.0.11`、`valid=5s`、共享 upstream `zone` 和 `server ... resolve`；要求开源 nginx **≥ 1.27.3**。DNS 正常且上游就绪后地址会自动刷新，单独重建 backend / frontend / portal 无需 reload nginx。解析与连接超时均为 3 秒；服务停机和地址刷新期间仍可能出现短暂 502/504，不保证零中断。现有 `proxy_pass` 保持不变，包括 `/admin/` 剥离前缀的语义。
 - **每次部署仍重建 nginx，80/443 会中断数秒（已接受）**：这是为了应用新配置——单文件 bind mount 绑定的是 inode，render 用 `mv` 换了文件后运行中的容器仍读旧内容。旧容器收到 SIGQUIT 后立即停止监听，最多再排空 10 秒，更长的请求（大文件上传、`/uploads/` 下视频的 Range 流）会被切断。上游动态解析已经实现；挂载目录配合平滑 reload 的配置更新流程仍未实现。

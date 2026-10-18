@@ -1,6 +1,6 @@
 #!/bin/bash
 # =================================================================
-# 在一次性 nginx:alpine 容器里对 nginx/nginx.active.conf 跑 nginx -t
+# 在一次性 nginx:1.29.8-alpine 容器里对 nginx/nginx.active.conf 跑 nginx -t
 #   容器不接任何网络；upstream 的 resolve 把 DNS 解析推迟到运行时：
 #   只检查语法与语义（指令、正则、证书文件能否加载……），不依赖业务容器是否在运行，
 #   首次部署（还没有任何容器）也能用。配置与证书目录的挂载和 docker-compose.prod.yml 一致。
@@ -12,7 +12,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-NGINX_IMAGE=nginx:alpine   # 与 docker-compose.prod.yml 中 nginx 服务的 image 保持一致
+NGINX_IMAGE=nginx:1.29.8-alpine   # 与 docker-compose.prod.yml 中 nginx 服务的 image 保持一致
 
 if [ ! -f nginx/nginx.active.conf ]; then
   echo "[check-nginx] 找不到 nginx/nginx.active.conf，请先运行 bash scripts/render-nginx-conf.sh" >&2

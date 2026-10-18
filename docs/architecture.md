@@ -22,7 +22,7 @@
         │
         ▼
 ┌──────────────────┐
-│      nginx       │  反向代理（nginx:alpine）
+│      nginx       │  反向代理（nginx:1.29.8-alpine）
 └──┬───┬───┬───┬──┘
    │   │   │   │
    │   │   │   └─ /uploads/  ──►  backend:3001

@@ -1053,6 +1053,40 @@ Phase 3-B 影视门户搜索入口已完成本地验收；明确提交动作的�
   仅验证本地单副本 IPv4、少量请求与采样窗口，不覆盖 DNS 服务自身故障、IPv6、多副本滚动更新、高并发 / 长连接 / 长上传或持续生产运行。
   未执行 `git push`、任何远程推送、生产部署、线上服务器或 DNS 修改；未验收公开 CA / ACME 与续签、完整部署脚本及配置更新的平滑 reload。
 
+### Nginx 镜像小版本统一锁定 —— 本地完成 ✅（2026-10-18）
+
+- **版本与范围**：以 `9d65484` 为基线，全仓库 tracked 文件及 hidden 源码核查后，将四个执行入口统一为 **`nginx:1.29.8-alpine`**：
+  `docker-compose.prod.yml`、`frontend/Dockerfile`、`scripts/check-nginx-conf.sh`、`scripts/deploy.sh`；同步 `docs/deploy.md` 与 `docs/architecture.md`。
+  `docker-compose.yml` 只有 MySQL / Redis / Adminer，没有 nginx；CI `.github/workflows/deploy.yml` 的两种模式均调用已锁定的检查脚本，无须额外改动。
+  历史维护记录保留当时实际使用的旧标签，不改写验收事实；当前执行路径没有未锁定 nginx 镜像引用。
+- **拉取与构建**：真实 `docker pull nginx:1.29.8-alpine` 成功，摘要为
+  `sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de`，与上一轮实测镜像一致。
+  使用修改后的实际 `frontend/Dockerfile` 完成 Docker 多阶段构建（允许正常复用构建缓存），核对运行镜像包含固定基镜像的全部层；
+  外层代理与新构建的前端容器均实际输出 **nginx/1.29.8**，前端构建上下文按既有 `.dockerignore` 排除 `.env*`。
+- **配置与 HTTPS**：使用固定镜像实际运行 CI 同款 render / check 脚本，HTTP / HTTPS `nginx -t` 均通过，
+  模板镜像一致性、两份受影响 Bash 脚本语法及 `git diff --check` 通过；本地 CA 的 **8/8** 配置正反向检查与 **22/22** 严格 HTTPS 检查通过。
+  覆盖证书链 / 主机名、TLS 1.2 / 1.3、拒绝错误 CA / 主机名 / 旧协议、跳转、路由、安全头、15 个 JS / CSS 与两个上传文件摘要；
+  登录、管理员权限、中文内容、媒体关联、统计和续播数据检查也通过。既有 `listen ... http2` 弃用警告保留。
+- **自动恢复抽查**：HTTP 与 HTTPS 各单独重启一次 backend；先重新分配网络端点并占住旧 IP，确保同一容器 ID 的 IP 实际变化。
+  HTTP 为 `172.22.0.5 → .8`，HTTPS 为 `.8 → .7`；首次观测直连新上游就绪后分别 **1096 / 1089 ms** 自动恢复，
+  从变更开始到恢复分别 **6119 / 6178 ms**。每例恢复后的 **14 次连续采样**均成功，原 nginx 容器、master / worker PID 与配置摘要不变，
+  无需 reload；其他上游保持可用。切换期间有短暂 502，不据此宣称零停机。
+- **浏览器关键流程**：真实 Chromium 桌面及 390px 模拟窄屏 **6/6** 流程通过，保存并逐张核对 **10 张截图**。
+  新关键词搜索 **0 → 1**，仅一次无 Cookie / Authorization 的 POST，直接 GET / 刷新不计数；editor 榜单 GET **0 次**。
+  登录 / 榜单、编码关键词跳转、深链接刷新、静态资源、门户影视 / 关于 / Markdown 与窄屏操作通过；页面、控制台错误 / 警告、HTTP 错误及外部请求均 **0**。
+  **72 个**带 `_rsc` 的 `ERR_ABORTED` 导航预取取消单独记录，其他请求失败为 **0**。
+- **清理**：独立项目 `prism-nginx-pin-qa-20261018-001` 的 **6 个容器、4 个 named volume、1 个网络**及全部临时 holder / 探针已移除，
+  未遗留新增匿名卷，回环 **80 / 443** 均关闭；本轮专用前端测试镜像标签已移除，浏览器 / CLI 进程剩余 **0**。
+  原有 **7 个容器**的 ID / 名称 / 状态及 **19 个旧卷、7 个旧网络**保留；仅保留固定版本依赖镜像、本地构建缓存及受限验收证据，未运行全局 prune。
+- **证据**：`F:/METU/.cache/prism-nginx-pin-qa-20261018-001/`；`image-pull-result.json`、`frontend-build.log` / `frontend-build-result.json`、
+  `runtime-nginx-versions.json`、`review-result.json`、`dns-spotcheck-result.json`、`{http,https}-backend-restart.json`、`tls-result.json`、
+  `https-business-result.json`、`browser-result.json`；清理为 `cleanup-result.json` / `image-cleanup-result.json` / `browser-cleanup-result.json`。
+  同目录保留可复现 QA 脚本；最终索引为 `completion-summary.json`。
+- **边界**：锁定的是 Nginx 小版本标签，未固定不可变 digest 或 Alpine 系统补丁修订；本轮是本地单架构、单副本、小量合成数据验收。
+  浏览器对本轮叶证书设置进程级 SPKI 例外，严格 CA / 主机名校验另由 Node 完成；未改变系统信任 / hosts / DNS。
+  未覆盖其他架构、生产环境、公开 CA / 续签、持续高负载和长连接；390px 系统信息卡原有逐字换行局限保留。
+  未执行任何远程推送、部署或线上服务器操作。
+
 ### 批次 1-C / 1-D / 1-E —— 交叉核查后的修订方案（2026-10-08）
 
 第四节的 1-C/1-D/1-E 原文写于 6 周前，动手前用 5 个领域代理 + 1 个交叉核查代理逐条对照**当前代码**

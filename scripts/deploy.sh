@@ -33,7 +33,7 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_DIR"
 
 COMPOSE="docker compose -f docker-compose.prod.yml --env-file .env.prod"
-NGINX_IMAGE=nginx:alpine   # 与 docker-compose.prod.yml 中 nginx 服务的 image 保持一致
+NGINX_IMAGE=nginx:1.29.8-alpine   # 与 docker-compose.prod.yml 中 nginx 服务的 image 保持一致
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
 
 log()  { echo -e "${GREEN}[+]${NC} $*"; }

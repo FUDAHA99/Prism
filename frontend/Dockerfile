@@ -15,7 +15,7 @@ RUN NODE_ENV=production npm run build
 # ─────────────────────────────────────────────────
 # Stage 2: nginx serve
 # ─────────────────────────────────────────────────
-FROM nginx:alpine AS runner
+FROM nginx:1.29.8-alpine AS runner
 
 # 移除默认配置
 RUN rm /etc/nginx/conf.d/default.conf
