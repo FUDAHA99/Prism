@@ -310,7 +310,7 @@ check_register_switch() {
   fi
 }
 
-# ── 部署后 nginx -t：接到真实 Docker 网络，确认 upstream 主机名都能解析 ─────
+# ── 部署后 nginx -t：按真实网络与挂载复查配置；DNS/服务就绪须用请求确认 ─────
 post_check_nginx() {
   local net
   net=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.NetworkID}} {{end}}' prism-backend | awk '{print $1}') \
@@ -402,7 +402,7 @@ main() {
     die "生产禁止 DB_SYNC=true；请设为 false，并按 docs/database-migrations.md 完成迁移"
   fi
 
-  # ── 部署前 nginx -t：一次性容器 + --add-host 占位，不依赖业务容器，首次部署也能跑 ──
+  # ── 部署前 nginx -t：一次性无网络容器，不依赖业务容器，首次部署也能跑 ──
   log "部署前校验 nginx 配置..."
   bash scripts/check-nginx-conf.sh \
     || die "nginx 配置校验失败（见上方 nginx -t 输出），部署中止。修正 nginx/ 下的配置后重新部署"
@@ -465,13 +465,12 @@ main() {
 
   # ── nginx：部署后再校验一次，然后强制重建 ─────────────────────────
   # 单文件 bind mount：render 用 mv 换了 inode，运行中的容器仍读旧文件，up -d 也不一定重建 nginx；
-  # 重建同时让 upstream 重新解析业务容器的新 IP。部署前的检查已排除配置错误，这一步若失败，
-  # 几乎都是某个业务容器没在运行（host not found in upstream）：此时重建 nginx 只会让它起不来。
+  # 重建是为了应用新配置。upstream 通过 Docker DNS 动态刷新，单独重建业务容器无需重建 nginx。
+  # nginx -t 只校验配置与文件能否加载，不验证运行时 DNS 或业务服务是否就绪。
   log "部署后校验 nginx 配置（真实 Docker 网络）..."
   if ! post_check_nginx; then
-    warn "部署前的检查已通过，所以这里失败多半是上方出现了 host not found in upstream \"xxx\"："
-    warn "  对应的业务容器没在运行，不是配置问题。排查：$COMPOSE ps；$COMPOSE logs <服务>"
-    warn "  线上仍是旧 nginx 容器，可能还指向业务容器的旧 IP（502）。业务容器恢复后执行："
+    warn "请按上方报错检查 nginx 版本、配置及证书/日志挂载；nginx -t 不验证业务服务是否就绪。"
+    warn "  线上仍是旧 nginx 容器，本次生成的配置尚未应用。修好校验问题后执行："
     warn "  $COMPOSE up -d --no-deps --force-recreate nginx"
     die "部署后 nginx -t 失败，未重建 nginx"
   fi

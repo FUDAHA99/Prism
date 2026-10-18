@@ -195,8 +195,8 @@ $COMPOSE up -d --build backend
 # 三端都改了
 $COMPOSE up -d --build backend portal frontend
 
-# 重建了上面任一服务后：nginx 的 upstream 只在启动时解析一次，需重建 nginx 以连上新容器 IP
-$COMPOSE up -d --no-deps --force-recreate nginx
+# 已应用新版 nginx 配置时，上游 IP 会通过 Docker DNS 自动刷新，无需 reload/recreate nginx。
+# 修改 nginx 配置或证书后，仍按第 7 节重新生成、校验并重建 nginx。
 ```
 
 > ⚠️ build/up 漏掉 `--env-file` 时，compose 会因 `JWT_SECRET` 未设置（`docker-compose.prod.yml` 里是 `${JWT_SECRET:?…}`）直接报错退出，不会构建或重建任何容器；补上 `--env-file .env.prod` 重新执行即可。
@@ -462,9 +462,10 @@ bash scripts/setup-ssl.sh admin@example.com
 
 - **不要在服务器上手改** `nginx/` 下的任何文件：`nginx.active.conf` 每次部署都会重新生成；两份受跟踪的配置手改后，HTTP 模式会原样生效且让下次 `git pull` 可能中止。改动一律走仓库提交。
 - **部署时两道 `nginx -t`**：
-  1. 部署前（`scripts/check-nginx-conf.sh`）：一次性 `nginx:alpine` 容器，不接任何网络，upstream 主机名 `backend` / `portal` / `frontend` 用 `--add-host` 指到 127.0.0.1，只检查语法与语义（指令、正则、证书能否加载），不依赖业务容器是否在跑，首次部署也能用。不通过则部署中止，`nginx/nginx.active.conf` 换回部署前的内容，容器一个都不动。
-  2. 部署后：`up -d` 之后，接到 `prism-backend` 所在的真实网络、挂载与 nginx 服务一致再跑一次，通过后 `up -d --no-deps --force-recreate nginx`。这一步失败几乎都是 `host not found in upstream "xxx"`——对应的业务容器没在运行，不是配置问题；此时脚本不重建 nginx（重建了也起不来），线上旧 nginx 可能还指向业务容器的旧 IP（502），修好业务容器后手工执行下面最后一条命令。
-- **每次部署都重建 nginx，80/443 会中断数秒（已接受）**：单文件 bind mount 绑定的是 inode，render 用 `mv` 换了文件后运行中的容器仍读旧内容；upstream 也只在启动时解析一次，业务容器重建换 IP 后必须重建 nginx 才能连上。代价是每次部署都有几秒不可用：旧容器收到 SIGQUIT 后立即停止监听，最多再排空 10 秒，更长的请求（大文件上传、`/uploads/` 下视频的 Range 流）会被切断。要做到零中断，需要改为挂载 `nginx/` 目录、upstream 用 `resolver 127.0.0.11` 加变量形式的 `proxy_pass`、部署时 `nginx -t && nginx -s reload`，目前未做。
+  1. 部署前（`scripts/check-nginx-conf.sh`）：一次性 `nginx:alpine` 容器，不接任何网络；upstream 的 `resolve` 把 DNS 解析推迟到运行时，无需 `--add-host`。只检查语法与语义（指令、正则、证书能否加载），不依赖业务容器是否在跑，首次部署也能用。不通过则部署中止，`nginx/nginx.active.conf` 换回部署前的内容，容器一个都不动。
+  2. 部署后：`up -d` 之后，接到 `prism-backend` 所在的真实网络、挂载与 nginx 服务一致再跑一次，通过后 `up -d --no-deps --force-recreate nginx`。失败时按实际报错检查版本、配置和挂载，脚本保留旧 nginx；两次 `nginx -t` 都不能证明运行时 DNS 或业务就绪，需另做真实请求验收。
+- **业务容器换 IP 自动恢复**：HTTP / HTTPS 配置均使用 Docker 内置 DNS `127.0.0.11`、`valid=5s`、共享 upstream `zone` 和 `server ... resolve`；要求开源 nginx **≥ 1.27.3**。DNS 正常且上游就绪后地址会自动刷新，单独重建 backend / frontend / portal 无需 reload nginx。解析与连接超时均为 3 秒；服务停机和地址刷新期间仍可能出现短暂 502/504，不保证零中断。现有 `proxy_pass` 保持不变，包括 `/admin/` 剥离前缀的语义。
+- **每次部署仍重建 nginx，80/443 会中断数秒（已接受）**：这是为了应用新配置——单文件 bind mount 绑定的是 inode，render 用 `mv` 换了文件后运行中的容器仍读旧内容。旧容器收到 SIGQUIT 后立即停止监听，最多再排空 10 秒，更长的请求（大文件上传、`/uploads/` 下视频的 Range 流）会被切断。上游动态解析已经实现；挂载目录配合平滑 reload 的配置更新流程仍未实现。
 - 手工执行的等价命令：
 
   ```bash
@@ -539,7 +540,7 @@ nginx 挂载的生效配置还没生成（例如手工 `up` 前没跑 render，�
 
 ### 部署中止：「部署后 nginx -t 失败，未重建 nginx」
 
-部署前的语法检查已经通过，所以几乎都是上方输出里有 `host not found in upstream "xxx"`：对应的业务容器没在运行。用 `$COMPOSE ps`、`$COMPOSE logs <服务>` 找原因，修好后执行 `$COMPOSE up -d --no-deps --force-recreate nginx`（第 7 节）。
+按上方输出检查 nginx 版本（须 ≥ 1.27.3）、配置及证书/日志挂载。此时旧 nginx 仍在运行，新配置尚未应用；修好校验问题后执行 `$COMPOSE up -d --no-deps --force-recreate nginx`（第 7 节）。`nginx -t` 不验证业务服务和运行时 DNS；若校验通过但请求持续 502，另查 `$COMPOSE ps`、`$COMPOSE logs <服务>` 及 Docker 网络解析。
 
 ### 管理后台登录 401
 

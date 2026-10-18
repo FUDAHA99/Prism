@@ -1003,6 +1003,56 @@ Phase 3-B 影视门户搜索入口已完成本地验收；明确提交动作的�
   恢复依赖既有容器、named volume 与已存在的 MySQL 库；Redis 加载及 AOF 重建各自有约 30 秒轮询窗口，未证明大数据量适用。
   项目范围之外的配置、`/etc/letsencrypt` / ACME 账户、公开 CA 签发和续签 cron 均未覆盖；本轮仅为本地停写合成数据验收，不代表线上或浏览器验收。
 
+### Nginx 上游容器换 IP 自动恢复 —— 本地完成 ✅（2026-10-18）
+
+- **根因与复现**：第一轮的静态 `upstream server backend:3001` 仅在 nginx 启动 / reload 时解析地址。
+  本轮以 `e874086` 为基线，在独立项目 `prism-nginx-dns-qa-20261018-001` 先运行原 HTTP 配置；backend 从 `172.22.0.5` 换为 `.8`，
+  直连新上游已成功后，代理仍在 **15.098 秒**观察窗口内连续 **20 次 502**，nginx 容器与进程未变，复现原问题。
+- **修复**：HTTP / HTTPS 模板均改为 `resolver 127.0.0.11 valid=5s ipv6=off`、`resolver_timeout 3s`、`proxy_connect_timeout 3s`，
+  三个 upstream 各自使用共享 `zone` 和 `server ... resolve`。现有 `proxy_pass` 全部保留，包括 `/admin/` 剥离前缀、原 URI / 查询参数与登录嵌套规则。
+  该[标准动态解析机制](https://nginx.org/en/docs/http/ngx_http_upstream_module.html#server)要求开源 nginx **≥ 1.27.3**，本地实际版本为 **1.29.8**。
+  同步修正 `deploy.sh` 与部署手册的旧说明：上游换地址无需 reload；应用新配置时，单文件 bind mount 的 inode 问题仍需现有重建流程。
+- **CI 同款本地检查**：真实执行 `render-nginx-conf.sh`、`check-nginx-conf.sh` 与 `check-nginx-mirror.sh`；HTTP / HTTPS 两种模式的
+  `nginx -t` 均在 `--network none`、无 `--add-host` 情况下通过，模板镜像检查和受影响 Bash 脚本语法检查通过。
+  仅在 Windows 测试适配器中转换挂载路径并标注容器归属；没有触发远程 CI。`nginx -t` 只验证配置与证书加载，不再误称它验证 DNS / 服务就绪。
+- **强制换 IP 验收**：两种协议各对 backend / frontend / portal 单独执行一次同容器重启和一次删除重建，共 **12/12** 场景通过。
+  普通 `docker restart` 往往保留 IP，因此重启场景先断开 / 重连该容器网络端点，以无服务的临时 holder 占住旧 IP，再重启同一容器；
+  重建场景删除并重新创建目标上游。逐例断言 old IP ≠ new IP、容器 ID 是否符合操作、Docker DNS 返回新 IP、其余两上游不变。
+  每例 nginx 容器 ID / 启动时间 / restart count、master / 全部 worker PID、实际配置摘要完全一致，**场景中没有 reload / restart / recreate nginx**。
+  仅在场景外切换原配置 → 新 HTTP → 新 HTTPS 时重建 nginx 来应用对应配置。
+- **恢复时间**：从首次观测到新 IP 直连就绪开始计时，结果如下；从开始容器变更到代理恢复最长 **6.891 秒**。
+  每例恢复后观察约 **10 秒**，**14 次连续采样**全部成功，三条实际资源路径的字节摘要匹配；全量复核包括末尾在途响应。
+  未变更上游的全部采样成功，并再次检查后台首页 / 深链接、门户首页 / 中文文章、公开 API 与真实静态资源。
+
+  | 上游 | HTTP：重启 / 重建后恢复 | HTTPS：重启 / 重建后恢复 |
+  |---|---|---|
+  | backend | 1096 / 3614 ms | 668 / 4049 ms |
+  | frontend | 4788 / 5538 ms | 4817 / 4784 ms |
+  | portal | 4328 / 4628 ms | 4738 / 4287 ms |
+
+- **HTTPS 回归**：本轮新建本地 CA / SAN 证书，原配置正反向检查 **8/8**、真实严格 HTTPS 链路 **22/22** 通过，
+  包括 TLS 1.2 / 1.3、链与主机名验证、拒绝未知 CA / 错误主机名 / TLS 1.0 / 1.1、301 路径及编码查询参数、响应安全头、
+  15 个 JS / CSS 与两个上传文件摘要。严格 HTTPS 登录、管理员权限、中文 / emoji 内容、媒体关联、搜索计数 **4**、续播 **123 / 456 秒**亦通过。
+- **真实浏览器回归**：Chromium **149.0.7827.55**、桌面及 **390px** 模拟窄屏，沿用上一轮 **6/6** 关键流程并逐张查看 **10 张截图**。
+  管理员登录 / 榜单、门户原生搜索、编码关键词新页跳转、editor 权限、后台深链接刷新 / 静态资源、门户影视 / 关于 / Markdown 与窄屏操作均通过。
+  新测试关键词计数 **0 → 1**；仅一次匿名 POST、无 Cookie / Authorization，直接 GET / 刷新不增加计数，editor 榜单 GET **0 次**。
+  页面错误、控制台错误 / 警告、HTTP 错误、外部请求均 **0**；另有 **64 个**带 `_rsc` 的 `ERR_ABORTED` 导航预取取消，逐项分类，未将它们写成零请求失败。
+  浏览器仅对本轮叶证书设置进程级 SPKI 例外并映射测试主机名；未启用全局忽略证书错误，严格 CA / 主机名正反向校验由上述 Node 客户端完成。
+  390px 系统信息卡部分字段仍逐字换行，保留原 UI、不把关键流程通过等同完整移动端视觉验收；未覆盖其他浏览器引擎、真机、完整 HSTS 行为。
+- **测试隔离**：沿用已缓存三端实际应用镜像，只使用本轮随机配置、合成业务数据与测试证书；所有上游不发布端口，唯一入口绑定 `127.0.0.1:80/443`。
+  本机 Docker 的 internal-only 网络没有生成有效端口映射，因此改用本轮独立 bridge，记录适配前后信息；未修改其他项目或宿主 DNS / hosts / 系统信任。
+- **清理**：全部场景临时 holder / 探针均已删除，最后移除 **6 个容器、4 个 named volume、1 个 QA 网络**，无新增匿名卷遗留；
+  **80 / 443** 均返回 `ECONNREFUSED`。原有 **7 个容器**的 ID / 名称 / 运行状态及 **19 个旧卷、7 个旧网络**保留。
+  本轮 Playwright / CLI 浏览器进程剩余 **0**；未运行全局 prune。保留证据与合成配置 / 证书，NTFS 权限限当前用户、SYSTEM、Administrators，未加入 git。
+- **证据**：根目录 `F:/METU/.cache/prism-nginx-dns-qa-20261018-001/`；原问题为 `baseline-static-backend-recreate.json`，
+  12 个逐例文件为 `{http,https}-{backend,frontend,portal}-{restart,recreate}.json`，汇总为 `http-dns-result.json` / `https-dns-result.json`，
+  独立完整采样复核为 `dns-evidence-review.json`；配置门禁为 `config-check/result.json`，HTTPS 为 `tls-result.json` / `https-business-result.json`。
+  浏览器为 `browser-result.json`，截图及 fresh DOM 在 `output/playwright/`（本轮截图目录 `browser-runs/ef94efbc-241e-475c-81c8-b4bad3d98f9a/`）；
+  清理为 `cleanup-result.json` / `browser-cleanup-result.json`，最终索引为 `completion-summary.json`，同目录保留可复现 QA 脚本。
+- **边界**：地址变更期间实际出现短暂 502，自动恢复不代表零停机；`valid=5s` 是 DNS 缓存有效期，不是固定恢复 SLA。
+  仅验证本地单副本 IPv4、少量请求与采样窗口，不覆盖 DNS 服务自身故障、IPv6、多副本滚动更新、高并发 / 长连接 / 长上传或持续生产运行。
+  未执行 `git push`、任何远程推送、生产部署、线上服务器或 DNS 修改；未验收公开 CA / ACME 与续签、完整部署脚本及配置更新的平滑 reload。
+
 ### 批次 1-C / 1-D / 1-E —— 交叉核查后的修订方案（2026-10-08）
 
 第四节的 1-C/1-D/1-E 原文写于 6 周前，动手前用 5 个领域代理 + 1 个交叉核查代理逐条对照**当前代码**
