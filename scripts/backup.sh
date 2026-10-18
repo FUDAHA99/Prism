@@ -54,6 +54,7 @@ docker exec prism-mysql \
   --user="$DB_USER" \
   --password="$DB_PASS" \
   --single-transaction \
+  --no-tablespaces \
   --routines \
   --triggers \
   --hex-blob \

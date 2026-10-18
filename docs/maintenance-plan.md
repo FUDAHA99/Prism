@@ -928,6 +928,43 @@ Phase 3-B 影视门户搜索入口已完成本地验收；明确提交动作的�
   浏览器证据为 `browser-runs/fab8fa5d-28f7-4736-86f3-25ea99b1c3f0/result.json`，清理为 `cleanup-result.json`，最终汇总为 `completion-summary.json`。
   本轮仅本地验收，未推送或部署到服务器、未执行完整 `deploy.sh`；不覆盖生产备份恢复、TLS 或真实服务器验收。
 
+### TLS 与备份恢复验收 —— 本地完成 ✅（2026-10-18）
+
+- **范围与隔离**：以 `e3bb3bc` 为基线，在本地项目 `prism-tls-restore-qa-20261018-001` 的六服务、独立数据卷及合成数据上验收。
+  运行网络设为 `internal`；使用本轮随机配置和本地 CA，不安装系统信任、不修改 DNS / hosts。
+  未执行 `git push`、任何远程推送、正式 / 生产部署或线上服务器操作；未执行完整 `deploy.sh` / `setup-ssl.sh`。
+- **TLS 配置**：复用原 `render-nginx-conf.sh` / `check-nginx-conf.sh`，Windows 路径适配仅用于本地 Docker 挂载。
+  **8/8 项**通过：本地 CA 签发 SAN 为 `cms-tls.test` 的证书、无 fullchain 时明确回落 HTTP、非法域名保留原生效配置，
+  以及 HTTPS 配置拒绝缺私钥、缺 fullchain、畸形证书、证书与私钥不匹配、缺生效配置。
+- **实际 HTTPS 链路**：在隔离 Docker 网络内使用 Node **22.23.3** 客户端，显式传入测试 CA 且保持严格证书校验，**22/22 项**通过。
+  TLS **1.2 / 1.3** 握手成功、证书链 / SAN / 指纹匹配；未知 CA 与错误主机名被客户端拒绝，TLS **1.0 / 1.1** 被服务端以协议版本告警拒绝。
+  HTTP **301** 保留路径和编码查询参数，跟随到 HTTPS 后 200；`/admin` 仍返回相对 `/admin/` 跳转。
+  门户、文章 / 影视详情、后台、图标和公开 API 可用，受保护 API 为 401，私有缓存 GET / POST 及图片优化入口均为 404。
+  **15 个 JS / CSS 资源**和 **2 个上传文件**经 HTTPS 读取成功，上传下载字节摘要匹配；响应安全头已核对。
+  portal 按本轮 HTTPS origin 重新构建，实际客户端产物包含 `https://cms-tls.test`；这不是浏览器交互或混合内容验收。
+- **备份脚本最小修复**：`scripts/backup.sh` 仅增加 `--no-tablespaces`，保持普通库级应用账号，不增加权限。
+  原命令实测输出缺少 `PROCESS` 权限的 tablespaces Error，但仍 **exit 0** 并导出 29 张表，不能表述为导出中止；修复后该错误消失。
+  原脚本通过 QA 包装器仅映射固定 MySQL / uploads 资源名、Windows bind 路径，并用已缓存 `nginx:alpine` 提供 `tar`（此镜像替换属于测试适配）；
+  除已验证的一行源码修复外，备份脚本正文与 mysqldump / gzip / tar 流程保持原样。
+- **真实备份、清空与恢复**：停止 nginx / backend / portal 后记录快照，包含 **29 张表、30 行数据、11 张非空表、3 条迁移记录、2 个上传文件**。
+  实际生成 SQL gzip 和 uploads tar.gz，检查压缩完整性及归档内容，截断 gzip 的负向检查被拒绝；仅对已核验的 QA 库及 uploads 卷执行清空，
+  中间快照证明 **0 张表、0 个文件**，随后从这两份备份恢复。恢复前后所有表的行数和规范排序全行 SHA-256、迁移记录、
+  uploads 路径 / 大小 / 字节 SHA-256 / uid **1001** / gid **65533** / mode **0600** 全部一致，routine / trigger 清单也一致。
+- **结构核对说明**：恢复后 29 张表的原始 `SHOW CREATE TABLE` 摘要不同，实际差异仅为 **192 个字符列**显式补写冗余的 `CHARACTER SET utf8mb4`。
+  独立复核确认 `utf8mb4_unicode_ci` 对应 `utf8mb4`，192 个字符列的实际字符集和排序规则均符合该组合；备份 DDL 与恢复前快照、实时 DDL 与恢复后快照分别逐表匹配。
+  仅把精确短语 ` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci` 归一化为 ` COLLATE utf8mb4_unicode_ci` 后，**29/29 表其余 DDL 逐字一致**；
+  同时保留原始摘要不等与归一化相等两项结果，不把原始文本误报为完全一致。
+- **恢复后业务检查**：全量快照比较在重新启动及登录前完成；随后 migration 状态检查通过，经严格 HTTPS 重新登录并确认管理员权限，
+  中文 / emoji 文章和影视、媒体关联、搜索榜单 **4 次**、续播进度 **123 / 456 秒**均保留；两个媒体文件下载摘要一致，门户文章返回 200。
+- **清理**：本批 **6 个容器、4 个卷、1 个网络及全部临时辅助容器**已清理，回环 HTTP **57470** / HTTPS **57471** 均为 `ECONNREFUSED`。
+  此前 7 个非本项目容器的 ID / 名称 / 运行状态保持不变；保留本轮 portal QA 镜像、验收证据及合成备份文件。
+- **证据**：根目录 `F:/METU/.cache/prism-tls-restore-qa-20261018-001/`；TLS 为 `tls-result.json`，普通账号修复前后为 `backup-account-{red,green}-result.json`，
+  备份完整性为 `backup-artifacts.json`，停写 / 清空 / 恢复快照为 `snapshot-{before,empty,after}.json`，全量比较为 `restore-compare-result.json`，
+  独立结构复核为 `backup-review-schema-result.json`，恢复后业务检查为 `post-restore-result.json`，清理为 `cleanup-result.json`；最终结果汇总到 `completion-summary.json`。
+- **仍未验收的边界**：公开 CA / ACME 签发、真实 DNS / 防火墙、证书续签与 cron、完整安装 / 部署脚本及失败回滚、浏览器 HSTS 执行和混合内容。
+  当前备份仅覆盖 **MySQL 与 uploads**，不包含 Redis、环境配置或证书；本轮是小量合成数据停写恢复，不代表大库在线并发备份、RTO 达标或跨机器故障灾备。
+  同分钟重复备份覆盖、保留期清理、复杂 `.env` 引号 / 含 `=` 密码解析仍未做专项验收；静态发现的限制没有在本轮宣称已修复。
+
 ### 批次 1-C / 1-D / 1-E —— 交叉核查后的修订方案（2026-10-08）
 
 第四节的 1-C/1-D/1-E 原文写于 6 周前，动手前用 5 个领域代理 + 1 个交叉核查代理逐条对照**当前代码**
