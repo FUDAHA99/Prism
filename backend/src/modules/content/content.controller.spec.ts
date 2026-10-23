@@ -849,4 +849,131 @@ describe('内容模块 HTTP', () => {
       expect(await rowBySlug('plain-write')).toBeNull();
     });
   });
+
+  describe('内容写操作的所有权与生命周期', () => {
+    const seed = (author: 'editor' | 'admin', extra: Partial<Content> = {}) => {
+      const slug = `lifecycle-${randomUUID()}`;
+      return contents.save({ title: slug, slug, body: '原正文', authorId: ids[author], ...extra });
+    };
+    const auditRows = (id: string) => ds.getRepository(AuditLog).findBy({ resourceType: 'content', resourceId: id });
+
+    it.each<Who>(['editor', 'admin'])('%s 能编辑 editor 的内容，保留作者与阅读数', async (who) => {
+      const row = await seed('editor', { viewCount: 9 });
+      await patch(`/contents/${row.id}`, who, { title: '新标题', body: '新正文' }).expect(200);
+      expect(await contents.findOneByOrFail({ id: row.id })).toMatchObject({
+        title: '新标题', body: '新正文', authorId: ids.editor, viewCount: 9, status: ContentStatus.DRAFT,
+      });
+      expect(await auditRows(row.id)).toEqual([
+        expect.objectContaining({
+          action: 'CONTENT_UPDATE', userId: ids[who as 'editor' | 'admin'],
+          newValues: { changedFields: ['title', 'body'] },
+        }),
+      ]);
+      expect(portalCache.invalidate.mock.calls).toEqual([[['portal:contents']]]);
+    });
+
+    it('非作者 editor 不能编辑或删除他人内容：403，数据库、审计与缓存都不变', async () => {
+      const row = await seed('admin');
+      const before = await contents.findOneByOrFail({ id: row.id });
+      await patch(`/contents/${row.id}`, 'editor', { title: '越权修改', status: 'published' }).expect(403);
+      await as(http().delete(`/contents/${row.id}`), 'editor').expect(403);
+      expect(await contents.findOneByOrFail({ id: row.id })).toEqual(before);
+      expect(await auditRows(row.id)).toEqual([]);
+      expect(portalCache.invalidate).not.toHaveBeenCalled();
+    });
+
+    it.each<Who>(['editor', 'admin'])('%s 删除 editor 的已发布内容后，所有读写入口都不可再访问', async (who) => {
+      const row = await seed('editor', {
+        status: ContentStatus.PUBLISHED, isPublished: true, publishedAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+      await as(http().delete(`/contents/${row.id}`), who).expect(204);
+      expect(await contents.findOneBy({ id: row.id })).toBeNull();
+      const deleted = await contents.findOneOrFail({ where: { id: row.id }, withDeleted: true });
+      expect(deleted.deletedAt).toBeInstanceOf(Date);
+      expect(deleted).toMatchObject({ title: row.title, body: row.body, authorId: ids.editor });
+      await get(`/contents/${row.id}`, 'admin').expect(404);
+      await get(`/contents/slug/${row.slug}`, 'anonymous').expect(404);
+      for (const viewer of ['anonymous', 'admin'] as const) {
+        const res = await get(`/contents?search=${row.title}`, viewer).expect(200);
+        expect(res.body.data).toEqual([]);
+        expect(res.body.meta.total).toBe(0);
+      }
+      await patch(`/contents/${row.id}`, 'admin', { title: '恢复' }).expect(404);
+      await post(`/contents/${row.id}/publish`, 'admin', {}).expect(404);
+      await post(`/contents/${row.id}/unpublish`, 'admin', {}).expect(404);
+      await as(http().delete(`/contents/${row.id}`), 'admin').expect(404);
+      expect(await auditRows(row.id)).toEqual([
+        expect.objectContaining({ action: 'CONTENT_DELETE', userId: ids[who as 'editor' | 'admin'] }),
+      ]);
+      expect(portalCache.invalidate.mock.calls).toEqual([[['portal:contents']]]);
+    });
+
+    it.each<Who>(['editor', 'admin'])('%s 能发布与撤回他人的内容，撤回后门户不可见、后台仍可编辑', async (who) => {
+      const row = await seed(who === 'editor' ? 'admin' : 'editor');
+      setNow('2026-10-09T03:04:05.678Z');
+      await post(`/contents/${row.id}/publish`, who, {}).expect(201);
+      const published = await contents.findOneByOrFail({ id: row.id });
+      expect(published).toMatchObject({ status: ContentStatus.PUBLISHED, isPublished: true });
+      expect(published.publishedAt!.toISOString()).toBe('2026-10-09T03:04:05.000Z');
+      await get(`/contents/slug/${row.slug}`, 'anonymous').expect(200);
+
+      await post(`/contents/${row.id}/unpublish`, who, {}).expect(201);
+      expect(await contents.findOneByOrFail({ id: row.id })).toMatchObject({
+        status: ContentStatus.DRAFT, isPublished: false, publishedAt: published.publishedAt, viewCount: 1,
+      });
+      await get(`/contents/slug/${row.slug}`, 'anonymous').expect(404);
+      expect((await get(`/contents?search=${row.title}`, 'anonymous').expect(200)).body.data).toEqual([]);
+      expect((await get(`/contents/${row.id}`, 'admin').expect(200)).body.status).toBe('draft');
+      const logs = await auditRows(row.id);
+      expect(logs.map((log) => log.action).sort()).toEqual(['CONTENT_PUBLISH', 'CONTENT_UNPUBLISH']);
+      expect(logs.every((log) => log.userId === ids[who as 'editor' | 'admin'])).toBe(true);
+      expect(portalCache.invalidate.mock.calls).toEqual(Array.from({ length: 2 }, () => [['portal:contents']]));
+    });
+
+    it.each<[Who, number]>([['anonymous', 401], ['plain', 403]])(
+      '%s 不能发布、撤回或删除内容，返回 %s 且没有写入副作用',
+      async (who, status) => {
+        const row = await seed('editor');
+        const before = await contents.findOneByOrFail({ id: row.id });
+        await post(`/contents/${row.id}/publish`, who, {}).expect(status);
+        await post(`/contents/${row.id}/unpublish`, who, {}).expect(status);
+        await as(http().delete(`/contents/${row.id}`), who).expect(status);
+        expect(await contents.findOneByOrFail({ id: row.id })).toEqual(before);
+        expect(await auditRows(row.id)).toEqual([]);
+        expect(portalCache.invalidate).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['publish', 'unpublish'] as const)('直调 service.%s：无后台角色仍然拒绝，内容和副作用不变', async (action) => {
+      const row = await seed('editor', {
+        status: ContentStatus.PUBLISHED, isPublished: true, publishedAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+      const before = await contents.findOneByOrFail({ id: row.id });
+      await expect(service[action](row.id, ids.plain, [])).rejects.toMatchObject({ status: 403 });
+      expect(await contents.findOneByOrFail({ id: row.id })).toEqual(before);
+      expect(await auditRows(row.id)).toEqual([]);
+      expect(portalCache.invalidate).not.toHaveBeenCalled();
+    });
+
+    it('不存在的内容：读、改、发布、撤回、删除均为 404，且没有写入副作用', async () => {
+      const id = randomUUID();
+      await get(`/contents/${id}`, 'admin').expect(404);
+      await patch(`/contents/${id}`, 'admin', { body: '不存在' }).expect(404);
+      await post(`/contents/${id}/publish`, 'admin', {}).expect(404);
+      await post(`/contents/${id}/unpublish`, 'admin', {}).expect(404);
+      await as(http().delete(`/contents/${id}`), 'admin').expect(404);
+      expect(await auditRows(id)).toEqual([]);
+      expect(portalCache.invalidate).not.toHaveBeenCalled();
+    });
+
+    it('编辑时显式传 null 清空分类和可选元数据，不影响必填正文与作者', async () => {
+      const row = await seed('editor', {
+        categoryId, featuredImageUrl: '/uploads/cover.png', excerpt: '摘要', metaTitle: 'SEO', metaDescription: '描述',
+      });
+      const cleared = { categoryId: null, featuredImageUrl: null, excerpt: null, metaTitle: null, metaDescription: null };
+      const res = await patch(`/contents/${row.id}`, 'editor', cleared).expect(200);
+      expect(res.body).toMatchObject({ ...cleared, category: null, body: row.body, authorId: ids.editor });
+      expect(await contents.findOneByOrFail({ id: row.id })).toMatchObject(cleared);
+    });
+  });
 });
