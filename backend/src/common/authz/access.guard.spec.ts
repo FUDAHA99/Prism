@@ -1,7 +1,7 @@
 import 'reflect-metadata';
 import { ForbiddenException, Logger } from '@nestjs/common';
 import { ExecutionContextHost } from '@nestjs/core/helpers/execution-context-host';
-import { Access } from './access.decorator';
+import { ACCESS_LEVEL_KEY, Access } from './access.decorator';
 import { isAdmin, isStaff } from './viewer';
 import { createAccessProbe } from '../testing/access-probe';
 
@@ -83,6 +83,23 @@ describe('AccessGuard', () => {
     const overridden = await probe.decide(ClassLevelAdmin, ClassLevelAdmin.prototype.overridden);
     expect(overridden).toMatchObject({ decision: 'allow', strategyRuns: 0, userWritten: false });
     expect(loggerError).not.toHaveBeenCalled();
+  });
+
+  it('方法上的未知访问级别不继承类级 public：按 admin 拒绝，并且同一 handler 只记一次错误', async () => {
+    @Access('public')
+    class MisconfiguredRoutes {
+      route() {}
+    }
+    // 模拟动态元数据写错；Access(...) 自身会在声明期拒绝未知值。
+    Reflect.defineMetadata(ACCESS_LEVEL_KEY, 'publci', MisconfiguredRoutes.prototype.route);
+    const editor = probe.bearer({ id: 'misconfigured-editor', roles: ['editor'] });
+    const admin = probe.bearer({ id: 'misconfigured-admin', roles: ['admin'] });
+
+    expect((await probe.decide(MisconfiguredRoutes, MisconfiguredRoutes.prototype.route)).decision).toBe(401);
+    expect((await probe.decide(MisconfiguredRoutes, MisconfiguredRoutes.prototype.route, editor)).decision).toBe(403);
+    expect((await probe.decide(MisconfiguredRoutes, MisconfiguredRoutes.prototype.route, admin)).decision).toBe('allow');
+    expect(loggerError).toHaveBeenCalledTimes(1);
+    expect(String(loggerError.mock.calls[0][0])).toContain('声明了未知的访问级别 "publci"');
   });
 
   it('optional 没带凭据：req.user 显式置为 undefined（即使之前被写过），不跑 passport', async () => {

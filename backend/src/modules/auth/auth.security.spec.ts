@@ -930,6 +930,24 @@ describe('认证核心安全行为', () => {
       const { tokens } = await login(u);
       await h.users.softDelete(u.id);
       expect((await me(tokens.accessToken)).status).toBe(401);
+      expect((await refresh(tokens.refreshToken)).status).toBe(401);
+    });
+
+    it('降权后 refresh 只签发库里的当前角色，旧缓存中的 admin 不会续进新 token', async () => {
+      const u = await freshUser();
+      const roleId = await adminRoleId();
+      await h.userService.assignRoles(u.id, [roleId], h.adminId);
+      const { tokens } = await login(u);
+      expect(accessJwt.verify(tokens.accessToken).roles).toEqual(['admin']);
+      const stale = await h.userService.findOne(u.id);
+      await h.userService.removeRoles(u.id, [roleId], h.adminId);
+      await h.cache.set(userCacheKey(u.id), stale);
+
+      const rotated = await refresh(tokens.refreshToken);
+      expect(rotated.status).toBe(200);
+      expect(accessJwt.verify(rotated.body.accessToken).roles).toEqual([]);
+      expect((await probeAdmin(rotated.body.accessToken)).status).toBe(403);
+      expect((await me(rotated.body.accessToken)).body).toEqual({ id: u.id });
     });
 
     it('每个已认证请求只发 1 条 SQL（取用户、角色、权限的一条联表查询），不读写 user:<id> 缓存', async () => {
