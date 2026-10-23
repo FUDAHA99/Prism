@@ -77,21 +77,30 @@ prism-cms/
 切换 Node 主版本后，请在三端各执行一次 `npm ci --registry=https://registry.npmjs.org`，重新安装原生模块。
 
 ```bash
-# 1. 启动数据库
+# 以下命令均从仓库根目录执行；后端开发环境使用内存缓存，不依赖 Redis
+# 1. 启动本地开发依赖
 docker compose up -d
 
-# 2. 配置后端环境变量
-cd backend && cp .env.example .env
+# 2. 首次配置后端（已有 .env 时保留原配置，不要覆盖）
+cp backend/.env.example backend/.env
+# 按 docs/dev-guide.md 确认 APP_PORT=3001 与本地数据库配置
 
-# 3. 启动三端服务（分三个终端；装包一律带官方源参数，原因见下文「依赖安装与安全审计」）
-cd backend  && npm install --registry=https://registry.npmjs.org && npm run start:dev
-cd frontend && npm install --registry=https://registry.npmjs.org && npm run dev
-cd portal   && npm install --registry=https://registry.npmjs.org && npm run dev
+# 3. 按各自锁文件安装依赖
+npm --prefix backend ci --registry=https://registry.npmjs.org
+npm --prefix frontend ci --registry=https://registry.npmjs.org
+npm --prefix portal ci --registry=https://registry.npmjs.org
 
-# 4. 初始化账户和演示数据
+# 4. 分三个终端启动，每个终端仍从仓库根目录执行对应一行
+npm --prefix backend run start:dev
+npm --prefix frontend run dev
+npm --prefix portal run dev
+
+# 5. 等后端启动、开发库建表后，在第四个终端初始化本地演示数据
 node backend/scripts/seed-admin.js   # admin@cms.com / Admin123!
 node backend/scripts/seed-demo.js    # 演示影视/小说/漫画内容
 ```
+
+`seed-admin.js` 会重置已有默认管理员的密码并启用账号，只在需要初始化的本地开发库执行。数据库与环境变量详情见[开发指南](docs/dev-guide.md)。
 
 | 服务 | 地址 |
 |------|------|
@@ -134,6 +143,34 @@ bash scripts/deploy.sh
 - bcrypt 密码哈希（salt rounds = 12）
 - NestJS ValidationPipe（whitelist 模式，拒绝多余字段）
 - CORS 白名单 + Rate Limit 限流
+
+---
+
+## 本地测试
+
+使用 Node.js 22.x，完成上述依赖安装后，从仓库根目录执行；这些测试不需要启动开发数据库或修改 `.env`：
+
+```bash
+npm --prefix backend test -- --runInBand
+npm --prefix frontend test -- --run
+
+# 门户首次运行前安装 Chromium（在 portal 目录执行；Linux CI 加 --with-deps）
+cd portal
+npx playwright install chromium
+npm test
+```
+
+后端 Jest 同时运行单元测试和 HTTP/SQLite 集成测试；`--runInBand` 避免并行进程争抢本地资源。管理端显式 `--run`，避免进入 Vitest 监听模式。备份校验测试还需 Bash、GNU tar/coreutils/gzip；Windows 使用 Git for Windows 自带的 Bash。
+
+门户测试会在仓库外临时副本启动 Next 和本地 API 夹具，运行 Chromium，详情与产物位置见[开发指南的门户回归说明](docs/dev-guide.md#14-门户回归测试)。它不是连接真实后端的端到端验收。
+
+定向验证示例（仓库根目录）：
+
+```bash
+npm --prefix backend test -- --runInBand --runTestsByPath src/modules/content/content.controller.spec.ts
+```
+
+`test:e2e` 当前指向不存在的配置，请使用上面的 Jest 入口；`test:cov` 另带全局 80% 门槛，不能用普通测试通过推断覆盖率达标。测试分层与 CI 对应关系见[验证架构](docs/testing.md)，本次实测结果与待办见[测试记录](docs/test-notes.md)。
 
 ---
 
@@ -199,6 +236,8 @@ CI 中由 `.github/workflows/audit.yml` 执行：改动 `package.json`、`packag
 | [使用说明](docs/user-guide.md) | 管理员操作手册 |
 | [开发指南](docs/dev-guide.md) | 开发规范与贡献指南 |
 | [测试报告](docs/test-report.md) | 功能测试报告 |
+| [验证架构](docs/testing.md) | 测试分层、隔离边界与 CI 对应关系 |
+| [测试记录](docs/test-notes.md) | 2026-10-23 测试补充、验证结果与已知限制 |
 
 ---
 
