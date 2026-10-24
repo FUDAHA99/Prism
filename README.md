@@ -31,7 +31,7 @@
 | TypeORM | ORM，MySQL 8 |
 | Passport JWT | 认证（Access + Refresh Token） |
 | class-validator | DTO 校验 |
-| Redis | 缓存 / Token 黑名单 |
+| Redis | 缓存 / 登录限流（Token 撤销状态持久化到数据库） |
 
 ### 管理后台（`frontend/`）
 | 技术 | 说明 |
@@ -96,11 +96,11 @@ npm --prefix frontend run dev
 npm --prefix portal run dev
 
 # 5. 等后端启动、开发库建表后，在第四个终端初始化本地演示数据
-node backend/scripts/seed-admin.js   # admin@cms.com / Admin123!
+node backend/scripts/seed-admin.js   # 先设置 ADMIN_INITIAL_PASSWORD；账号 admin@cms.com
 node backend/scripts/seed-demo.js    # 演示影视/小说/漫画内容
 ```
 
-`seed-admin.js` 会重置已有默认管理员的密码并启用账号，只在需要初始化的本地开发库执行。数据库与环境变量详情见[开发指南](docs/dev-guide.md)。
+执行 `seed-admin.js` 前须显式设置 `ADMIN_INITIAL_PASSWORD`；脚本保留已有账号的密码、启用状态和角色。数据库与环境变量详情见[开发指南](docs/dev-guide.md)。
 
 | 服务 | 地址 |
 |------|------|
@@ -120,7 +120,7 @@ cp .env.prod.example .env.prod   # 编辑填入域名、密码、JWT 密钥
 bash scripts/deploy.sh
 ```
 
-> ⚠️ **唯一的生产部署入口是 `scripts/deploy.sh`**，它固定使用 `docker-compose.prod.yml` + `.env.prod`；GitHub Actions 自动部署（`.github/workflows/deploy.yml`）`git pull` 后调用的也是这一份脚本。
+> ⚠️ **唯一的生产部署入口是 `scripts/deploy.sh`**，它固定使用 `docker-compose.prod.yml` + `.env.prod`；GitHub Actions 自动部署（`.github/workflows/deploy.yml`）校验并快进到本次检查通过的精确提交 SHA 后，调用的也是这一份脚本。
 > - 根目录的 `docker-compose.yml` 只用于本地开发：它把 MySQL(3306) / Redis(6379) / Adminer(8080) 直接发布到宿主机，且使用弱口令，**切勿在服务器上运行**。
 > - 手动执行 compose 命令时必须带 `--env-file .env.prod`。Compose 只会自动读取 `.env`，漏掉这个参数时 compose 会因 `JWT_SECRET` / `JWT_REFRESH_SECRET` 未设置直接报错退出，不会动任何容器。
 > - 已有部署升级到 1-F 版本前，先用 `openssl rand -hex 32` 轮换两把 JWT 密钥，部署后所有人需重新登录一次，见[部署指南 5.3](docs/deploy.md)。
@@ -132,7 +132,7 @@ bash scripts/deploy.sh
 已有数据库升级本版本前，先按[数据库迁移手册](docs/database-migrations.md)备份、停写并接入基线。
 生产禁止 `DB_SYNC=true`；部署与启动都会检查 migration 状态，例行部署不自动修改存量库结构。
 
-**管理员账户**：`admin@cms.com` / `Admin123!`（首次登录请立即改密，登录框填邮箱）
+**管理员账户**：`admin@cms.com`，密码由 `ADMIN_INITIAL_PASSWORD` 提供（登录框填邮箱）。
 
 ---
 

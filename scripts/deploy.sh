@@ -8,9 +8,10 @@
 #
 # 用法（可在任意目录执行）：
 #   bash scripts/deploy.sh               拉取最新代码并部署（手工部署用这个）
-#   bash scripts/deploy.sh --skip-pull   不拉代码，直接部署当前工作区：CI 先自己 git pull 再这样调用；
+#   bash scripts/deploy.sh --skip-pull   不拉代码，直接部署当前工作区：CI 先获取并校验 github.sha 再这样调用；
 #                                        本脚本被 git pull 更新后也会带这个参数重新执行新版
 # 环境变量：
+#   PRISM_DEPLOY_SHA          CI 校验过的 40 位提交 SHA；设置时必须 --skip-pull，部署前后校验 HEAD
 #   PRISM_NGINX_CONF_BACKUP   仅 --skip-pull 时读取：调用方（CI 内联脚本、docs/deploy.md 5.1 的手工命令、
 #                             本脚本 re-exec 前的自己）做过 nginx/nginx.conf 一次性迁移时传入备份路径，
 #                             nginx 在新 compose 上重建成功之前部署失败就把它拷回（见 on_exit）
@@ -20,10 +21,10 @@
 #   → 生成 nginx/nginx.active.conf
 #   → 部署前 nginx -t（一次性容器；失败则中止，生效配置换回部署前的内容，容器都不动）
 #   → 首次部署：启动 MySQL 并执行 migration；已有库：只读检查 migration，未就绪就中止
-#   → up -d（不再构建）→ 等 backend → 例行部署：补齐系统角色（seed-admin.js --roles-only：不改密码、不分配角色，失败只警告），
-#     只读检查公开注册开关（enable_register 是 'true' 时提醒关闭方法，从不修改）
+#   → bootstrap：空库用显式初始密码建管理员；非空库只补角色并检查可用管理员
+#   → up -d（不再构建）→ 等 backend → 例行部署只读检查公开注册开关（从不修改）
 #   → 部署后 nginx -t（真实网络）→ 重建 nginx（80/443 中断数秒）
-#   → 首次部署：建管理员 + 备份 crontab → 清理旧镜像
+#   → 幂等配置要求停写的备份 crontab → 清理旧镜像
 # =================================================================
 
 set -euo pipefail
@@ -324,6 +325,13 @@ post_check_nginx() {
 }
 
 main() {
+  # FD 9 is inherited by CI and re-exec; reuse only the descriptor for this exact lock.
+  command -v flock &>/dev/null || die "flock is required for deployment serialization"
+  mkdir -p "$PROJECT_DIR/backup"
+  if [[ ! /proc/$$/fd/9 -ef "$PROJECT_DIR/backup/.operations.lock" ]]; then
+    exec 9>"$PROJECT_DIR/backup/.operations.lock"
+  fi
+  flock -n 9 || die "Another deployment or backup is running"
   trap on_exit EXIT
   # 被信号终止时带上约定退出码再走 on_exit：否则 EXIT trap 里的 $? 是上一条命令的 0，日志会误报「退出码 0」
   trap 'exit 129' HUP
@@ -367,6 +375,13 @@ main() {
     fi
   else
     pull_code
+  fi
+
+  if [ -n "${PRISM_DEPLOY_SHA:-}" ]; then
+    $skip_pull || die "PRISM_DEPLOY_SHA requires --skip-pull"
+    [[ "$PRISM_DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]] || die "Invalid deployment SHA"
+    [ "$(git rev-parse HEAD)" = "$PRISM_DEPLOY_SHA" ] || die "HEAD differs from the verified SHA"
+    [ -z "$(git status --porcelain)" ] || die "Deployment worktree must be clean"
   fi
 
   # ── JWT 密钥预检：不合格就在动任何容器、任何 nginx 配置之前中止 ──────────
@@ -422,6 +437,12 @@ main() {
   $COMPOSE run --rm --no-deps backend npm run migration:check \
     || die "数据库 migration 未就绪，未启动新版业务服务；请按 docs/database-migrations.md 处理"
 
+  # 独立检查管理员初始化，失败重跑不依赖数据卷存在与否。
+  # 空 users 表才创建管理员；非空库只补角色，不自动认领任何已有账号。
+  log "检查管理员初始化状态..."
+  $COMPOSE run --rm --no-deps backend node scripts/seed-admin.js --bootstrap \
+    || die "管理员初始化未完成；请检查 ADMIN_INITIAL_PASSWORD 或人工确认已有账号的 admin 角色"
+
   # ── 启动 ──────────────────────────────────────────────────────
   # 不带 --build：镜像上面已经构建并校验过，up 直接用它们（compose 只在镜像缺失时才会构建）
   log "启动服务..."
@@ -445,20 +466,7 @@ main() {
     sleep 3
   done
 
-  # ── 例行部署：补齐系统角色（幂等，不改任何密码，不分配任何角色）──────────
-  # 访问矩阵要求管理员带 admin、编辑带 editor；早于本机制的库里可能没有 editor、没有 isSystem 标记，
-  # 甚至没人持有 admin（升级后整个后台 403）。--roles-only 只建 / 标记这两个系统角色，不建账号、
-  # 不改密码与启用状态，也从不分配角色：没人持有 admin 时它只打印警告和 docs/deploy.md 5.1 的手工 SQL。
-  # 不自动分配给 admin@cms.com —— 注册接口公开，这个邮箱可能是任何人注册的，每次部署都跑的步骤不能替运维认人。
-  # 首次部署由下面的完整 seed 负责。失败不中止部署：容器已经换成新版本，这里只提示手工补救。
   if ! $first_deploy; then
-    log "确保系统角色 admin / editor（seed-admin.js --roles-only：不改任何密码，不分配任何角色）..."
-    if ! $COMPOSE exec -T backend node scripts/seed-admin.js --roles-only; then
-      warn "补齐系统角色失败（不影响本次部署的其余步骤）。管理员若缺 admin 角色，后台会整体返回 403。"
-      warn "  排查后手工重试：$COMPOSE exec -T backend node scripts/seed-admin.js --roles-only"
-      warn "  或按 docs/deploy.md 5.1 用 SQL 建角色、把 admin 分配给你确认过的管理员账号；"
-      warn "  不要为此运行不带 --roles-only 的 seed-admin.js（会重置 admin@cms.com 的密码）"
-    fi
     # 公开注册开关：只读一次，开着就提醒（见 check_register_switch；从不修改，失败只警告）
     check_register_switch
   fi
@@ -482,38 +490,26 @@ main() {
     NGINX_CONF_BACKUP=""
   fi
 
-  # ── 首次部署：初始化管理员账号 + 配置自动备份 ──────────────────
-  if $first_deploy; then
-    log "初始化管理员账号..."
-    if $COMPOSE exec -T backend node scripts/seed-admin.js; then
-      log "管理员账号创建成功（默认: admin@cms.com / Admin123!，登录框填邮箱，请立即修改密码）"
-    else
-      warn "初始化管理员失败，排查后手工执行: $COMPOSE exec -T backend node scripts/seed-admin.js"
-    fi
-
-    # 配置每日自动备份（凌晨 2:00）
-    log "配置数据库自动备份（每天 02:00）..."
-    local backup_script="$SCRIPT_DIR/backup.sh"
-    chmod +x "$backup_script"
-    local cron_backup="0 2 * * * $backup_script >> $PROJECT_DIR/backup/backup.log 2>&1"
-    # cron 先打开重定向目标再执行命令：backup/ 不存在时 sh 报 Directory nonexistent，
-    # backup.sh 根本不会运行（它内部的 mkdir -p 来不及生效），每日备份就永远不会发生
-    mkdir -p "$PROJECT_DIR/backup"
-    # || true：用户还没有 crontab 时 crontab -l 与 grep -v 都返回 1，set -e + pipefail 下
-    # 子 shell 会在 echo 之前退出（写入空 crontab 并让部署失败）
-    (crontab -l 2>/dev/null | grep -v 'backup.sh' || true; echo "$cron_backup") | crontab -
-    log "自动备份已写入 crontab"
-
-    warn "首次部署完成！建议："
-    warn "  1. 登录管理后台修改管理员密码"
-    warn "  2. 保持 DB_SYNC=false；后续结构升级先备份并按 docs/database-migrations.md 执行 migration"
-    warn "  3. 如已有域名并配置好 DNS，运行 HTTPS 配置："
-    warn "     bash scripts/setup-ssl.sh"
-  fi
+  # 每次部署都幂等配置本项目备份任务，不依据 MySQL 数据卷是否存在。
+  # backup.sh 要求已排空写入并停止 backend；在线执行会拒绝，维护窗口需由运维安排。
+  log "配置备份任务（每天 02:00，要求先停止应用写入）..."
+  local backup_script="$SCRIPT_DIR/backup.sh" current_cron legacy_cron cron_backup
+  chmod +x "$backup_script"
+  mkdir -p "$PROJECT_DIR/backup"
+  legacy_cron="0 2 * * * $backup_script >> $PROJECT_DIR/backup/backup.log 2>&1"
+  cron_backup="0 2 * * * bash \"$backup_script\" >> \"$PROJECT_DIR/backup/backup.log\" 2>&1"
+  current_cron=$(crontab -l 2>/dev/null || true)
+  { printf '%s\n' "$current_cron" | grep -Fvx -- "$legacy_cron" | grep -Fvx -- "$cron_backup" || true;
+    printf '%s\n' "$cron_backup"; } | crontab -
+  warn "备份任务已配置；请安排停写维护窗口，运行中的 backend 会使备份拒绝执行"
 
   # ── 清理旧镜像 ────────────────────────────────────────────────
   log "清理悬空镜像..."
   docker image prune -f || warn "清理旧镜像失败（不影响本次部署）"
+
+  if [ -n "${PRISM_DEPLOY_SHA:-}" ]; then
+    [ "$(git rev-parse HEAD)" = "$PRISM_DEPLOY_SHA" ] || die "HEAD changed during deployment"
+  fi
 
   # ── 打印服务状态 ──────────────────────────────────────────────
   echo ""

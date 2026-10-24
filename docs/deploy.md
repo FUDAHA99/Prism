@@ -125,7 +125,7 @@ bash scripts/deploy.sh
 | `http://<服务器IP>/admin/` | 管理后台 |
 | `http://<服务器IP>/api/v1` | API 根路径 |
 
-**默认管理员账户**：`admin@cms.com` / `Admin123!`（首次登录请立即修改密码）
+**初始管理员账户**：`admin@cms.com`，密码必须在部署前通过 `ADMIN_INITIAL_PASSWORD` 显式提供（至少 12 字符、最多 72 UTF-8 字节，包含字母和非字母，建议独立随机生成）。种子脚本不打印密码，重跑保留已有账号的密码、启用状态和角色。
 
 ---
 
@@ -241,7 +241,7 @@ WHERE r.name IN ('admin', 'editor');
 SQL
 ```
 
-最后一条 SELECT 应列出该邮箱和 `admin`，从该账号的下一个请求起即按新角色鉴权（鉴权每个请求直接查库）。`$COMPOSE exec -T backend node scripts/seed-admin.js --roles-only` 只能代替第一步（建角色），不会分配 `admin`。不要运行不带 `--roles-only` 的 `seed-admin.js`（账号已存在时它会把密码重置为 `Admin123!`），也不要顺手创建 `user` 角色（见 `docs/dev-guide.md`「初始化管理员角色」）。
+最后一条 SELECT 应列出该邮箱和 `admin`，从该账号的下一个请求起即按新角色鉴权（鉴权每个请求直接查库）。`$COMPOSE exec -T backend node scripts/seed-admin.js --roles-only` 只能代替第一步（建角色），不会分配 `admin`。完整初始化也不会改变已有账号的密码或自动提升其权限。不要顺手创建 `user` 角色（见 `docs/dev-guide.md`「初始化管理员角色」）。
 
 **② 第一次运行新的部署流程。** nginx 的生效配置改成了生成的 `nginx/nginx.active.conf`（第 7 节），`docker-compose.prod.yml` 挂载的是它，文件不存在时 nginx 容器会创建失败。
 
@@ -548,7 +548,7 @@ Token 过期或未登录，正常现象，重新登录即可。若登录本身�
 ```bash
 curl http://localhost/api/v1/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"email":"admin@cms.com","password":"Admin123!"}'
+  -d '{"email":"admin@cms.com","password":"<你设置的管理员密码>"}'
 ```
 
 ### 管理员登录提示「登录尝试次数过多，请15分钟后再试」

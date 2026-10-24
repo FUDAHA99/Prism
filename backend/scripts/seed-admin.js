@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
- * 管理员账号与系统角色初始化（幂等）。两种模式：
+ * 管理员账号与系统角色初始化（幂等）。三种模式：
  *
  * 1) 完整模式：node scripts/seed-admin.js（首次部署由 deploy.sh 执行；本地开发建表后手动执行）
- *    - 创建 admin 用户；账号已存在时把密码**重置**为 Admin123! 并启用
+ *    - 创建 admin 用户；账号已存在时保留密码、启用状态和角色
  *        账号: admin@cms.com
- *        密码: Admin123!
+ *        密码: 必须通过 ADMIN_INITIAL_PASSWORD 显式提供
  *    - 确保 admin / editor 两个系统角色存在且 isSystem = 1
- *    - 把 admin 角色分配给 admin@cms.com
+ *    - 只给本次新建的 admin@cms.com 分配 admin 角色
  *
  * 2) 只补角色：node scripts/seed-admin.js --roles-only（已有环境；deploy.sh 每次例行部署在 backend 就绪后执行）
  *    - 确保 admin / editor 两个系统角色存在且 isSystem = 1（早先手工建的同名角色补上系统标记）
@@ -15,6 +15,10 @@
  *    - 库里没有任何可用账号（启用且未删除）持有 admin 时，只打印警告和 docs/deploy.md 5.1 的手工 SQL，
  *      退出码仍为 0（不让部署失败）。不自动把 admin 给 admin@cms.com：注册接口是公开的，
  *      运维把默认管理员改成真实邮箱后，任何人都能注册 admin@cms.com，自动分配等于把后台送给他
+ *
+ * 3) 安全重试：node scripts/seed-admin.js --bootstrap
+ *    - 仅空 users 表创建管理员；非空库只补角色，不认领已有账号
+ *    - 没有可用管理员时 CLI 失败，要求人工确认，不将缺管理员的部署报告为成功
  *
  * 用法（先 docker compose up -d，再启动后端建表，然后跑这个）：
  *   node scripts/seed-admin.js
@@ -26,7 +30,6 @@ const { randomUUID } = require('crypto');
 
 const ADMIN_EMAIL = 'admin@cms.com';
 const ADMIN_USERNAME = 'admin';
-const ADMIN_PASSWORD = 'Admin123!';
 const ADMIN_NICKNAME = '系统管理员';
 
 // 访问矩阵只认 admin（系统管理）与 editor（内容管理，staff 级别）。
@@ -40,9 +43,11 @@ function parseArgs(argv) {
   const opts = { rolesOnly: false };
   for (const arg of argv) {
     if (arg === '--roles-only') opts.rolesOnly = true;
+    else if (arg === '--bootstrap') opts.bootstrap = true;
     else if (arg === '--help' || arg === '-h') opts.help = true;
-    else throw new Error(`未知参数：${arg}（可用：--roles-only）`);
+    else throw new Error(`未知参数：${arg}（可用：--roles-only、--bootstrap）`);
   }
+  if (opts.rolesOnly && opts.bootstrap) throw new Error('--roles-only 和 --bootstrap 不能同时使用');
   return opts;
 }
 
@@ -56,27 +61,28 @@ function dbConfigFromEnv(env = process.env) {
   };
 }
 
-/** 完整模式：创建 admin@cms.com，已存在则重置密码并启用 */
-async function upsertAdminUser(conn, now, log) {
-  const bcrypt = require('bcrypt');
-  const passwordHash = bcrypt.hashSync(ADMIN_PASSWORD, 10);
+/** 完整模式：只创建不存在的账号，不改变已有账号或提升其权限。 */
+async function createAdminUser(conn, now, log, initialPassword) {
   const [existing] = await conn.execute('SELECT id FROM users WHERE email = ?', [ADMIN_EMAIL]);
 
   if (existing.length > 0) {
-    await conn.execute('UPDATE users SET passwordHash=?, isActive=1, updatedAt=? WHERE email=?', [
-      passwordHash,
-      now,
-      ADMIN_EMAIL,
-    ]);
-    log(`✅ 已重置 admin 密码: ${ADMIN_EMAIL} / ${ADMIN_PASSWORD}`);
+    log(`已有账号 ${ADMIN_EMAIL}，保留密码、启用状态和角色`);
+    return false;
   } else {
+    if (typeof initialPassword !== 'string' || initialPassword.length < 12 ||
+        Buffer.byteLength(initialPassword, 'utf8') > 72 || !/[a-zA-Z]/.test(initialPassword) ||
+        !/[^a-zA-Z]/.test(initialPassword)) {
+      throw new Error('创建管理员必须显式设置 ADMIN_INITIAL_PASSWORD（至少 12 字符、最多 72 UTF-8 字节，包含字母和非字母）');
+    }
+    const passwordHash = require('bcrypt').hashSync(initialPassword, 10);
     await conn.execute(
       `INSERT INTO users
        (id, username, email, passwordHash, nickname, isActive, createdAt, updatedAt)
        VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
       [randomUUID(), ADMIN_USERNAME, ADMIN_EMAIL, passwordHash, ADMIN_NICKNAME, now, now],
     );
-    log(`✅ 已创建 admin 用户: ${ADMIN_EMAIL} / ${ADMIN_PASSWORD}`);
+    log(`✅ 已创建 admin 用户: ${ADMIN_EMAIL}（密码取自 ADMIN_INITIAL_PASSWORD，不回显）`);
+    return true;
   }
 }
 
@@ -103,7 +109,7 @@ async function ensureSystemRoles(conn, now, log) {
 }
 
 /**
- * 完整模式专用：把 admin 角色分配给刚创建 / 重置过密码的 admin@cms.com（user_roles 主键为 (user_id, role_id)，
+ * 完整模式专用：把 admin 角色分配给本次刚创建的 admin@cms.com（user_roles 主键为 (user_id, role_id)，
  * INSERT IGNORE 可重跑），并回读确认。--roles-only 不调用它。
  */
 async function assignAdminRole(conn) {
@@ -143,7 +149,7 @@ function missingAdminWarning() {
     '⚠️ 没有任何可用账号（启用且未删除）持有 admin 角色：管理后台的用户、角色、评论等管理接口会全部返回 403。',
     `   --roles-only 不会自动分配 admin：注册接口是公开的，${ADMIN_EMAIL} 这类默认邮箱可能是任何人自助注册的。`,
     `   确认线上实际在用、能用自己的密码登录的管理员邮箱后，在服务器项目目录执行（把 ${ADMIN_EMAIL_PLACEHOLDER} 换成该邮箱；`,
-    '   详见 docs/deploy.md 5.1；不要为此运行不带 --roles-only 的 seed-admin.js，它会重置 admin@cms.com 的密码）：',
+    '   详见 docs/deploy.md 5.1；初始化脚本不会提升已有账号的权限）：',
     MANUAL_ADMIN_SQL,
   ].join('\n');
 }
@@ -173,14 +179,21 @@ async function checkAdminHolder(conn, log, warn) {
  * 执行初始化。conn 只需提供 mysql2/promise 风格的 execute(sql, params) → [rows]。
  * @returns {{ mode: 'full' | 'roles-only', admin?: string }}
  */
-async function seed(conn, { rolesOnly = false, now = new Date(), log = console.log, warn = console.warn } = {}) {
+async function seed(conn, { rolesOnly = false, bootstrap = false, initialPassword = process.env.ADMIN_INITIAL_PASSWORD, now = new Date(), log = console.log, warn = console.warn } = {}) {
+  if (bootstrap) {
+    const [users] = await conn.execute('SELECT id FROM users LIMIT 1 FOR UPDATE');
+    rolesOnly = users.length > 0;
+  }
   if (rolesOnly) {
     await ensureSystemRoles(conn, now, log);
     const admin = await checkAdminHolder(conn, log, warn);
     return { mode: 'roles-only', admin };
   }
-  await upsertAdminUser(conn, now, log);
+  const created = await createAdminUser(conn, now, log, initialPassword);
   await ensureSystemRoles(conn, now, log);
+  if (!created) {
+    return { mode: 'full', admin: await checkAdminHolder(conn, log, warn) };
+  }
   await assignAdminRole(conn);
   log(`✅ 已确保 admin 角色并分配给 ${ADMIN_EMAIL}`);
   return { mode: 'full', admin: 'assigned' };
@@ -190,8 +203,8 @@ async function main(argv = process.argv.slice(2)) {
   const opts = parseArgs(argv);
   if (opts.help) {
     console.log(
-      '用法：node scripts/seed-admin.js [--roles-only]（不带参数会重置 admin@cms.com 的密码并分配 admin；' +
-        '--roles-only 只确保系统角色，不分配任何角色）',
+      '用法：node scripts/seed-admin.js [--roles-only | --bootstrap]（新建账号须设置 ADMIN_INITIAL_PASSWORD；已有账号保持不变；' +
+        '--roles-only 只确保系统角色；--bootstrap 仅空用户表创建管理员）',
     );
     return;
   }
@@ -208,7 +221,17 @@ async function main(argv = process.argv.slice(2)) {
   );
   const conn = await mysql.createConnection(cfg);
   try {
-    await seed(conn, { rolesOnly: opts.rolesOnly });
+    await conn.beginTransaction();
+    try {
+      const result = await seed(conn, { rolesOnly: opts.rolesOnly, bootstrap: opts.bootstrap });
+      if (!opts.rolesOnly && result.admin === 'missing') {
+        throw new Error('已有账号但没有可用管理员，请按上方说明人工确认角色分配');
+      }
+      await conn.commit();
+    } catch (error) {
+      await conn.rollback();
+      throw error;
+    }
   } finally {
     await conn.end();
   }

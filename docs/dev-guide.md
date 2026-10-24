@@ -193,7 +193,7 @@ docker compose exec mysql mysql -ucms -pcms123 cms_dev -e "SHOW TABLES;"
 
 后台的评论管理、用户/角色管理和内容发布都要求账号带 `admin` 或 `editor` 角色。
 `node scripts/seed-admin.js` 会幂等地创建 `admin`、`editor` 两个系统角色（`isSystem = 1`）并把 `admin` 分配给 admin@cms.com，
-新环境跑它即可（账号已存在时它会把密码**重置**为 `Admin123!`）。
+新环境须先设置 `ADMIN_INITIAL_PASSWORD`（至少 12 字符、最多 72 UTF-8 字节，包含字母和非字母）。已有账号的密码、启用状态和角色保持不变。
 之后新账号在后台「用户管理 → 新建用户」里开设（公开注册默认关闭），给已有账号分配角色在「用户管理 → 编辑」里操作，保存后对方的下一个请求起就按新角色鉴权，无需重新登录。
 系统角色（`admin` / `editor`）不能改名或删除，接口返回 400；管理员也不能移除自己的 `admin` 角色。
 

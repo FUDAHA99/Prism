@@ -68,6 +68,9 @@ class FakeDb {
     const role = (name: string) => this.roles.find((r) => r.name === name);
     const user = (email: string) => this.users.find((u) => u.email === email);
 
+    if (s === 'SELECT id FROM users LIMIT 1 FOR UPDATE') {
+      return [this.users.slice(0, 1).map((u) => ({ id: u.id }))];
+    }
     if (s === 'SELECT id FROM users WHERE email = ?') {
       return [this.users.filter((u) => u.email === params[0]).map((u) => ({ id: u.id }))];
     }
@@ -123,11 +126,12 @@ class FakeDb {
   }
 }
 
-async function run(db: FakeDb, rolesOnly: boolean) {
+async function run(db: FakeDb, rolesOnly: boolean, initialPassword = 'Test-Initial-Pass-2026!') {
   const logs: string[] = [];
   const warns: string[] = [];
   const result = await seedAdmin.seed(db, {
     rolesOnly,
+    initialPassword,
     now: new Date('2026-10-09T00:00:00Z'),
     log: (m: string) => logs.push(m),
     warn: (m: string) => warns.push(m),
@@ -142,7 +146,7 @@ const systemRoles = (db: FakeDb) =>
     .sort();
 
 describe('seed-admin.js 参数', () => {
-  it('只接受 --roles-only，未知参数报错（防止拼错参数时落到会重置密码的完整模式）', () => {
+  it('只接受 --roles-only，未知参数报错（防止拼错参数时落到完整模式）', () => {
     expect(seedAdmin.parseArgs([])).toEqual({ rolesOnly: false });
     expect(seedAdmin.parseArgs(['--roles-only'])).toEqual({ rolesOnly: true });
     expect(() => seedAdmin.parseArgs(['--roles_only'])).toThrow(/未知参数/);
@@ -272,23 +276,160 @@ describe('seed-admin.js --roles-only（每次例行部署执行）', () => {
 });
 
 describe('seed-admin.js 完整模式（首次部署 / 本地开发）', () => {
-  it('账号已存在时重置密码并启用，确保系统角色并分配 admin', async () => {
+  it('账号已存在时保留密码、启用状态和角色，不提升占用默认邮箱的账号', async () => {
     const db = new FakeDb();
     const admin = db.addUser('admin@cms.com', { isActive: 0 });
 
     const { result } = await run(db, false);
-    expect(result).toEqual({ mode: 'full', admin: 'assigned' });
-    expect(admin.passwordHash).not.toBe('ORIGINAL-HASH');
-    expect(admin.passwordHash).toMatch(/^\$2[aby]\$10\$/);
-    expect(admin.isActive).toBe(1);
+    expect(result).toEqual({ mode: 'full', admin: 'missing' });
+    expect(admin.passwordHash).toBe('ORIGINAL-HASH');
+    expect(admin.isActive).toBe(0);
     expect(systemRoles(db)).toEqual(['admin:1', 'editor:1']);
-    expect(db.rolesOf('admin@cms.com')).toEqual(['admin']);
+    expect(db.rolesOf('admin@cms.com')).toEqual([]);
+    expect(db.userWrites()).toEqual([]);
+    expect(db.userRoleWrites()).toEqual([]);
   });
 
   it('账号不存在时创建', async () => {
     const db = new FakeDb();
-    await run(db, false);
+    const { logs } = await run(db, false);
     expect(db.users.map((u) => u.email)).toEqual(['admin@cms.com']);
     expect(db.rolesOf('admin@cms.com')).toEqual(['admin']);
+    expect(require('bcrypt').compareSync('Test-Initial-Pass-2026!', db.users[0].passwordHash)).toBe(true);
+    expect(logs.join('\n')).not.toContain('Test-Initial-Pass-2026!');
+  });
+
+  it.each(['', 'short', 'Admin123!', 'a'.repeat(73)])('拒绝缺失或不合格的初始密码 %p，不创建账号', async (password) => {
+    const db = new FakeDb();
+    await expect(run(db, false, password)).rejects.toThrow(/ADMIN_INITIAL_PASSWORD/);
+    expect(db.users).toEqual([]);
+    expect(db.userRoleWrites()).toEqual([]);
+  });
+
+  it('重跑已有管理员时无需初始密码，也不更改其密码', async () => {
+    const db = new FakeDb();
+    await run(db, false);
+    const hash = db.users[0].passwordHash;
+    await run(db, false, '');
+    expect(db.users[0].passwordHash).toBe(hash);
+    expect(db.rolesOf('admin@cms.com')).toEqual(['admin']);
+  });
+});
+
+describe('seed-admin.js --bootstrap（部署重试）', () => {
+  const options = { bootstrap: true, log: jest.fn(), warn: jest.fn() };
+
+  it('空库要求密码；重试成功创建管理员后不再重置密码', async () => {
+    const db = new FakeDb();
+    await expect(seedAdmin.seed(db, { ...options, initialPassword: '' })).rejects.toThrow(/ADMIN_INITIAL_PASSWORD/);
+    await seedAdmin.seed(db, { ...options, initialPassword: 'Retry-Initial-Pass-2026!' });
+    const hash = db.users[0].passwordHash;
+    await seedAdmin.seed(db, { ...options, initialPassword: '' });
+    expect(db.users[0].passwordHash).toBe(hash);
+    expect(db.rolesOf('admin@cms.com')).toEqual(['admin']);
+  });
+
+  it('非空用户表只补角色，不新建默认管理员、不授予已有账号权限', async () => {
+    const db = new FakeDb();
+    db.addUser('existing@example.com');
+    const result = await seedAdmin.seed(db, { ...options, initialPassword: '' });
+    expect(result.admin).toBe('missing');
+    expect(systemRoles(db)).toEqual(['admin:1', 'editor:1']);
+    expect(db.users.map((u) => u.email)).toEqual(['existing@example.com']);
+    expect(db.userWrites()).toEqual([]);
+    expect(db.userRoleWrites()).toEqual([]);
+  });
+
+  it('拒绝混用初始化参数', () => {
+    expect(seedAdmin.parseArgs(['--bootstrap'])).toEqual({ rolesOnly: false, bootstrap: true });
+    expect(() => seedAdmin.parseArgs(['--bootstrap', '--roles-only'])).toThrow(/不能同时/);
+  });
+});
+
+describe('seed-admin.js main 的事务与 CLI 失败出口', () => {
+  let db: FakeDb;
+  let connection: {
+    execute: jest.Mock;
+    beginTransaction: jest.Mock;
+    commit: jest.Mock;
+    rollback: jest.Mock;
+    end: jest.Mock;
+  };
+  let loadEnvironment: jest.SpyInstance;
+  let connect: jest.SpyInstance;
+
+  beforeEach(() => {
+    // 完全替换本用例的环境；dotenv 与 mysql 入口在 main 调用前替换，不读本机文件、不连接数据库。
+    jest.replaceProperty(process, 'env', {
+      DATABASE_HOST: '127.0.0.1', DATABASE_PORT: '3306', DATABASE_USER: 'synthetic-qa',
+      DATABASE_PASSWORD: 'synthetic-qa-password', DATABASE_NAME: 'synthetic_seed_qa',
+      ADMIN_INITIAL_PASSWORD: 'Synthetic-Initial-2026!',
+    });
+    loadEnvironment = jest.spyOn(require('dotenv'), 'config').mockReturnValue({});
+    db = new FakeDb();
+    connection = {
+      execute: jest.fn(db.execute.bind(db)),
+      beginTransaction: jest.fn().mockResolvedValue(undefined),
+      commit: jest.fn().mockResolvedValue(undefined),
+      rollback: jest.fn().mockResolvedValue(undefined),
+      end: jest.fn().mockResolvedValue(undefined),
+    };
+    connect = jest.spyOn(require('mysql2/promise'), 'createConnection').mockResolvedValue(connection);
+    jest.spyOn(console, 'log').mockImplementation(() => undefined);
+    jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it('非空库缺管理员时回滚并拒绝，不把缺管理员的 bootstrap 报告为成功', async () => {
+    db.addUser('existing@example.test');
+    await expect(seedAdmin.main(['--bootstrap'])).rejects.toThrow('没有可用管理员');
+    expect(loadEnvironment).toHaveBeenCalledTimes(1);
+    expect(connect).toHaveBeenCalledWith({
+      host: '127.0.0.1', port: 3306, user: 'synthetic-qa',
+      password: 'synthetic-qa-password', database: 'synthetic_seed_qa',
+    });
+    expect(connection.beginTransaction).toHaveBeenCalledTimes(1);
+    expect(connection.commit).not.toHaveBeenCalled();
+    expect(connection.rollback).toHaveBeenCalledTimes(1);
+    expect(connection.end).toHaveBeenCalledTimes(1);
+    expect(db.userWrites()).toEqual([]);
+    expect(db.userRoleWrites()).toEqual([]);
+  });
+
+  it('正常初始化在账号和角色全部成功后提交，并关闭连接', async () => {
+    await expect(seedAdmin.main(['--bootstrap'])).resolves.toBeUndefined();
+    expect(db.rolesOf('admin@cms.com')).toEqual(['admin']);
+    expect(require('bcrypt').compareSync('Synthetic-Initial-2026!', db.users[0].passwordHash)).toBe(true);
+    expect(connection.beginTransaction).toHaveBeenCalledTimes(1);
+    expect(connection.commit).toHaveBeenCalledTimes(1);
+    expect(connection.rollback).not.toHaveBeenCalled();
+    expect(connection.end).toHaveBeenCalledTimes(1);
+    expect(connection.beginTransaction.mock.invocationCallOrder[0]).toBeLessThan(connection.execute.mock.invocationCallOrder[0]);
+    expect(connection.commit.mock.invocationCallOrder[0]).toBeGreaterThan(connection.execute.mock.invocationCallOrder.at(-1)!);
+    expect(connection.end.mock.invocationCallOrder[0]).toBeGreaterThan(connection.commit.mock.invocationCallOrder[0]);
+  });
+
+  it('角色分配写入失败时回滚整个初始化事务并向 CLI 传播失败', async () => {
+    connection.execute.mockImplementation(async (sql: string, params: unknown[]) => {
+      if (norm(sql).startsWith('INSERT IGNORE INTO user_roles')) throw new Error('synthetic role write failed');
+      return db.execute(sql, params);
+    });
+    await expect(seedAdmin.main(['--bootstrap'])).rejects.toThrow('synthetic role write failed');
+    expect(connection.beginTransaction).toHaveBeenCalledTimes(1);
+    expect(connection.commit).not.toHaveBeenCalled();
+    expect(connection.rollback).toHaveBeenCalledTimes(1);
+    expect(connection.end).toHaveBeenCalledTimes(1);
+    expect(connection.end.mock.invocationCallOrder[0]).toBeGreaterThan(connection.rollback.mock.invocationCallOrder[0]);
+  });
+
+  it('--roles-only 仍允许缺管理员的只补角色操作提交，不改变原来的非致命行为', async () => {
+    db.addUser('existing@example.test');
+    await expect(seedAdmin.main(['--roles-only'])).resolves.toBeUndefined();
+    expect(connection.commit).toHaveBeenCalledTimes(1);
+    expect(connection.rollback).not.toHaveBeenCalled();
+    expect(connection.end).toHaveBeenCalledTimes(1);
+    expect(db.userWrites()).toEqual([]);
+    expect(db.userRoleWrites()).toEqual([]);
   });
 });

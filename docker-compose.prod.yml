@@ -92,6 +92,7 @@ services:
       DATABASE_NAME:     ${MYSQL_DATABASE:-cms_prod}
       DATABASE_USER:     ${MYSQL_USER:-cms}
       DATABASE_PASSWORD: ${MYSQL_PASSWORD}
+      ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD:-}
 
       # 生产硬性禁止自动改表；迁移命令与启动检查均使用同一配置
       DB_SYNC:           ${DB_SYNC:-false}

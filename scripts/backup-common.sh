@@ -37,6 +37,10 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 lock_backup() {
+  command -v flock >/dev/null || die 'flock is required for backup/deployment serialization'
+  mkdir -p "$PROJECT_DIR/backup"
+  exec 9>"$PROJECT_DIR/backup/.operations.lock"
+  flock -n 9 || die 'Another deployment or backup is running'
   [[ ! -L $BACKUP_DIR ]] || die 'Backup directory must not be a symlink'
   mkdir -p -- "$BACKUP_DIR"
   BACKUP_DIR=$(cd "$BACKUP_DIR" && pwd -P)

@@ -9,6 +9,8 @@ BACKUP_KEEP=${BACKUP_KEEP:-7}
 [[ $BACKUP_KEEP =~ ^[1-9][0-9]*$ && ${#BACKUP_KEEP} -le 9 ]] || die 'BACKUP_KEEP must be a positive integer (at most 9 digits)'
 lock_backup
 load_containers
+# Fail closed: the operator must drain writes and stop backend before the snapshot.
+require_state "$BACKEND_ID" false
 require_state "$REDIS_ID" true
 STAGE=$(mktemp -d "$BACKUP_DIR/.partial-$(date -u +%Y%m%dT%H%M%S.%N)-XXXXXX")
 chmod 700 "$STAGE"

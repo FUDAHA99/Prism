@@ -175,17 +175,24 @@ jobs:
       - name: Deploy via SSH
         if: steps.gate.outputs.ready == 'true'
         uses: appleboy/ssh-action@v1.0.3
+        env:
+          PRISM_DEPLOY_SHA: ${{ github.sha }}
         with:
+          envs: PRISM_DEPLOY_SHA
           host:     ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key:      ${{ secrets.SSH_PRIVATE_KEY }}
           port:     ${{ secrets.SSH_PORT || 22 }}
-          # 部署逻辑全部在 scripts/deploy.sh（与手工部署同一份）。这里先 git pull 再带 --skip-pull 调用，
-          # 保证执行的是刚拉下来的新版 deploy.sh。
+          # 部署逻辑全部在 scripts/deploy.sh（与手工部署同一份）。这里先获取并快进到通过门禁的精确 SHA，
+          # 再带 --skip-pull 调用该提交的 deploy.sh。
           # 注意：appleboy/ssh-action 底层的 drone-ssh 可能按 ASCII 逗号切分 script，本段不要出现半角逗号。
           script: |
             set -euo pipefail
             cd ${{ secrets.DEPLOY_PATH || '/opt/prism-cms' }}
+
+            mkdir -p backup
+            exec 9>backup/.operations.lock
+            flock -n 9 || { echo "另一个部署或备份正在执行"; exit 1; }
 
             # 一次性迁移（见 docs/deploy.md 5.1 节）：旧版 setup-ssl.sh 把 HTTPS 配置写进了受跟踪的
             # nginx/nginx.conf；生效配置现在是生成的 nginx/nginx.active.conf，备份后还原它，否则 git pull 会中止
@@ -208,9 +215,15 @@ jobs:
               fi
             }
 
-            git pull origin main || { restore_nginx_conf; echo "git pull 失败：部署中止，容器均未改动"; exit 1; }
+            [[ "$PRISM_DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]] || { restore_nginx_conf; exit 1; }
+            [[ -z "$(git status --porcelain)" ]] || { restore_nginx_conf; echo "工作区有改动，请人工处理"; exit 1; }
+            git fetch origin "$PRISM_DEPLOY_SHA" || { restore_nginx_conf; exit 1; }
+            [ "$(git rev-parse FETCH_HEAD)" = "$PRISM_DEPLOY_SHA" ] || { restore_nginx_conf; exit 1; }
+            git merge --ff-only "$PRISM_DEPLOY_SHA" || { restore_nginx_conf; echo "无法快进到已验证提交，请人工处理"; exit 1; }
+            [ "$(git rev-parse HEAD)" = "$PRISM_DEPLOY_SHA" ] || { restore_nginx_conf; echo "HEAD 与已验证提交不一致"; exit 1; }
 
             PRISM_NGINX_CONF_BACKUP="$BAK" bash scripts/deploy.sh --skip-pull || { rc=$?; restore_nginx_conf; exit $rc; }
+            [ "$(git rev-parse HEAD)" = "$PRISM_DEPLOY_SHA" ]
 
       - name: Notify on failure
         if: failure()
