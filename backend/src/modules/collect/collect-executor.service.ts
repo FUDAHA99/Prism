@@ -318,7 +318,7 @@ export class CollectExecutorService implements OnApplicationBootstrap {
         }
       }
     } finally {
-      // 主记录可能已提交、但后续线路写入失败；按实际提交标记，一页最多通知一次。
+      // 按实际提交标记，一页最多通知一次；影片及播放数据的事务失败不标记。
       if (changed.size > 0) await this.portalCache.invalidate([...changed]);
     }
   }
@@ -397,7 +397,6 @@ export class CollectExecutorService implements OnApplicationBootstrap {
   ): Promise<'inserted' | 'updated'> {
     let movie = await this.movieRepo.findOne({
       where: { collectSource: source.id, collectExternalId: externalId },
-      relations: { sources: { episodes: true } },
     });
 
     const isNew = !movie;
@@ -441,19 +440,6 @@ export class CollectExecutorService implements OnApplicationBootstrap {
       posterBroken: posterUrl ? null : posterGiven ? true : null,
     } as any;
 
-    if (movie) {
-      Object.assign(movie, data);
-    } else {
-      movie = this.movieRepo.create(data);
-    }
-    movie = await this.movieRepo.save(movie);
-    changed.add('portal:movies');
-
-    // 异步检测封面图可用性（不阻塞主采集流程）
-    if (posterUrl) {
-      this.posterChecker.checkAndMark(movie.id, posterUrl).catch(() => {});
-    }
-
     // 同步线路 + 剧集（增量替换：旧的删，新的插，避免脏数据堆积）
     // 剧集地址来自不可信的上游：javascript: / vbscript: / data: / file: 协议（与后台 DTO 的 IsSafeMediaUrl 同一判定）
     // 不入库，计入采集日志。此前原样写进 movie_episodes.url，公开详情原样返回，门户播放失败时渲染成可点击的链接。
@@ -469,35 +455,56 @@ export class CollectExecutorService implements OnApplicationBootstrap {
     }
     // 剧集全部被丢弃的线路不建（门户上会是一条 0 集的空线路）；上游给了播放数据就以它为准替换旧线路
     const usable = parsed.filter((p) => p.episodes.length > 0 || p.dropped === 0);
-    if (parsed.length > 0) {
-      // 清旧（cascade 会带走 episodes）
-      const oldSources = await this.movieSourceRepo.find({ where: { movieId: movie.id } });
-      if (oldSources.length > 0) await this.movieSourceRepo.remove(oldSources);
+    // MySQL utf8mb4 的 varchar 长度按字符计；删除旧数据前拒绝超长字段，不静默截断。
+    for (const p of usable) {
+      if (Array.from(p.name).length > 100) throw new Error('线路名称不能超过 100 个字符');
+      for (const ep of p.episodes) {
+        if (Array.from(ep.title).length > 200) throw new Error('剧集标题不能超过 200 个字符');
+      }
+    }
 
-      for (let i = 0; i < usable.length; i++) {
-        const p = usable[i];
-        const ms = this.movieSourceRepo.create({
-          movieId: movie.id,
-          name: p.name,
-          kind: MovieSourceKind.PLAY,
-          player: p.name.toLowerCase().includes('m3u8') ? 'm3u8' : 'mp4',
-          sortOrder: i,
-        });
-        const savedMs = await this.movieSourceRepo.save(ms);
+    movie = await this.dataSource.transaction(async (manager) => {
+      const movieRepo = manager.getRepository(this.movieRepo.target);
+      const sourceRepo = manager.getRepository(this.movieSourceRepo.target);
+      const episodeRepo = manager.getRepository(this.movieEpisodeRepo.target);
+      const savedMovie = await movieRepo.save(movie ? Object.assign(movie, data) : movieRepo.create(data));
+      if (parsed.length > 0) {
+        // 清旧与重建属于同一事务；任何一集失败都会保留原影片及其播放数据。
+        const oldSources = await sourceRepo.find({ where: { movieId: savedMovie.id } });
+        if (oldSources.length > 0) await sourceRepo.remove(oldSources);
 
-        for (let j = 0; j < p.episodes.length; j++) {
-          const ep = p.episodes[j];
-          await this.movieEpisodeRepo.save(
-            this.movieEpisodeRepo.create({
-              sourceId: savedMs.id,
-              title: ep.title,
-              episodeNumber: ep.episodeNumber,
-              url: ep.url,
-              sortOrder: j,
-            }),
-          );
+        for (let i = 0; i < usable.length; i++) {
+          const p = usable[i];
+          const ms = sourceRepo.create({
+            movieId: savedMovie.id,
+            name: p.name,
+            kind: MovieSourceKind.PLAY,
+            player: p.name.toLowerCase().includes('m3u8') ? 'm3u8' : 'mp4',
+            sortOrder: i,
+          });
+          const savedMs = await sourceRepo.save(ms);
+
+          for (let j = 0; j < p.episodes.length; j++) {
+            const ep = p.episodes[j];
+            await episodeRepo.save(
+              episodeRepo.create({
+                sourceId: savedMs.id,
+                title: ep.title,
+                episodeNumber: ep.episodeNumber,
+                url: ep.url,
+                sortOrder: j,
+              }),
+            );
+          }
         }
       }
+      return savedMovie;
+    });
+    changed.add('portal:movies');
+
+    // 提交后才检测封面，避免异步回写尚未提交或已回滚的影片。
+    if (posterUrl) {
+      this.posterChecker.checkAndMark(movie.id, posterUrl).catch(() => {});
     }
 
     return isNew ? 'inserted' : 'updated';

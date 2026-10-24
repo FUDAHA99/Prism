@@ -91,6 +91,7 @@ describe('CollectExecutorService 采集落库', () => {
     const sourceRepo = { update: jest.fn().mockResolvedValue(undefined) };
     // 内容仍走上面的真实 SQLite 仓库；仅日志与源统计的末尾事务使用原有假仓库。
     const manager = {
+      getRepository: ds.getRepository.bind(ds),
       update: async (entity: typeof CollectLog | typeof CollectSource, id: string, patch: Record<string, unknown>) => {
         if (entity === CollectLog) return logRepo.update(id, patch);
         if (entity === CollectSource) return sourceRepo.update(id, patch);
@@ -99,11 +100,18 @@ describe('CollectExecutorService 采集落库', () => {
     };
     const dataSource = { transaction: async (work: (transactionManager: typeof manager) => Promise<unknown>) => {
       const before = logUpdates.length;
-      try { return await work(manager); }
+      try {
+        return await ds.transaction((transactionManager) => work({
+          ...manager, getRepository: transactionManager.getRepository.bind(transactionManager),
+        }));
+      }
       catch (error) { logUpdates.length = before; throw error; }
     } };
     const sourceService = { getEnabledMappingMap: jest.fn().mockResolvedValue(new Map([['6', null]])) };
-    const posterChecker = { checkAndMark: jest.fn().mockResolvedValue(undefined) };
+    const posterChecksInTransaction: boolean[] = [];
+    const posterChecker = { checkAndMark: jest.fn(async (_movieId: string, _url: string) => {
+      posterChecksInTransaction.push(ds.createQueryRunner().isTransactionActive);
+    }) };
     const executor = new CollectExecutorService(
       sourceRepo as any,
       logRepo as any,
@@ -119,7 +127,7 @@ describe('CollectExecutorService 采集落库', () => {
       { now: () => NOW },
     );
     await (executor as any).runInBackground(sourceOf(contentType), { mode: CollectMode.PAGE_RANGE }, 'log-1');
-    return { log: logUpdates[logUpdates.length - 1], posterChecker };
+    return { log: logUpdates[logUpdates.length - 1], posterChecker, posterChecksInTransaction };
   }
 
   describe('发布时间不晚于入库时刻（公开视图把未来的发布时间当成定时发布）', () => {
@@ -132,7 +140,7 @@ describe('CollectExecutorService 采集落库', () => {
       expect(portalCache.invalidate.mock.calls).toEqual([[[tag]]]);
     });
 
-    it('没有映射或写库前失败均不通知，主记录已提交但线路失败仍通知', async () => {
+    it('没有映射或写库失败均不通知，线路失败时主记录也回滚', async () => {
       await collect(CollectContentType.MOVIE, [item({ type_id: 99 })]);
       expect(portalCache.invalidate).not.toHaveBeenCalled();
       await ds.query("CREATE TRIGGER cache_movie_fail BEFORE INSERT ON movies BEGIN SELECT RAISE(ABORT, 'cache regression'); END");
@@ -146,8 +154,8 @@ describe('CollectExecutorService 采集落库', () => {
       try {
         const { log } = await collect(CollectContentType.MOVIE, [item({ vod_id: 3, vod_play_from: 'm3u8', vod_play_url: '1$https://video.example.com/1.mp4' })]);
         expect(log.failedCount).toBe(1);
-        expect(await movies.count()).toBe(1);
-        expect(portalCache.invalidate.mock.calls).toEqual([[['portal:movies']]]);
+        expect(await movies.count()).toBe(0);
+        expect(portalCache.invalidate).not.toHaveBeenCalled();
       } finally {
         await ds.query('DROP TRIGGER cache_source_fail');
       }
@@ -186,6 +194,77 @@ describe('CollectExecutorService 采集落库', () => {
       } as Partial<Movie>);
       await collect(CollectContentType.MOVIE, [item({ vod_id: 9, vod_time: '2030-01-01 00:00:00' })]);
       expect((await movies.findOneByOrFail({ collectExternalId: '9' })).publishedAt!.toISOString()).toBe(NOW.toISOString());
+    });
+  });
+
+  describe('单影片及播放数据原子替换（审查第 7 项）', () => {
+    const oldItem = item({ vod_id: 51, vod_name: '原影片', vod_play_from: '原线路',
+      vod_play_url: '原剧集$https://video.example.com/old.mp4' });
+    const readMovie = () => movies.findOneOrFail({
+      where: { collectExternalId: '51' }, relations: { sources: { episodes: true } },
+    });
+
+    it.each([
+      ['剧集标题', { vod_play_from: '新线路', vod_play_url: `${'集'.repeat(201)}$https://video.example.com/new.mp4` }],
+      ['线路名称', { vod_play_from: '线'.repeat(101), vod_play_url: '新剧集$https://video.example.com/new.mp4' }],
+    ])('%s 超长时在任何影片写入前拒绝，保留原影片与播放数据', async (_label, play) => {
+      await collect(CollectContentType.MOVIE, [oldItem]);
+      const before = await readMovie();
+      portalCache.invalidate.mockClear();
+      await ds.query("CREATE TRIGGER reject_movie_write BEFORE UPDATE ON movies BEGIN SELECT RAISE(ABORT, 'unexpected movie write'); END");
+      try {
+        const { log, posterChecker } = await collect(CollectContentType.MOVIE, [
+          item({ vod_id: 51, vod_name: '不应写入的新影片', vod_pic: 'https://image.example.com/new.jpg', ...play }),
+        ]);
+        expect(log).toMatchObject({ failedCount: 1, updatedCount: 0 });
+        expect(log.errorMessage).toContain('超过');
+        expect(log.errorMessage).not.toContain('unexpected movie write');
+        expect(await readMovie()).toEqual(before);
+        expect(posterChecker.checkAndMark).not.toHaveBeenCalled();
+        expect(portalCache.invalidate).not.toHaveBeenCalled();
+      } finally {
+        await ds.query('DROP TRIGGER reject_movie_write');
+      }
+    });
+
+    it('第二集写入失败时回滚主记录、删旧及已插入的新线路/剧集', async () => {
+      await collect(CollectContentType.MOVIE, [oldItem]);
+      const before = await readMovie();
+      portalCache.invalidate.mockClear();
+      await ds.query("CREATE TRIGGER reject_second_episode BEFORE INSERT ON movie_episodes WHEN NEW.title = '失败集' BEGIN SELECT RAISE(ABORT, 'episode write failed'); END");
+      try {
+        const { log, posterChecker } = await collect(CollectContentType.MOVIE, [item({
+          vod_id: 51, vod_name: '不应保留的新影片', vod_pic: 'https://image.example.com/new.jpg', vod_play_from: '新线路',
+          vod_play_url: '第一集$https://video.example.com/1.mp4#失败集$https://video.example.com/2.mp4',
+        })]);
+        expect(log).toMatchObject({ failedCount: 1, updatedCount: 0 });
+        expect(await readMovie()).toEqual(before);
+        expect(await ds.getRepository(MovieSource).count()).toBe(1);
+        expect(await ds.getRepository(MovieEpisode).count()).toBe(1);
+        expect(posterChecker.checkAndMark).not.toHaveBeenCalled();
+        expect(portalCache.invalidate).not.toHaveBeenCalled();
+      } finally {
+        await ds.query('DROP TRIGGER reject_second_episode');
+      }
+    });
+
+    it('边界长度按 Unicode 字符计，成功替换后才检测海报并通知门户', async () => {
+      await collect(CollectContentType.MOVIE, [oldItem]);
+      portalCache.invalidate.mockClear();
+      const { log, posterChecker, posterChecksInTransaction } = await collect(CollectContentType.MOVIE, [item({
+        vod_id: 51, vod_name: '新影片', vod_pic: 'https://image.example.com/new.jpg', vod_play_from: '线'.repeat(100),
+        vod_play_url: `${'😀'.repeat(200)}$https://video.example.com/new.mp4`,
+      })]);
+      expect(log).toMatchObject({ failedCount: 0, updatedCount: 1 });
+      const saved = await readMovie();
+      expect(saved.title).toBe('新影片');
+      expect(saved.sources).toHaveLength(1);
+      expect(saved.sources[0].name).toBe('线'.repeat(100));
+      expect(saved.sources[0].episodes).toHaveLength(1);
+      expect(saved.sources[0].episodes[0].title).toBe('😀'.repeat(200));
+      expect(posterChecker.checkAndMark).toHaveBeenCalledWith(saved.id, 'https://image.example.com/new.jpg');
+      expect(posterChecksInTransaction).toEqual([false]);
+      expect(portalCache.invalidate.mock.calls).toEqual([[['portal:movies']]]);
     });
   });
 
