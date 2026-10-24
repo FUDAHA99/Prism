@@ -1,17 +1,17 @@
-import { Cache } from 'cache-manager';
 import { MAX_TOKEN_LIFETIME_SEC } from '../../config/jwt';
 
-/**
- * token 吊销的缓存读写（批次 1-F-1）。不改表结构：所有吊销状态都放在缓存（生产是 Redis），
- * TTL 一律毫秒（cache-manager v5+ / Keyv 语义）。
- */
+/** 撤销状态必须使用持久化存储；TTL 以毫秒计，存储错误必须向上传播。 */
+export interface RevocationStore {
+  get<T>(key: string): Promise<T | undefined>;
+  set(key: string, value: number, ttl: number): Promise<unknown>;
+}
 
 /**
  * 把某个 token 拉黑到它自然过期为止（过期之后验签本身就会失败，不必再占缓存）。
  * exp 缺失时按 token 最长寿命兜底；已过期的不写。
  */
 export async function blacklistUntilExpiry(
-  cache: Cache,
+  cache: RevocationStore,
   key: string,
   exp: number | undefined,
   now: number = Date.now(),
@@ -24,9 +24,10 @@ export async function blacklistUntilExpiry(
 
 /**
  * 「某时刻之前签发的 token 全部作废」标记：改密（含管理员重置密码）时写入当前时刻（毫秒），
- * JwtStrategy 与 /auth/refresh 拒绝 iat * 1000 早于它的 token。不需要给 users 表加列。
+ * JwtStrategy 与 /auth/refresh 拒绝 iat * 1000 早于它的 token，状态存入数据库专用表。
  */
 export const validAfterKey = (userId: string) => `auth:valid-after:${userId}`;
+export const GLOBAL_VALID_AFTER_KEY = 'auth:valid-after:global';
 
 /**
  * 标记保留时长 = 任何 token 的最长寿命（config/jwt.ts 启动时保证有效期不超过它）：
@@ -36,7 +37,7 @@ export const VALID_AFTER_TTL_MS = MAX_TOKEN_LIFETIME_SEC * 1000;
 
 /** 吊销该用户此刻之前签发的全部 token，返回写入的时刻 */
 export async function revokeTokensIssuedBefore(
-  cache: Cache,
+  cache: RevocationStore,
   userId: string,
   now: number = Date.now(),
 ): Promise<number> {
@@ -44,15 +45,19 @@ export async function revokeTokensIssuedBefore(
   return now;
 }
 
-export async function readValidAfter(cache: Cache, userId: string): Promise<number | undefined> {
-  const raw = await cache.get<number | string>(validAfterKey(userId));
-  const value = typeof raw === 'string' ? Number(raw) : raw;
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+export async function readValidAfter(cache: RevocationStore, userId: string): Promise<number | undefined> {
+  const values = await Promise.all([
+    cache.get<number | string>(validAfterKey(userId)),
+    cache.get<number | string>(GLOBAL_VALID_AFTER_KEY),
+  ]);
+  const present = values.filter((value) => value !== undefined).map(Number);
+  if (present.some((value) => !Number.isFinite(value))) throw new Error('认证撤销记录无效');
+  return present.length ? Math.max(...present) : undefined;
 }
 
 /** token 是否签发于最近一次吊销之前（没有 iat 的 token 无从判断，按已吊销处理） */
 export async function isIssuedBeforeRevocation(
-  cache: Cache,
+  cache: RevocationStore,
   userId: string,
   iat: number | undefined,
 ): Promise<boolean> {
@@ -71,7 +76,7 @@ export async function isIssuedBeforeRevocation(
  * 否则校验与签发之间落地的改密拦不住这次签发。
  */
 export async function waitUntilIssuable(
-  cache: Cache,
+  cache: RevocationStore,
   userId: string,
   sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 ): Promise<void> {

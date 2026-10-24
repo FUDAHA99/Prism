@@ -1,6 +1,5 @@
 import 'reflect-metadata';
 import { Logger, MessageEvent } from '@nestjs/common';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { JwtService } from '@nestjs/jwt';
 import { get as httpGet, ClientRequest, IncomingMessage } from 'http';
 import { firstValueFrom, lastValueFrom, toArray } from 'rxjs';
@@ -13,6 +12,8 @@ import * as maccms from './maccms-client';
 import { createHttpHarness, HttpHarness, WHO } from '../../common/testing/http-harness';
 import { LoggingInterceptor } from '../../common/interceptors/logging.interceptor';
 import { accessBlacklistKey } from '../auth/token-blacklist.util';
+import { blacklistUntilExpiry } from '../auth/token-revocation';
+import { TokenRevocationStore } from '../auth/token-revocation.store';
 
 const SOURCE = { id: 'source-1', name: '测试源', contentType: CollectContentType.MOVIE, totalCollected: 0 } as CollectSource;
 const DTO = { mode: CollectMode.PAGE_RANGE, pageStart: 2, pageEnd: 3 };
@@ -312,8 +313,8 @@ describe('采集 SSE 真实HTTP、JWT和全局拦截器', () => {
     const stream = await openStream(url, token);
     try {
       await stream.waitFor('event: progress');
-      const payload = new JwtService().decode(token) as { jti: string };
-      await h.moduleRef.get(CACHE_MANAGER).set(accessBlacklistKey(payload.jti), true);
+      const payload = new JwtService().decode(token) as { jti: string; exp: number };
+      await blacklistUntilExpiry(h.moduleRef.get(TokenRevocationStore), accessBlacklistKey(payload.jti), payload.exp);
       await h.http().get(`/collect/logs/${logId}/stream`).set('Authorization', `Bearer ${token}`).expect(401);
       await h.ds.query('DELETE FROM user_roles WHERE user_id = ?', [h.ids.admin]);
       await h.get(`/collect/logs/${logId}/stream`, 'admin').expect(403);

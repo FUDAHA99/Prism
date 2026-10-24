@@ -15,6 +15,8 @@ import * as request from 'supertest';
 
 import { AuthController } from '../../modules/auth/auth.controller';
 import { AuthService } from '../../modules/auth/auth.service';
+import { TokenRevocationStore } from '../../modules/auth/token-revocation.store';
+import { TokenRevocation } from '../../modules/auth/entities/token-revocation.entity';
 import { JwtStrategy } from '../../modules/auth/strategies/jwt.strategy';
 import { revokeTokensIssuedBefore } from '../../modules/auth/token-revocation';
 import { UserService } from '../../modules/user/user.service';
@@ -199,7 +201,7 @@ describe('全局 AccessGuard（真实 HTTP）：严格可选登录、staff / adm
           type: 'better-sqlite3',
           database: ':memory:',
           // 只装载 User 关联闭包里的实体（小说章节等用了 SQLite 不支持的 longtext）+ 观看记录
-          entities: [User, Role, Permission, AuditLog, MediaFile, Content, Category, Comment, WatchHistory, SiteSetting],
+          entities: [User, Role, Permission, AuditLog, MediaFile, Content, Category, Comment, WatchHistory, SiteSetting, TokenRevocation],
           synchronize: true,
           logging: false,
         }),
@@ -212,6 +214,7 @@ describe('全局 AccessGuard（真实 HTTP）：严格可选登录、staff / adm
         // 与 AppModule 相同：访问级别由全局 AccessGuard 执行（Access() 只写元数据）
         { provide: APP_GUARD, useClass: AccessGuard },
         AuthService,
+        TokenRevocationStore,
         JwtStrategy,
         UserService,
         RoleService,
@@ -382,7 +385,7 @@ describe('全局 AccessGuard（真实 HTTP）：严格可选登录、staff / adm
       const { accessToken } = await login('revoked');
       await withAuth(http().get('/probe/optional'), bearer(accessToken)).expect(200);
       // 吊销时刻取 token 签发那一秒之后，与真实改密的判定（iat * 1000 < valid-after）完全一致且不依赖时钟
-      await revokeTokensIssuedBefore(cache as never, id, (decode(accessToken).iat + 1) * 1000);
+      await revokeTokensIssuedBefore(new TokenRevocationStore(ds.manager), id, (decode(accessToken).iat + 1) * 1000);
       const res = await expectRejected(bearer(accessToken));
       expect(res.body.message).toBe('Token已失效，请重新登录');
     });

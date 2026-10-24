@@ -2,7 +2,7 @@ import { ConfigService } from '@nestjs/config';
 import { JwtStrategy } from './jwt.strategy';
 import { JwtPayload } from '../interfaces/auth.interface';
 import { accessBlacklistKey } from '../token-blacklist.util';
-import { validAfterKey } from '../token-revocation';
+import { GLOBAL_VALID_AFTER_KEY, validAfterKey } from '../token-revocation';
 
 /** HTTP 回归覆盖正常鉴权；这里注入依赖故障，确认不能放行，也不把内部错误暴露给客户端。 */
 describe('JwtStrategy 依赖故障', () => {
@@ -32,9 +32,10 @@ describe('JwtStrategy 依赖故障', () => {
   it.each([
     ['注销黑名单', accessBlacklistKey(payload.jti)],
     ['改密吊销标记', validAfterKey(payload.sub)],
+    ['全局撤销基线', GLOBAL_VALID_AFTER_KEY],
   ])('%s 读取失败 → 401，不继续加载用户', async (_label, failedKey) => {
     cache.get.mockImplementation(async (key: string) => {
-      if (key === failedKey) throw new Error('cache connection detail');
+      if (key === failedKey) throw new Error('database connection detail');
       return undefined;
     });
 

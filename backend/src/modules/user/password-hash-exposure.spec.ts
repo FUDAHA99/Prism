@@ -15,6 +15,8 @@ import { RoleService } from '../role/role.service';
 import { AuditLog } from '../audit/entities/audit-log.entity';
 import { AuditService } from '../audit/audit.service';
 import { AuthService } from '../auth/auth.service';
+import { TokenRevocationStore } from '../auth/token-revocation.store';
+import { TokenRevocation } from '../auth/entities/token-revocation.entity';
 import { MediaFile } from '../media/entities/media-file.entity';
 import { MediaService } from '../media/media.service';
 import { Content, ContentStatus } from '../content/entities/content.entity';
@@ -105,7 +107,7 @@ describe('密码哈希不出库：用户与关联查询只取安全字段', () =
       type: 'better-sqlite3',
       database: ':memory:',
       // 只装载被测查询涉及的实体闭包：小说章节等实体用了 SQLite 不支持的 longtext
-      entities: [User, Role, Permission, AuditLog, MediaFile, Content, Category, Comment],
+      entities: [User, Role, Permission, AuditLog, MediaFile, Content, Category, Comment, TokenRevocation],
       synchronize: true,
       logging: false,
     });
@@ -125,6 +127,7 @@ describe('密码哈希不出库：用户与关联查询只取安全字段', () =
         app: { jwt: { refreshSecret: 'unit-test-refresh-secret', refreshExpiresIn: 7 * 24 * 3600 } },
       }),
       cache as any,
+      new TokenRevocationStore(ds.manager),
     );
     mediaService = new MediaService(ds.getRepository(MediaFile), auditService, new ConfigService());
     contentService = new ContentService(ds.getRepository(Content), auditService, new PortalCacheService(new ConfigService()));

@@ -13,6 +13,8 @@ import { randomUUID } from 'crypto';
 import * as request from 'supertest';
 
 import { AuthService } from '../../modules/auth/auth.service';
+import { TokenRevocationStore } from '../../modules/auth/token-revocation.store';
+import { TokenRevocation } from '../../modules/auth/entities/token-revocation.entity';
 import { JwtStrategy } from '../../modules/auth/strategies/jwt.strategy';
 import { UserService } from '../../modules/user/user.service';
 import { RoleService } from '../../modules/role/role.service';
@@ -61,7 +63,7 @@ class JsonCache {
 }
 
 /** JwtStrategy 加载用户时会 join 到的实体闭包（小说章节等用了 SQLite 不支持的 longtext，不能全量装载） */
-const AUTH_ENTITIES = [User, Role, Permission, AuditLog, MediaFile, Content, Category, Comment];
+const AUTH_ENTITIES = [User, Role, Permission, AuditLog, MediaFile, Content, Category, Comment, TokenRevocation];
 
 export interface HarnessOptions {
   controllers: Type<unknown>[];
@@ -112,6 +114,7 @@ export async function createHttpHarness(options: HarnessOptions): Promise<HttpHa
       // 与 AppModule 相同：Access() 只写元数据，访问级别由全局 AccessGuard 执行
       { provide: APP_GUARD, useClass: AccessGuard },
       AuthService,
+      TokenRevocationStore,
       JwtStrategy,
       UserService,
       RoleService,

@@ -1,6 +1,6 @@
 import { Cache } from 'cache-manager';
 import { KeyedMutex } from '../../common/utils/keyed-mutex';
-import { readValidAfter, revokeTokensIssuedBefore } from './token-revocation';
+import { readValidAfter, revokeTokensIssuedBefore, RevocationStore } from './token-revocation';
 
 /**
  * 登录失败计数的缓存键（生产在 Redis；经 Keyv 写入后真实键名带 `keyv::keyv:` 前缀，解锁步骤见 docs/deploy.md）。
@@ -110,9 +110,10 @@ export async function rememberTrustedIpUnlessRevoked(
   userId: string,
   ip: string,
   startedAt: number,
+  revocations: RevocationStore,
 ): Promise<boolean> {
   return trustedIpLocks.run(userId, async () => {
-    const validAfter = await readValidAfter(cache, userId);
+    const validAfter = await readValidAfter(revocations, userId);
     if (validAfter !== undefined && validAfter >= startedAt) return false;
     await rememberTrustedIp(cache, userId, ip);
     return true;
@@ -123,9 +124,13 @@ export async function rememberTrustedIpUnlessRevoked(
  * 吊销该用户此刻之前签发的全部 token（access 与 refresh）并清空受信任 IP；与上面的记 IP 同一把锁。
  * 用于口令可能已经泄露的场合（改密、管理员重置密码）：用旧口令登录过的 IP 不能继续免于账号级锁定。
  */
-export async function revokeAllSessions(cache: Cache, userId: string): Promise<void> {
+export async function revokeAllSessions(
+  cache: Cache,
+  userId: string,
+  revoke: () => Promise<unknown>,
+): Promise<void> {
   await trustedIpLocks.run(userId, async () => {
-    await revokeTokensIssuedBefore(cache, userId);
+    await revoke();
     await forgetTrustedIps(cache, userId);
   });
 }
@@ -136,9 +141,9 @@ export async function revokeAllSessions(cache: Cache, userId: string): Promise<v
  * 清空受信任 IP 毫无安全收益，反而让持有盗来会话的人先猜 5 次清掉本人的受信任 IP，
  * 再用 4×5 次匿名失败登录把本人锁在门外（1-F-1 三次复审）。
  */
-export async function revokeTokensKeepTrustedIps(cache: Cache, userId: string): Promise<void> {
+export async function revokeTokensKeepTrustedIps(revocations: RevocationStore, userId: string): Promise<void> {
   await trustedIpLocks.run(userId, async () => {
-    await revokeTokensIssuedBefore(cache, userId);
+    await revokeTokensIssuedBefore(revocations, userId);
   });
 }
 

@@ -21,6 +21,8 @@ import {
   ThrottlerBehindProxyGuard,
 } from '../../common/guards/throttler-behind-proxy.guard';
 import { AuthService } from './auth.service';
+import { TokenRevocationStore } from './token-revocation.store';
+import { TokenRevocation } from './entities/token-revocation.entity';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { accessBlacklistKey, refreshBlacklistKey } from './token-blacklist.util';
 import * as loginAttempts from './login-attempts';
@@ -120,6 +122,7 @@ interface Harness {
   ds: DataSource;
   userService: UserService;
   authService: AuthService;
+  revocations: TokenRevocationStore;
   users: Repository<User>;
   /** 执行过的全部 SQL（按顺序） */
   queries: string[];
@@ -152,7 +155,7 @@ async function createHarness({ throttle = false } = {}): Promise<Harness> {
         type: 'better-sqlite3',
         database: ':memory:',
         // 只装载 User 关联闭包里的实体（小说章节等用了 SQLite 不支持的 longtext）
-        entities: [User, Role, Permission, AuditLog, MediaFile, Content, Category, Comment, SiteSetting],
+        entities: [User, Role, Permission, AuditLog, MediaFile, Content, Category, Comment, SiteSetting, TokenRevocation],
         synchronize: true,
         // 只记录执行过的 SQL，用来断言每个请求的查询数（不打印）
         logger: {
@@ -175,6 +178,7 @@ async function createHarness({ throttle = false } = {}): Promise<Harness> {
     controllers: [AuthController, ProbeController],
     providers: [
       AuthService,
+      TokenRevocationStore,
       JwtStrategy,
       UserService,
       RoleService,
@@ -214,6 +218,7 @@ async function createHarness({ throttle = false } = {}): Promise<Harness> {
     ds,
     userService,
     authService: moduleRef.get(AuthService),
+    revocations: moduleRef.get(TokenRevocationStore),
     users,
     queries,
     adminId: admin.id,
@@ -250,6 +255,61 @@ describe('认证核心安全行为', () => {
 
   const me = (token: string) => h.http().get('/probe/me').set('Authorization', `Bearer ${token}`);
   const refresh = (token: unknown) => h.http().post('/auth/refresh').send({ refreshToken: token });
+  const remainingTtl = async (key: string) => {
+    const row = await h.ds.getRepository(TokenRevocation).findOneByOrFail({ key });
+    return Number(row.expiresAt) - Date.now();
+  };
+
+  it('注销后普通缓存全部丢失，旧 access 和 refresh 仍不可重放', async () => {
+    const { tokens } = await login();
+    await h.http().post('/auth/logout').set('Authorization', `Bearer ${tokens.accessToken}`)
+      .send({ refreshToken: tokens.refreshToken }).expect(200);
+    h.cache.store.clear();
+    expect((await me(tokens.accessToken)).status).toBe(401);
+    expect((await refresh(tokens.refreshToken)).status).toBe(401);
+  });
+
+  it('管理员改密后普通缓存全部丢失，旧 access 和 refresh 仍不可重放', async () => {
+    const user = await h.userService.create({ username: 'cacheloss', email: 'cacheloss@cms.test', password: 'Original2026x' });
+    const { tokens } = await login({ email: user.email, password: 'Original2026x' });
+    await h.userService.update(user.id, { password: 'Changed2026x' }, h.adminId);
+    h.cache.store.clear();
+    expect((await me(tokens.accessToken)).status).toBe(401);
+    expect((await refresh(tokens.refreshToken)).status).toBe(401);
+  });
+
+  it('撤销表读取失败时拒绝 access 和 refresh，不把数据库错误当作未撤销', async () => {
+    const { tokens } = await login();
+    await h.ds.query('ALTER TABLE token_revocations RENAME TO unavailable_revocations');
+    try {
+      expect((await me(tokens.accessToken)).status).toBe(401);
+      const result = await refresh(tokens.refreshToken);
+      expect(result.status).toBe(500);
+      expect(result.body.accessToken).toBeUndefined();
+    } finally {
+      await h.ds.query('ALTER TABLE unavailable_revocations RENAME TO token_revocations');
+    }
+  });
+
+  it('撤销写入失败时注销不报成功，本人及管理员改密都回滚密码', async () => {
+    const user = await h.userService.create({ username: 'revokefail', email: 'revokefail@cms.test', password: 'Original2026x' });
+    const { tokens } = await login({ email: user.email, password: 'Original2026x' });
+    await h.ds.query("CREATE TRIGGER reject_revocation BEFORE INSERT ON token_revocations BEGIN SELECT RAISE(ABORT, 'revocation write failed'); END");
+    try {
+      await h.http().post('/auth/logout').set('Authorization', `Bearer ${tokens.accessToken}`).expect(500);
+      await h.http().post('/auth/change-password').set('Authorization', `Bearer ${tokens.accessToken}`)
+        .send({ currentPassword: 'Original2026x', newPassword: 'Changed2026x' }).expect(500);
+      await expect(h.userService.update(user.id, { password: 'Reset2026x' }, h.adminId)).rejects.toThrow('revocation write failed');
+      const stored = await h.userService.findByIdWithPassword(user.id);
+      expect(await bcrypt.compare('Original2026x', stored!.passwordHash)).toBe(true);
+      expect(await bcrypt.compare('Changed2026x', stored!.passwordHash)).toBe(false);
+      expect(await bcrypt.compare('Reset2026x', stored!.passwordHash)).toBe(false);
+    } finally {
+      await h.ds.query('DROP TRIGGER reject_revocation');
+    }
+    expect((await me(tokens.accessToken)).status).toBe(200);
+    await login({ email: user.email, password: 'Original2026x' });
+  });
 
   describe('access / refresh 分离', () => {
     it('access token：access 密钥签名、type=access、带 jti；refresh 密钥验不过', async () => {
@@ -312,7 +372,7 @@ describe('认证核心安全行为', () => {
       expect((await refresh(tokens.refreshToken)).status).toBe(401);
       // 黑名单只保留到旧 refresh 自然过期
       const { exp } = decode(tokens.refreshToken);
-      const ttl = h.cache.ttls.get(refreshBlacklistKey(tokens.refreshToken))!;
+      const ttl = await remainingTtl(refreshBlacklistKey(tokens.refreshToken));
       expect(ttl).toBeGreaterThan(0);
       expect(Math.abs(Date.now() + ttl - exp * 1000)).toBeLessThan(5000);
 
@@ -392,7 +452,7 @@ describe('认证核心安全行为', () => {
         [accessBlacklistKey(decode(tokens.accessToken).jti), tokens.accessToken],
         [refreshBlacklistKey(tokens.refreshToken), tokens.refreshToken],
       ]) {
-        const ttl = h.cache.ttls.get(key)!;
+        const ttl = await remainingTtl(key);
         expect(Math.abs(Date.now() + ttl - decode(token).exp * 1000)).toBeLessThan(5000);
       }
     });
@@ -453,11 +513,12 @@ describe('认证核心安全行为', () => {
       expect((await me(tok)).status).toBe(200);
       await h.http().post('/auth/logout').set('Authorization', `Bearer ${tok}`).expect(200);
       const { jti, exp } = decode(tok);
-      expect(await h.cache.get(accessBlacklistKey(jti))).toBe(1);
-      const ttl = h.cache.ttls.get(accessBlacklistKey(jti))!;
+      expect(await h.revocations.get(accessBlacklistKey(jti))).toBe(1);
+      const ttl = await remainingTtl(accessBlacklistKey(jti));
       expect(Math.abs(Date.now() + ttl - exp * 1000)).toBeLessThan(5000);
-      // 缓存里不落 token 原文
+      // 撤销表与缓存都不落 token 原文
       expect([...h.cache.store.keys()].some((k) => k.includes(tok))).toBe(false);
+      expect((await h.ds.getRepository(TokenRevocation).find()).some((row) => row.key.includes(tok))).toBe(false);
     });
   });
 
@@ -723,6 +784,7 @@ describe('认证核心安全行为', () => {
     describe('校验凭据之后、签名之前落地的改密（TOCTOU）', () => {
       afterEach(() => {
         h.cache.hooks = {};
+        jest.restoreAllMocks();
       });
 
       it('refresh：吊销检查通过后、签发前对方改了密码 → 401，攻击者拿不到改密后仍有效的新 token', async () => {
@@ -730,14 +792,15 @@ describe('认证核心安全行为', () => {
         const stolen = await login(u);
         const victim = await login(u);
         let changed = 0;
-        h.cache.hooks.beforeSet = async (key) => {
+        const originalSet = h.revocations.set.bind(h.revocations);
+        jest.spyOn(h.revocations, 'set').mockImplementationOnce(async (key, value, ttl) => {
           // 旧 refresh 写进黑名单的那一刻（吊销检查之后、签发之前）受害者完成改密
           if (key === refreshBlacklistKey(stolen.tokens.refreshToken)) {
-            h.cache.hooks.beforeSet = undefined;
             const res = await change(victim.tokens.accessToken, { currentPassword: u.password, newPassword: 'Changed2026' });
             changed = res.status;
           }
-        };
+          await originalSet(key, value, ttl);
+        });
         const res = await refresh(stolen.tokens.refreshToken);
         expect(changed).toBe(200);
         expect(res.status).toBe(401);
@@ -812,9 +875,9 @@ describe('认证核心安全行为', () => {
         let entered!: () => void;
         const enteredP = new Promise<void>((resolve) => (entered = resolve));
         let revokeDone = false;
-        const spy = jest.spyOn(loginAttempts, 'revokeAllSessions').mockImplementationOnce((cache, userId) => {
+        const spy = jest.spyOn(loginAttempts, 'revokeAllSessions').mockImplementationOnce((cache, userId, revoke) => {
           entered();
-          return real(cache, userId).then(() => {
+          return real(cache, userId, revoke).then(() => {
             revokeDone = true;
           });
         });
@@ -856,6 +919,26 @@ describe('认证核心安全行为', () => {
         expect(rotated.status).toBe(200);
         expect((await me(rotated.body.accessToken)).status).toBe(200);
       });
+    });
+
+    it('本人旧密码验证之后管理员完成重置，在途本人改密不得覆盖管理员新密码', async () => {
+      const u = await freshUser();
+      const { tokens } = await login(u);
+      const original = h.userService.updatePassword.bind(h.userService);
+      const spy = jest.spyOn(h.userService, 'updatePassword').mockImplementationOnce(async (...args) => {
+        await h.userService.update(u.id, { password: 'Reset2026x' }, h.adminId);
+        return original(...args);
+      });
+      try {
+        const result = await change(tokens.accessToken, { currentPassword: u.password, newPassword: 'Racing2026x' });
+        expect(result.status).toBe(409);
+        await login({ email: u.email, password: 'Reset2026x' });
+        await h.http().post('/auth/login').send({ email: u.email, password: 'Racing2026x' }).expect(401);
+        expect((await me(tokens.accessToken)).status).toBe(401);
+        expect((await refresh(tokens.refreshToken)).status).toBe(401);
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     it('管理员重置密码（UserService.update 的 password 分支）同样吊销该用户的 token', async () => {
@@ -950,16 +1033,17 @@ describe('认证核心安全行为', () => {
       expect((await me(rotated.body.accessToken)).body).toEqual({ id: u.id });
     });
 
-    it('每个已认证请求只发 1 条 SQL（取用户、角色、权限的一条联表查询），不读写 user:<id> 缓存', async () => {
+    it('每个已认证请求查持久化撤销状态及单条用户角色联表，不读写 user:<id> 缓存', async () => {
       const { tokens } = await login();
       await h.cache.del(userCacheKey(h.adminId));
       for (const path of ['/probe/me', '/probe/admin', '/auth/me']) {
         h.queries.length = 0;
         const res = await h.http().get(path).set('Authorization', `Bearer ${tokens.accessToken}`);
         expect(res.status).toBe(200);
-        expect(h.queries).toHaveLength(1);
-        expect(h.queries[0]).toMatch(/user_roles/);
-        expect(h.queries[0]).not.toMatch(/passwordHash/);
+        expect(h.queries).toHaveLength(4);
+        expect(h.queries.filter((query) => query.includes('token_revocations'))).toHaveLength(3);
+        expect(h.queries.filter((query) => query.includes('user_roles'))).toHaveLength(1);
+        expect(h.queries.join('\n')).not.toMatch(/passwordHash/);
       }
       expect(h.cache.store.has(userCacheKey(h.adminId))).toBe(false);
     });

@@ -2,6 +2,14 @@ import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 
+// 静态导入 AppModule 也会调用 forRoot；测试只使用显式环境，不读取本机 .env。
+jest.mock('@nestjs/config', () => {
+  const actual = jest.requireActual('@nestjs/config');
+  const forRoot = actual.ConfigModule.forRoot.bind(actual.ConfigModule);
+  actual.ConfigModule.forRoot = jest.fn((options) => forRoot({ ...options, ignoreEnvFile: true }));
+  return actual;
+});
+
 /**
  * 整个 AppModule 的依赖注入图能否解析（批次 1-F-3）。
  *

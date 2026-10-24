@@ -9,6 +9,7 @@ import { User } from './entities/user.entity';
 import { RoleModule } from '../role/role.module';
 import { AuditModule } from '../audit/audit.module';
 import { RedisModule } from '../../shared/redis/redis.module';
+import { TokenRevocationStore } from '../auth/token-revocation.store';
 
 @Module({
   imports: [
@@ -19,7 +20,7 @@ import { RedisModule } from '../../shared/redis/redis.module';
     RedisModule,
   ],
   controllers: [UserController],
-  providers: [UserService],
-  exports: [UserService, TypeOrmModule],
+  providers: [UserService, TokenRevocationStore],
+  exports: [UserService, TypeOrmModule, TokenRevocationStore],
 })
 export class UserModule {}

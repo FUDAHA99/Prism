@@ -20,6 +20,8 @@ import { MovieSource, MovieSourceKind } from './entities/movie-source.entity';
 import { MovieEpisode } from './entities/movie-episode.entity';
 import { MOVIE_PUBLIC_MAX_LIMIT } from './dto/query-movie.dto';
 import { AuthService } from '../auth/auth.service';
+import { TokenRevocationStore } from '../auth/token-revocation.store';
+import { TokenRevocation } from '../auth/entities/token-revocation.entity';
 import { JwtStrategy } from '../auth/strategies/jwt.strategy';
 import { UserService } from '../user/user.service';
 import { RoleService } from '../role/role.service';
@@ -236,7 +238,7 @@ describe('影视模块 HTTP', () => {
           type: 'better-sqlite3',
           database: ':memory:',
           // User 关联闭包里的实体 + 影视三张表（小说章节等用了 SQLite 不支持的 longtext）
-          entities: [User, Role, Permission, AuditLog, MediaFile, Content, Category, Comment, Movie, MovieSource, MovieEpisode],
+          entities: [User, Role, Permission, AuditLog, MediaFile, Content, Category, Comment, Movie, MovieSource, MovieEpisode, TokenRevocation],
           synchronize: true,
           logging: false,
         }),
@@ -252,6 +254,7 @@ describe('影视模块 HTTP', () => {
         // 与 AppModule 相同：Access() 只写元数据，访问级别由全局 AccessGuard 执行
         { provide: APP_GUARD, useClass: AccessGuard },
         AuthService,
+        TokenRevocationStore,
         JwtStrategy,
         UserService,
         RoleService,

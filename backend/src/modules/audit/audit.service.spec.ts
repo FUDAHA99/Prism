@@ -8,6 +8,7 @@ import { AuditLog } from './entities/audit-log.entity';
 import { AuditService } from './audit.service';
 import { AUDIT_MAX_JSON_BYTES, AUDIT_REDACTED } from './audit-sanitizer';
 import { User } from '../user/entities/user.entity';
+import { TokenRevocation } from '../auth/entities/token-revocation.entity';
 import { UserService } from '../user/user.service';
 import { Role } from '../role/entities/role.entity';
 import { Permission } from '../role/entities/permission.entity';
@@ -73,7 +74,7 @@ describe('AuditService 脱敏、截断与列表字段', () => {
       type: 'better-sqlite3',
       database: ':memory:',
       // 只装载被测查询涉及的实体闭包：小说章节等实体用了 SQLite 不支持的 longtext
-      entities: [User, Role, Permission, AuditLog, MediaFile, Content, Category, Comment],
+      entities: [User, Role, Permission, AuditLog, MediaFile, Content, Category, Comment, TokenRevocation],
       synchronize: true,
       logging: false,
     });

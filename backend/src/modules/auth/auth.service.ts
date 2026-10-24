@@ -51,6 +51,7 @@ import {
 import { UserService } from '../user/user.service';
 import { RoleService } from '../role/role.service';
 import { AuditService } from '../audit/audit.service';
+import { TokenRevocationStore } from './token-revocation.store';
 
 interface LoginAttemptData {
   ip: string;
@@ -96,6 +97,7 @@ export class AuthService {
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
+    private readonly revocations: TokenRevocationStore,
   ) {}
 
   async login(
@@ -232,10 +234,10 @@ export class AuthService {
     const blacklistKey = refreshBlacklistKey(refreshToken);
 
     return this.refreshLocks.run(blacklistKey, async () => {
-      if (await this.cacheManager.get(blacklistKey)) {
+      if (await this.revocations.get(blacklistKey)) {
         throw new UnauthorizedException('refresh token已失效');
       }
-      if (await isIssuedBeforeRevocation(this.cacheManager, payload.sub, payload.iat)) {
+      if (await isIssuedBeforeRevocation(this.revocations, payload.sub, payload.iat)) {
         throw new UnauthorizedException('refresh token已失效，请重新登录');
       }
 
@@ -244,11 +246,11 @@ export class AuthService {
         throw new UnauthorizedException('用户不存在或已被禁用');
       }
 
-      await blacklistUntilExpiry(this.cacheManager, blacklistKey, payload.exp);
+      await blacklistUntilExpiry(this.revocations, blacklistKey, payload.exp);
       // 上面的吊销检查到签发之间还有查库、写黑名单、waitUntilIssuable 的等待：签名前按同一条规则再查一次，
       // 这段时间里落地的改密同样让这个 refresh token 作废（否则新 token 的 iat 晚于吊销时刻，能一直轮换下去）
       return this.generateTokens(user, payload.exp - payload.iat, async () => {
-        if (await isIssuedBeforeRevocation(this.cacheManager, payload.sub, payload.iat)) {
+        if (await isIssuedBeforeRevocation(this.revocations, payload.sub, payload.iat)) {
           throw new UnauthorizedException('refresh token已失效，请重新登录');
         }
       });
@@ -271,14 +273,14 @@ export class AuthService {
   ): Promise<void> {
     const access = this.tryVerifyAccessToken(accessToken);
     if (access && access.sub === userId) {
-      await blacklistUntilExpiry(this.cacheManager, accessBlacklistKey(access.jti), access.exp);
+      await blacklistUntilExpiry(this.revocations, accessBlacklistKey(access.jti), access.exp);
     }
 
     if (refreshToken) {
       const payload = this.tryVerifyRefreshToken(refreshToken);
       if (payload && payload.sub === userId) {
         await blacklistUntilExpiry(
-          this.cacheManager,
+          this.revocations,
           refreshBlacklistKey(refreshToken),
           payload.exp,
         );
@@ -335,10 +337,10 @@ export class AuthService {
           // 吊销该用户的全部 token（含攻击者手里的 refresh token）：只吊销发起请求的 access token 的话，
           // 盗用者拿 refresh 换一个新的，等窗口过去再来 5 次，本人一直改不了密码。
           // 受信任 IP 保留：口令没泄露，清掉它只会帮攻击者绕过账号级锁定的豁免（见 revokeTokensKeepTrustedIps）
-          await revokeTokensKeepTrustedIps(this.cacheManager, userId);
+          await revokeTokensKeepTrustedIps(this.revocations, userId);
           const access = this.tryVerifyAccessToken(accessToken);
           if (access && access.sub === userId) {
-            await blacklistUntilExpiry(this.cacheManager, accessBlacklistKey(access.jti), access.exp);
+            await blacklistUntilExpiry(this.revocations, accessBlacklistKey(access.jti), access.exp);
           }
           throw tooMany();
         }
@@ -349,7 +351,7 @@ export class AuthService {
         throw new BadRequestException('新密码不能与当前密码相同');
       }
 
-      await this.userService.updatePassword(userId, newPassword);
+      await this.userService.updatePassword(userId, newPassword, user.passwordHash);
       await this.cacheManager.del(failuresKey);
     });
 
@@ -406,7 +408,7 @@ export class AuthService {
     refreshLifetimeSec: number,
     assertStillValid?: () => Promise<void>,
   ): Promise<AuthTokens> {
-    await waitUntilIssuable(this.cacheManager, user.id);
+    await waitUntilIssuable(this.revocations, user.id);
     // 紧挨着签名再确认一次凭据没在校验之后被吊销（之后到 sign 之间没有 await）。
     // waitUntilIssuable 让签出的 iat 晚于吊销时刻，少了这一步，校验与签发之间落地的改密反而拦不住新 token
     if (assertStillValid) {
@@ -450,7 +452,7 @@ export class AuthService {
    * 吊销发生在本次登录开始之后时两件事都不做：这次签出的 token 本就已作废。
    */
   private async afterPasswordLogin(userId: string, ip: string, startedAt: number): Promise<void> {
-    if (!(await rememberTrustedIpUnlessRevoked(this.cacheManager, userId, ip, startedAt))) return;
+    if (!(await rememberTrustedIpUnlessRevoked(this.cacheManager, userId, ip, startedAt, this.revocations))) return;
     await this.changePasswordLocks.run(userId, async () => {
       const failures = (await this.cacheManager.get<number>(changePasswordFailuresKey(userId))) || 0;
       if (failures >= MAX_CHANGE_PASSWORD_FAILURES) {
@@ -462,10 +464,10 @@ export class AuthService {
   /**
    * 登录的签发前检查：口令是在 startedAt 之后才读出、比对的。这之后发生过改密 / 管理员重置密码
    * （valid-after 不早于 startedAt），比对用的就可能是旧哈希，按凭据已失效处理。
-   * 吊销标记在新哈希落库之后才写，所以 valid-after 早于 startedAt 时，本次读到的一定是新哈希。
+   * 吊销标记与新哈希同事务提交，所以 valid-after 早于 startedAt 时，本次读到的一定是新哈希。
    */
   private async assertNotRevokedSince(userId: string, startedAt: number): Promise<void> {
-    const validAfter = await readValidAfter(this.cacheManager, userId);
+    const validAfter = await readValidAfter(this.revocations, userId);
     if (validAfter !== undefined && validAfter >= startedAt) {
       throw new UnauthorizedException('密码刚被修改，请用新密码重新登录');
     }

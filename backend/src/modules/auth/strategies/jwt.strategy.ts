@@ -1,11 +1,10 @@
-import { Injectable, UnauthorizedException, Inject } from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
 import { Strategy } from 'passport-jwt';
 import { ConfigService } from '@nestjs/config';
 import { JwtPayload, AuthUser } from '../interfaces/auth.interface';
 import { AuthService } from '../auth.service';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import { Cache } from 'cache-manager';
+import { TokenRevocationStore } from '../token-revocation.store';
 import { accessBlacklistKey } from '../token-blacklist.util';
 import { isIssuedBeforeRevocation } from '../token-revocation';
 import { extractAccessToken } from '../access-token.extractor';
@@ -15,7 +14,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   constructor(
     private readonly configService: ConfigService,
     private readonly authService: AuthService,
-    @Inject(CACHE_MANAGER) private cacheManager: Cache,
+    private readonly revocations: TokenRevocationStore,
   ) {
     super({
       // 只认 `Bearer <三段 base64url>` 这一种写法；/auth/logout 用同一个函数取 token
@@ -37,12 +36,12 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       if (typeof payload.jti !== 'string' || payload.jti === '') {
         throw new UnauthorizedException('无效的token');
       }
-      if (await this.cacheManager.get(accessBlacklistKey(payload.jti))) {
+      if (await this.revocations.get(accessBlacklistKey(payload.jti))) {
         throw new UnauthorizedException('Token已被注销');
       }
 
       // 改密 / 管理员重置密码之前签发的 token 一律作废
-      if (await isIssuedBeforeRevocation(this.cacheManager, payload.sub, payload.iat)) {
+      if (await isIssuedBeforeRevocation(this.revocations, payload.sub, payload.iat)) {
         throw new UnauthorizedException('Token已失效，请重新登录');
       }
 

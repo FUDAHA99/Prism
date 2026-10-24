@@ -13,6 +13,8 @@ import * as request from 'supertest';
 
 import { AuthController } from '../auth/auth.controller';
 import { AuthService } from '../auth/auth.service';
+import { TokenRevocationStore } from '../auth/token-revocation.store';
+import { TokenRevocation } from '../auth/entities/token-revocation.entity';
 import { JwtStrategy } from '../auth/strategies/jwt.strategy';
 import { AuthUser } from '../auth/interfaces/auth.interface';
 import { UserController } from '../user/user.controller';
@@ -121,7 +123,7 @@ describe('角色分配：MySQL 安全 SQL、前后端路由一致、改角色立
           type: 'better-sqlite3',
           database: ':memory:',
           // 只装载 User 关联闭包里的实体（小说章节等用了 SQLite 不支持的 longtext）
-          entities: [User, Role, Permission, AuditLog, MediaFile, Content, Category, Comment, SiteSetting],
+          entities: [User, Role, Permission, AuditLog, MediaFile, Content, Category, Comment, SiteSetting, TokenRevocation],
           synchronize: true,
           logging: false,
         }),
@@ -134,6 +136,7 @@ describe('角色分配：MySQL 安全 SQL、前后端路由一致、改角色立
         // 与 AppModule 相同：Access() 只写元数据，访问级别由全局 AccessGuard 执行
         { provide: APP_GUARD, useClass: AccessGuard },
         AuthService,
+        TokenRevocationStore,
         JwtStrategy,
         UserService,
         RoleService,

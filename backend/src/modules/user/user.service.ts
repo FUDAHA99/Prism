@@ -20,6 +20,8 @@ import { AuditService } from '../audit/audit.service';
 import { changedAuditFields, pickAuditFields } from '../audit/audit-summary';
 import { AuthIdentity, SafeUser, toSafeUser } from './user-fields';
 import { clearChangePasswordFailures, revokeAllSessions } from '../auth/login-attempts';
+import { revokeTokensIssuedBefore } from '../auth/token-revocation';
+import { TokenRevocationStore } from '../auth/token-revocation.store';
 import { ADMIN_ROLES } from '../../common/authz/access.decorator';
 import { userCacheKey } from './user-cache';
 import {
@@ -255,15 +257,21 @@ export class UserService {
   }
 
   /**
-   * 改密码的唯一落库入口之一（另一处是 update 的管理员重置分支）：写完即吊销该用户之前签发的全部 token，
+   * 改密码的唯一落库入口之一（另一处是 update 的管理员重置分支）：密码与全部 token 吊销标记同事务提交，
    * 并清空登录的受信任 IP（此前凭旧口令登录成功过的 IP 不再豁免账号级失败上限）。
    * 两步与登录记受信任 IP 同一把锁（revokeAllSessions），进行中的旧口令登录不会把 IP 写回去
    */
-  async updatePassword(id: string, newPassword: string): Promise<void> {
+  async updatePassword(id: string, newPassword: string, expectedPasswordHash: string): Promise<void> {
     const passwordHash = await this.hashPassword(newPassword);
-    await this.userRepository.update(id, { passwordHash });
+    await revokeAllSessions(this.cacheManager, id, () => this.userRepository.manager.transaction(async (manager) => {
+      // 核对旧口令后可能已有管理员重置：只更新仍持有已验证哈希的账号，不能覆盖恢复操作。
+      const updated = await manager.update(User, { id, passwordHash: expectedPasswordHash, deletedAt: IsNull() }, { passwordHash });
+      if (updated.affected !== 1) {
+        throw new ConflictException('密码已被修改，请重新登录后再试');
+      }
+      await revokeTokensIssuedBefore(new TokenRevocationStore(manager), id);
+    }));
     await this.clearUserCache(id);
-    await revokeAllSessions(this.cacheManager, id);
   }
 
   /**
@@ -327,13 +335,19 @@ export class UserService {
     }
 
     if (Object.keys(updateData).length > 0) {
-      await this.userRepository.update(id, updateData);
+      if (updateData.passwordHash) {
+        await revokeAllSessions(this.cacheManager, id, () => this.userRepository.manager.transaction(async (manager) => {
+          await manager.update(User, id, updateData);
+          await revokeTokensIssuedBefore(new TokenRevocationStore(manager), id);
+        }));
+      } else {
+        await this.userRepository.update(id, updateData);
+      }
     }
     await this.clearUserCache(id);
     if (updateData.passwordHash) {
       // 管理员重置密码：该用户已签发的 token（可能已经泄露）一并作废，受信任 IP 一并清空；
       // 改密失败计数清零，本人用新密码登录后可以立刻改成自己的密码
-      await revokeAllSessions(this.cacheManager, id);
       await clearChangePasswordFailures(this.cacheManager, id);
     }
 
