@@ -103,7 +103,7 @@ export class CategoryService {
 
   /**
    * 父分类必须存在，且不能是自己或自己的子孙（否则形成环：门户导航、按父级取子分类都会死循环或丢数据）。
-   * 沿 parentId 列向上走（实体上的 parent / children 关系映射的是另一列，这里不用它）。
+   * 沿 parentId（与 parent / children 共用 parent_id 列）向上走，只读取成环检查需要的字段。
    */
   private async assertParentUsable(rawParentId: string, rawSelfId: string | null): Promise<void> {
     // 一律按小写比较：库的排序规则不区分大小写，JS 的 === 区分（见 uuid-case）

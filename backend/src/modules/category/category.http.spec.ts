@@ -170,6 +170,39 @@ describe('分类接口 HTTP', () => {
   });
 
   describe('父分类', () => {
+    it('API 写入 parentId 后公开 parent / children 关系同步，移动与清空父级同样生效', async () => {
+      const parent = await make('relation-parent');
+      const nextParent = await make('relation-next');
+      const created = await h.post('/categories', 'admin', createForm('relation-child', { parentId: parent.id })).expect(201);
+      const childId = created.body.data.id as string;
+
+      const child = await h.get(`/categories/${childId}`, 'anonymous').expect(200);
+      expect(child.body.data.parentId).toBe(parent.id);
+      expect(child.body.data.parent?.id).toBe(parent.id);
+      const firstParent = await h.get(`/categories/${parent.id}`, 'anonymous').expect(200);
+      expect(firstParent.body.data.children.map((c: Category) => c.id)).toEqual([childId]);
+
+      const moved = await h.patch(`/categories/${childId}`, 'admin', { parentId: nextParent.id }).expect(200);
+      expect(moved.body.data.parent?.id).toBe(nextParent.id);
+      const all = await h.get('/categories', 'anonymous').expect(200);
+      expect(all.body.data.find((c: Category) => c.id === parent.id).children).toEqual([]);
+      expect(all.body.data.find((c: Category) => c.id === nextParent.id).children.map((c: Category) => c.id)).toEqual([childId]);
+
+      const cleared = await h.patch(`/categories/${childId}`, 'admin', { parentId: null }).expect(200);
+      expect(cleared.body.data.parent).toBeNull();
+      expect((await h.get(`/categories/${nextParent.id}`, 'anonymous').expect(200)).body.data.children).toEqual([]);
+    });
+
+    it('API 创建的子分类阻止删除父分类：409 且父子两行均保留', async () => {
+      const parent = await make('delete-parent');
+      const child = await h.post('/categories', 'admin', createForm('delete-child', { parentId: parent.id })).expect(201);
+      const res = await h.del(`/categories/${parent.id}`, 'admin').expect(409);
+      expect(res.body.message).toBe('请先删除子分类');
+      expect(await repo.count()).toBe(2);
+      expect(await repo.findOneByOrFail({ id: child.body.data.id })).toMatchObject({ parentId: parent.id });
+      expect(await repo.findOneBy({ id: parent.id })).not.toBeNull();
+    });
+
     it('不存在的父分类 → 400', async () => {
       const res = await h
         .post('/categories', 'admin', createForm('orphan', { parentId: '00000000-0000-4000-8000-0000000000aa' }))

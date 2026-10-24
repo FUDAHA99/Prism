@@ -29,7 +29,7 @@ export class Category {
   description?: string;
 
   @ApiProperty({ description: '父分类ID' })
-  @Column({ type: 'uuid', nullable: true })
+  @Column({ name: 'parent_id', type: 'varchar', length: 36, nullable: true })
   parentId?: string;
 
   @ApiProperty({ description: '排序' })
