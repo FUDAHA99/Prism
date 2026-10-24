@@ -2,7 +2,7 @@
 
 import { useEffect, useState, FormEvent } from 'react'
 import dayjs from 'dayjs'
-import type { PublicComment } from '@/lib/types'
+import type { Pagination, PublicComment } from '@/lib/types'
 
 interface Props {
   contentId: string
@@ -39,9 +39,91 @@ function IdentityBadge({ isRegistered }: Pick<PublicComment, 'isRegistered'>) {
   )
 }
 
-export default function CommentSection({ contentId, enabled, needAudit }: Props) {
-  const [comments, setComments] = useState<PublicComment[]>([])
+/** 每层只取一页直系评论；展开下一层时才请求回复。 */
+function CommentList({ contentId, parentId }: { contentId: string; parentId?: string }) {
+  const [expanded, setExpanded] = useState(!parentId)
+  const [page, setPage] = useState(1)
+  const [result, setResult] = useState<Pagination<PublicComment> | null>(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(false)
+  const [retry, setRetry] = useState(0)
+
+  useEffect(() => {
+    if (!expanded) return
+    const controller = new AbortController()
+    const query = new URLSearchParams({ contentId, page: String(page), limit: '20' })
+    if (parentId) query.set('parentId', parentId)
+    setLoading(true)
+    setError(false)
+    fetch(`${API_BASE}/api/v1/comments/public/page?${query}`, {
+      cache: 'no-store',
+      signal: controller.signal,
+    }).then(async (res) => {
+      const json = await res.json()
+      if (!res.ok || !json.success) throw new Error('评论加载失败')
+      if (!controller.signal.aborted) setResult(json.data)
+    }).catch(() => {
+      if (!controller.signal.aborted) setError(true)
+    }).finally(() => {
+      if (!controller.signal.aborted) setLoading(false)
+    })
+    return () => controller.abort()
+  }, [contentId, parentId, page, expanded, retry])
+
+  if (!expanded) {
+    return (
+      <button type="button" aria-expanded={false} onClick={() => setExpanded(true)} className="mt-2 text-sm text-brand-600">
+        查看回复
+      </button>
+    )
+  }
+
+  return (
+    <div className={parentId ? 'mt-3 ml-4 border-l border-gray-200 pl-3' : 'mb-8'}>
+      {parentId && (
+        <button type="button" aria-expanded={true} onClick={() => setExpanded(false)} className="mb-2 text-sm text-brand-600">
+          收起回复
+        </button>
+      )}
+      {loading ? (
+        <p className="text-sm text-gray-400">加载中…</p>
+      ) : error ? (
+        <p role="alert" className="text-sm text-red-500">
+          评论加载失败
+          <button type="button" onClick={() => setRetry((value) => value + 1)} className="ml-2 underline">重试</button>
+        </p>
+      ) : !result?.data.length ? (
+        <p className="text-sm text-gray-400 mb-6">{parentId ? '暂无回复' : '暂无评论，欢迎抢沙发 🛋'}</p>
+      ) : (
+        <ul className="space-y-4">
+          {result.data.map((comment) => (
+            <li key={comment.id} className="border-l-2 border-brand-500 bg-gray-50 px-4 py-3 rounded-r">
+              <div className="flex items-center justify-between mb-1">
+                <span className="font-medium text-gray-800">
+                  {displayName(comment)}
+                  <IdentityBadge isRegistered={comment.isRegistered} />
+                </span>
+                <time className="text-xs text-gray-500">{dayjs(comment.createdAt).format('YYYY-MM-DD HH:mm')}</time>
+              </div>
+              <p className="text-sm text-gray-700 whitespace-pre-wrap">{comment.body}</p>
+              <CommentList contentId={contentId} parentId={comment.id} />
+            </li>
+          ))}
+        </ul>
+      )}
+      {!loading && !error && result && result.meta.totalPages > 1 && (
+        <nav aria-label={parentId ? '回复分页' : '评论分页'} className="mt-4 flex items-center gap-3 text-sm">
+          <button type="button" disabled={page <= 1} onClick={() => setPage((value) => value - 1)} className="text-brand-600 disabled:text-gray-400">上一页</button>
+          <span>第 {page} / {result.meta.totalPages} 页</span>
+          <button type="button" disabled={page >= result.meta.totalPages} onClick={() => setPage((value) => value + 1)} className="text-brand-600 disabled:text-gray-400">下一页</button>
+        </nav>
+      )}
+    </div>
+  )
+}
+
+export default function CommentSection({ contentId, enabled, needAudit }: Props) {
+  const [revision, setRevision] = useState(0)
   const [submitting, setSubmitting] = useState(false)
   const [hint, setHint] = useState<string>('')
   const [hintKind, setHintKind] = useState<'success' | 'error' | 'info'>('info')
@@ -50,27 +132,6 @@ export default function CommentSection({ contentId, enabled, needAudit }: Props)
     guestEmail: '',
     body: '',
   })
-
-  async function fetchComments() {
-    setLoading(true)
-    try {
-      const res = await fetch(
-        `${API_BASE}/api/v1/comments/public?contentId=${contentId}`,
-        { cache: 'no-store' },
-      )
-      const json = await res.json()
-      setComments(json?.data ?? [])
-    } catch {
-      setComments([])
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  useEffect(() => {
-    fetchComments()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [contentId])
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
@@ -111,7 +172,7 @@ export default function CommentSection({ contentId, enabled, needAudit }: Props)
             ? '✅ 评论已提交，审核通过后将公开显示'
             : '✅ 评论提交成功',
         )
-        if (!pending) await fetchComments()
+        if (!pending) setRevision((value) => value + 1)
       } else {
         setHintKind('error')
         // 后端校验消息可能是数组，也可能是单条字符串；统一兜底
@@ -140,57 +201,10 @@ export default function CommentSection({ contentId, enabled, needAudit }: Props)
   return (
     <section className="mt-10 bg-white rounded-lg p-6 shadow-sm">
       <h2 className="text-xl font-semibold mb-4 text-gray-800">
-        💬 评论 ({comments.length})
+        💬 评论
       </h2>
 
-      {/* 评论列表 */}
-      {loading ? (
-        <p className="text-sm text-gray-400">加载中…</p>
-      ) : comments.length === 0 ? (
-        <p className="text-sm text-gray-400 mb-6">暂无评论，欢迎抢沙发 🛋</p>
-      ) : (
-        <ul className="space-y-4 mb-8">
-          {comments.map((c) => (
-            <li
-              key={c.id}
-              className="border-l-2 border-brand-500 bg-gray-50 px-4 py-3 rounded-r"
-            >
-              <div className="flex items-center justify-between mb-1">
-                <span className="font-medium text-gray-800">
-                  {displayName(c)}
-                  <IdentityBadge isRegistered={c.isRegistered} />
-                </span>
-                <time className="text-xs text-gray-500">
-                  {dayjs(c.createdAt).format('YYYY-MM-DD HH:mm')}
-                </time>
-              </div>
-              <p className="text-sm text-gray-700 whitespace-pre-wrap">
-                {c.body}
-              </p>
-              {c.children && c.children.length > 0 && (
-                <ul className="mt-3 ml-4 space-y-2 border-l border-gray-200 pl-3">
-                  {c.children.map((child) => (
-                    <li key={child.id} className="text-sm">
-                      <div className="flex items-center justify-between mb-0.5">
-                        <span className="font-medium text-gray-700">
-                          ↪ {displayName(child)}
-                          <IdentityBadge isRegistered={child.isRegistered} />
-                        </span>
-                        <time className="text-xs text-gray-400">
-                          {dayjs(child.createdAt).format('MM-DD HH:mm')}
-                        </time>
-                      </div>
-                      <p className="text-gray-600 whitespace-pre-wrap">
-                        {child.body}
-                      </p>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
+      <CommentList key={`${contentId}:${revision}`} contentId={contentId} />
 
       {/* 评论表单 */}
       <form onSubmit={handleSubmit} className="space-y-3">

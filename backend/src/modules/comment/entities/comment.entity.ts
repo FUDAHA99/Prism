@@ -3,10 +3,12 @@ import {
   PrimaryGeneratedColumn,
   Column,
   CreateDateColumn,
+  Index,
 } from 'typeorm';
 import { ApiProperty } from '@nestjs/swagger';
 
 @Entity('comments')
+@Index('IDX_comments_public_thread', ['contentId', 'status', 'parentId', 'createdAt', 'id'])
 export class Comment {
   @ApiProperty({ description: '评论ID' })
   @PrimaryGeneratedColumn('uuid')

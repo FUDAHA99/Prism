@@ -306,6 +306,16 @@ describe('评论接口 HTTP', () => {
   });
 
   describe('GET /comments/public', () => {
+    it('旧接口仍返回数组和树，但最多读取 100 条，创建时间相同按 ID 稳定排序', async () => {
+      const ids = Array.from({ length: 101 }, (_, i) => `00000000-0000-4000-8000-${String(i + 1).padStart(12, '0')}`);
+      await comments.save(ids.slice().reverse().map(id => ({
+        id, contentId: contentIds.published, body: id, status: 'approved', createdAt: new Date('2026-01-01T00:00:00Z'),
+      })));
+      const res = await h.get(`/comments/public?contentId=${contentIds.published}`, 'anonymous').expect(200);
+      expect(Array.isArray(res.body.data)).toBe(true);
+      expect(res.body.data.map((c: PublicComment) => c.id)).toEqual(ids.slice(0, 100));
+    });
+
     it('只返回已发布内容下的已审核评论，公开字段白名单', async () => {
       await comments.save([
         { contentId: contentIds.published, body: 'ok', status: 'approved', guestEmail: 'a@b.c', ipAddress: '9.9.9.9' },
@@ -346,9 +356,137 @@ describe('评论接口 HTTP', () => {
     });
   });
 
+  describe('GET /comments/public/page：根评论分页与回复按需读取', () => {
+    const url = (query = '') => `/comments/public/page?contentId=${contentIds.published}${query}`;
+    const ids = (start: number, count: number) => Array.from({ length: count }, (_, i) =>
+      `00000000-0000-4000-8000-${String(start + i).padStart(12, '0')}`);
+
+    it('默认 20 条根评论，稳定分页、精确总数与字段白名单，不附带回复正文', async () => {
+      const rootIds = ids(1, 25);
+      await comments.save(rootIds.slice().reverse().map(id => ({
+        id, contentId: contentIds.published, body: id, status: 'approved',
+        guestEmail: 'secret@example.com', ipAddress: '203.0.113.9', userId: h.ids.admin,
+        createdAt: new Date('2026-01-01T00:00:00Z'),
+      })));
+      await comments.save([
+        { contentId: contentIds.published, parentId: rootIds[0], body: 'reply-body', status: 'approved' },
+        { contentId: contentIds.published, body: 'pending-body', status: 'pending' },
+        { contentId: contentIds.published, body: 'spam-body', status: 'spam' },
+        { contentId: contentIds.other, body: 'other-body', status: 'approved' },
+      ]);
+      const first = await h.get(url(), 'anonymous').expect(200);
+      expect(first.body.data.meta).toEqual({ total: 25, page: 1, limit: 20, totalPages: 2 });
+      expect(first.body.data.data.map((c: PublicComment) => c.id)).toEqual(rootIds.slice(0, 20));
+      for (const c of first.body.data.data) {
+        expect(Object.keys(c).sort()).toEqual(PUBLIC_KEYS);
+        expect(c.children).toEqual([]);
+        expect(c.isRegistered).toBe(true);
+      }
+      expect(JSON.stringify(first.body)).not.toMatch(/guestEmail|ipAddress|userId|secret@example\.com|203\.0\.113\.9|reply-body|pending-body|spam-body|other-body/);
+      const second = await h.get(url('&page=2'), 'anonymous').expect(200);
+      expect(second.body.data.data.map((c: PublicComment) => c.id)).toEqual(rootIds.slice(20));
+      expect(second.body.data.meta).toEqual({ total: 25, page: 2, limit: 20, totalPages: 2 });
+      const beyond = await h.get(url('&page=3'), 'anonymous').expect(200);
+      expect(beyond.body.data).toEqual({ data: [], meta: { total: 25, page: 3, limit: 20, totalPages: 2 } });
+    });
+
+    it('最大页容量 100，内容 ID 大写仍命中，公开路由不解析无效 token', async () => {
+      await comments.save(ids(1, 101).map(id => ({ id, contentId: contentIds.published, body: id, status: 'approved' })));
+      const res = await h.http().get(`/comments/public/page?contentId=${contentIds.published.toUpperCase()}&limit=100`)
+        .set('Authorization', 'Bearer invalid').expect(200);
+      expect(res.body.data.data).toHaveLength(100);
+      expect(res.body.data.meta).toEqual({ total: 101, page: 1, limit: 100, totalPages: 2 });
+    });
+
+    it('已审核孤儿仍作为根：父评论已删除、未审核或属于别篇内容', async () => {
+      const [root, hidden, other] = await comments.save([
+        { contentId: contentIds.published, body: 'root', status: 'approved' },
+        { contentId: contentIds.published, body: 'hidden-parent', status: 'pending' },
+        { contentId: contentIds.other, body: 'other-parent', status: 'approved' },
+      ]);
+      await comments.save([
+        { contentId: contentIds.published, body: 'deleted-parent-child', status: 'approved', parentId: ids(999, 1)[0] },
+        { contentId: contentIds.published, body: 'hidden-parent-child', status: 'approved', parentId: hidden.id },
+        { contentId: contentIds.published, body: 'other-parent-child', status: 'approved', parentId: other.id },
+        { contentId: contentIds.published, body: 'normal-reply', status: 'approved', parentId: root.id },
+      ]);
+      const res = await h.get(url(), 'anonymous').expect(200);
+      expect(res.body.data.data.map((c: PublicComment) => c.body).sort()).toEqual([
+        'deleted-parent-child', 'hidden-parent-child', 'other-parent-child', 'root',
+      ]);
+      expect(res.body.data.meta.total).toBe(4);
+    });
+
+    it('指定 parentId 只分页读取同文已审核直系回复，不递归附带孙评论', async () => {
+      const parent = await comments.save({ contentId: contentIds.published, body: 'parent', status: 'approved' });
+      const replyIds = ids(1, 25);
+      await comments.save(replyIds.slice().reverse().map(id => ({
+        id, contentId: contentIds.published, parentId: parent.id, body: id, status: 'approved',
+        guestEmail: 'reply-secret@example.com', ipAddress: '203.0.113.8', createdAt: new Date('2026-01-01T00:00:00Z'),
+      })));
+      await comments.save([
+        { contentId: contentIds.published, parentId: replyIds[0], body: 'grandchild', status: 'approved' },
+        { contentId: contentIds.published, parentId: parent.id, body: 'pending-reply', status: 'pending' },
+        { contentId: contentIds.other, parentId: parent.id, body: 'other-reply', status: 'approved' },
+      ]);
+      const first = await h.get(url(`&parentId=${parent.id.toUpperCase()}`), 'anonymous').expect(200);
+      expect(first.body.data.meta).toEqual({ total: 25, page: 1, limit: 20, totalPages: 2 });
+      expect(first.body.data.data.map((c: PublicComment) => c.id)).toEqual(replyIds.slice(0, 20));
+      for (const c of first.body.data.data) {
+        expect(Object.keys(c).sort()).toEqual(PUBLIC_KEYS);
+        expect(c.children).toEqual([]);
+      }
+      expect(JSON.stringify(first.body)).not.toMatch(/guestEmail|ipAddress|userId|reply-secret|grandchild|pending-reply|other-reply/);
+      const second = await h.get(url(`&parentId=${parent.id}&page=2`), 'anonymous').expect(200);
+      expect(second.body.data.data.map((c: PublicComment) => c.id)).toEqual(replyIds.slice(20));
+      const nested = await h.get(url(`&parentId=${replyIds[0]}`), 'anonymous').expect(200);
+      expect(nested.body.data.data.map((c: PublicComment) => c.body)).toEqual(['grandchild']);
+    });
+
+    it.each(['missing', 'pending', 'spam', 'other'] as const)('%s 父评论不能作为回复查询入口', async (kind) => {
+      const parentId = kind === 'missing' ? ids(999, 1)[0] : (await comments.save({
+        contentId: kind === 'other' ? contentIds.other : contentIds.published,
+        body: 'hidden-parent', status: kind === 'other' ? 'approved' : kind,
+      })).id;
+      await comments.save({ contentId: contentIds.published, parentId, body: 'child', status: 'approved' });
+      const res = await h.get(url(`&parentId=${parentId}`), 'anonymous').expect(200);
+      expect(res.body.data).toEqual({ data: [], meta: { total: 0, page: 1, limit: 20, totalPages: 0 } });
+    });
+
+    it.each(['draft', 'deleted', 'scheduled', 'missing'] as const)('%s 内容不公开评论或回复', async (kind) => {
+      clock.fixed = new Date(DUE.getTime() - 1000);
+      const contentId = kind === 'missing' ? ids(999, 1)[0] : contentIds[kind];
+      const parent = await comments.save({ contentId, body: 'parent', status: 'approved' });
+      await comments.save({ contentId, parentId: parent.id, body: 'child', status: 'approved' });
+      for (const suffix of ['', `&parentId=${parent.id}`]) {
+        const res = await h.get(`/comments/public/page?contentId=${contentId}${suffix}`, 'anonymous').expect(200);
+        expect(res.body.data).toEqual({ data: [], meta: { total: 0, page: 1, limit: 20, totalPages: 0 } });
+      }
+      if (kind === 'scheduled') {
+        clock.fixed = DUE;
+        const due = await h.get(`/comments/public/page?contentId=${contentId}`, 'anonymous').expect(200);
+        expect(due.body.data.data.map((c: PublicComment) => c.body)).toEqual(['parent']);
+      }
+    });
+
+    it.each([
+      'page=0', 'page=-1', 'page=1.5', 'page=Infinity', 'page=9007199254740991', 'page=1&page=2', 'page[x]=1',
+      'limit=0', 'limit=101', 'limit=1.5', 'limit=abc', 'limit[]=20',
+      'parentId=', 'parentId=abc', 'parentId[]=00000000-0000-4000-8000-000000000001', 'parentId[x]=1', 'status=pending',
+    ])('非法参数 %s 返回 400', async query => {
+      await h.get(url(`&${query}`), 'anonymous').expect(400);
+    });
+
+    it.each(['', 'contentId=', 'contentId=abc', 'contentId[]=00000000-0000-4000-8000-000000000001', 'contentId[x]=1'])(
+      'contentId 必须是单个非空 UUID：%s 返回 400', async query => {
+        await h.get(`/comments/public/page?${query}`, 'anonymous').expect(400);
+      },
+    );
+  });
+
   describe('定时发布的文章（publishedAt 在未来）：到点之前与未发布一样', () => {
     it('到点前：评论读不到、发不了（404，与未发布同一条消息）；到点后照常', async () => {
-      await comments.save({ contentId: contentIds.scheduled, body: 'early', status: 'approved' });
+      await comments.save({ contentId: contentIds.scheduled, body: 'early', status: 'approved', createdAt: new Date('2020-01-01T00:00:00Z') });
       await setSetting('comment_audit', 'false');
 
       clock.fixed = new Date(DUE.getTime() - 1000);

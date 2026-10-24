@@ -27,8 +27,8 @@ const MODERATOR_HANDLERS = [
   'batchDelete',
 ] as const;
 
-/** 前台匿名可用：GET /comments/public 不解析 token */
-const PUBLIC_HANDLERS = ['findPublicByContent'] as const;
+/** 前台匿名可用：两个 GET /comments/public 入口均不解析 token */
+const PUBLIC_HANDLERS = ['findPublicByContent', 'findPublicPage'] as const;
 
 /** 前台匿名可用、但带了 token 就必须有效（严格可选登录）：POST /comments，身份由服务端按 req.user 填写 */
 const OPTIONAL_HANDLERS = ['create'] as const;

@@ -26,18 +26,30 @@ const article = {
   createdAt: date, updatedAt: date, publishedAt: date, viewCount: 5,
   category, tags: [tag], author: { username: 'fixture', nickname: '回归作者' },
 }
+const threadedArticle = { ...article, id: uuid(300), slug: 'threaded-comments', title: '分页评论文章' }
+const threadComment = (id, parentId, body, status = 'approved') => ({
+  id: uuid(id), contentId: threadedArticle.id, parentId: parentId === null ? null : uuid(parentId),
+  guestName: '分页游客', body, status, createdAt: date, isRegistered: false, children: [],
+})
+const threadedComments = [
+  ...Array.from({ length: 20 }, (_, i) => threadComment(400 + i, null, `根评论${i + 1}`)),
+  ...Array.from({ length: 21 }, (_, i) => threadComment(500 + i, 400, `直系回复${i + 1}`)),
+  threadComment(600, 500, '孙回复'),
+  threadComment(700, null, '隐藏父评论', 'pending'),
+  threadComment(701, 700, '可见孤儿评论'),
+]
 const novel = {
   id: uuid(50), title: '回归小说', slug: 'regression-novel', author: '回归作者',
-  wordCount: 20, chapterCount: 2, serialStatus: 'finished', score: 8, viewCount: 1,
+  wordCount: 510, chapterCount: 51, serialStatus: 'finished', score: 8, viewCount: 1,
   favoriteCount: 0, isFeatured: false, isVip: false, createdAt: date,
 }
 const comic = { ...novel, id: uuid(60), title: '回归漫画', slug: 'regression-comic' }
-const novelChapters = [0, 1].map((i) => ({
-  id: uuid(51 + i), novelId: novel.id, chapterNumber: i + 1, title: `小说第${i + 1}章`,
+const novelChapters = Array.from({ length: 51 }, (_, i) => ({
+  id: uuid(1000 + i), novelId: novel.id, chapterNumber: i + 1, title: `小说第${i + 1}章`,
   wordCount: 10, isVip: false, viewCount: 1, content: `第${i + 1}章正文。\n第二段正文。`,
 }))
-const comicChapters = [0, 1].map((i) => ({
-  id: uuid(61 + i), comicId: comic.id, chapterNumber: i + 1, title: `漫画第${i + 1}话`,
+const comicChapters = Array.from({ length: 51 }, (_, i) => ({
+  id: uuid(2000 + i), comicId: comic.id, chapterNumber: i + 1, title: `漫画第${i + 1}话`,
   pageCount: 1, isVip: false, viewCount: 1, pageUrls: ['/uploads/poster.png'],
 }))
 
@@ -111,9 +123,30 @@ async function createFixture() {
     if (route === '/site-settings/public') { envelope(res, [{ key: 'site_name', value: 'Portal Regression' }, { key: 'site_favicon', value: '/uploads/poster.png' }, { key: 'posts_per_page', value: '2' }, { key: 'enable_comment', value: 'true' }, { key: 'comment_audit', value: 'true' }]); return }
     if (route === '/categories') { envelope(res, [category]); return }
     if (route === '/tags') { envelope(res, [tag]); return }
-    if (route === '/comments/public') { envelope(res, comments.filter(comment => comment.contentId === url.searchParams.get('contentId') && comment.status === 'approved')); return }
+    if (route === '/comments/public' || route === '/comments/public/page') {
+      const approved = [...comments, ...threadedComments]
+        .filter(comment => comment.contentId === url.searchParams.get('contentId') && comment.status === 'approved')
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
+      if (route === '/comments/public') {
+        const nodes = new Map(approved.slice(0, 100).map(comment => [comment.id, { ...comment, children: [] }]))
+        const roots = []
+        for (const comment of nodes.values()) {
+          if (comment.parentId && nodes.has(comment.parentId)) nodes.get(comment.parentId).children.push(comment)
+          else roots.push(comment)
+        }
+        envelope(res, roots); return
+      }
+      const parentId = url.searchParams.get('parentId')
+      const visibleIds = new Set(approved.map(comment => comment.id))
+      const rows = parentId
+        ? visibleIds.has(parentId) ? approved.filter(comment => comment.parentId === parentId) : []
+        : approved.filter(comment => !comment.parentId || !visibleIds.has(comment.parentId))
+      const page = Number(url.searchParams.get('page') || 1)
+      const limit = Number(url.searchParams.get('limit') || 20)
+      envelope(res, { data: rows.slice((page - 1) * limit, page * limit).map(comment => ({ ...comment, children: [] })), meta: { total: rows.length, page, limit, totalPages: Math.ceil(rows.length / limit) } }); return
+    }
     if (route === '/comments' && req.method === 'POST') {
-      const comment = { id: uuid(100 + comments.length), contentId: entry.body.contentId, guestName: entry.body.guestName, body: entry.body.body, isRegistered: false, status: commentState.status, createdAt: date, children: [] }
+      const comment = { id: uuid(100 + comments.length), contentId: entry.body.contentId, parentId: entry.body.parentId ?? null, guestName: entry.body.guestName, body: entry.body.body, isRegistered: false, status: commentState.status, createdAt: date, children: [] }
       comments.push(comment)
       envelope(res, comment, 201); return
     }
@@ -127,15 +160,24 @@ async function createFixture() {
       const data = page === 1 ? [item] : [{ ...item, id: uuid(90), slug: `${item.slug}-page-${page}`, title: `${item.title}第${page}页` }]
       envelope(res, { data, meta: { page, limit: Number(url.searchParams.get('limit') || 24), total: 48, totalPages: 2 } }); return
     }
-    const details = { [`/movies/slug/${movie.slug}`]: movie, [`/contents/slug/${article.slug}`]: article, [`/novels/slug/${novel.slug}`]: novel, [`/comics/slug/${comic.slug}`]: comic }
+    const details = { [`/movies/slug/${movie.slug}`]: movie, [`/contents/slug/${article.slug}`]: article, [`/contents/slug/${threadedArticle.slug}`]: threadedArticle, [`/novels/slug/${novel.slug}`]: novel, [`/comics/slug/${comic.slug}`]: comic }
     if (route === '/movies/slug/broken-movie') {
       envelope(res, { ...movie, slug: 'broken-movie', title: '失败影视', sources: [{ ...movie.sources[0], episodes: [{ ...movie.sources[0].episodes[0], url: `${origin || server.origin}/uploads/broken.webm` }] }] }); return
     }
     if (details[route]) { envelope(res, details[route]); return }
-    if (route === `/novels/${novel.id}/chapters`) { envelope(res, { data: novelChapters, meta: { total: 2, page: 1, limit: 100, totalPages: 1 } }); return }
-    if (route === `/comics/${comic.id}/chapters`) { envelope(res, comicChapters); return }
+    const directory = route === `/novels/${novel.id}/chapters` ? novelChapters : route === `/comics/${comic.id}/chapters` ? comicChapters : null
+    if (directory) {
+      const page = Number(url.searchParams.get('page') || 1)
+      const limit = Number(url.searchParams.get('limit') || 50)
+      const data = directory.slice((page - 1) * limit, page * limit).map(({ content, pageUrls, ...chapter }) => chapter)
+      envelope(res, { data, meta: { total: directory.length, page, limit, totalPages: Math.ceil(directory.length / limit) } }); return
+    }
     const chapter = [...novelChapters, ...comicChapters].find((ch) => route === `/${ch.novelId ? 'novels' : 'comics'}/chapters/${ch.id}`)
-    if (chapter) { envelope(res, chapter); return }
+    if (chapter) {
+      const chapters = chapter.novelId ? novelChapters : comicChapters
+      const index = chapters.indexOf(chapter)
+      envelope(res, { ...chapter, previousChapterId: chapters[index - 1]?.id ?? null, nextChapterId: chapters[index + 1]?.id ?? null }); return
+    }
     envelope(res, null, 404)
   })
   const origin = await listen(server)
@@ -143,4 +185,4 @@ async function createFixture() {
   return { origin, server, requests, progress, commentState, searchReportState, cacheStates, listItems }
 }
 
-module.exports = { createFixture, listen, movie, novel, comic, article, novelChapters, comicChapters }
+module.exports = { createFixture, listen, movie, novel, comic, article, novelChapters, comicChapters, threadedArticle }

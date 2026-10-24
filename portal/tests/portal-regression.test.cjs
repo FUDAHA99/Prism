@@ -9,7 +9,7 @@ const http = require('node:http')
 const { spawn, execFileSync } = require('node:child_process')
 const { randomBytes } = require('node:crypto')
 const { chromium } = require('playwright')
-const { createFixture, listen, movie, article, novel, comic, novelChapters, comicChapters } = require('./fixture.cjs')
+const { createFixture, listen, movie, article, novel, comic, novelChapters, comicChapters, threadedArticle } = require('./fixture.cjs')
 
 const source = path.resolve(__dirname, '..')
 const repository = path.dirname(source)
@@ -567,6 +567,39 @@ test('portal HTTP and browser regression', { timeout: 360000 }, async t => {
         entry.readers = 'Markdown, chapter navigation and decoded image passed'
       })
     })
+    await t.test('novel and comic chapter pagination crosses the fiftieth chapter', async () => {
+      await scenario('chapter-pagination', origin, async (page, _context, entry, screenshot) => {
+        for (const [family, item, chapters, previousLabel, nextLabel] of [
+          ['novels', novel, novelChapters, '← 上一章', '下一章 →'],
+          ['comics', comic, comicChapters, '← 上一话', '下一话 →'],
+        ]) {
+          const detail = `/${family}/${item.slug}`
+          const chapterPath = chapter => `${detail}/chapters/${chapter.id}`
+          await goto(page, origin, detail, item.title)
+          await page.getByRole('link', { name: `50. ${chapters[49].title}`, exact: true }).waitFor()
+          assert.equal(await page.getByRole('link', { name: `51. ${chapters[50].title}`, exact: true }).count(), 0)
+          await page.getByRole('link', { name: '下一页', exact: true }).click()
+          await page.getByRole('link', { name: `51. ${chapters[50].title}`, exact: true }).waitFor()
+          assert.equal(await page.getByRole('link', { name: '开始阅读', exact: true }).getAttribute('href'), chapterPath(chapters[0]))
+          assert.equal(await page.getByRole('link', { name: `50. ${chapters[49].title}`, exact: true }).count(), 0)
+          assert.equal(new URL(page.url()).searchParams.get('page'), '2')
+          await screenshot(`${family}-page-2`)
+
+          await goto(page, origin, chapterPath(chapters[49]), chapters[49].title)
+          assert.equal(await page.getByRole('link', { name: nextLabel, exact: true }).getAttribute('href'), chapterPath(chapters[50]))
+          await page.getByRole('link', { name: nextLabel, exact: true }).click()
+          await page.getByRole('heading', { name: chapters[50].title, exact: true }).waitFor()
+          assert.equal(await page.getByRole('link', { name: previousLabel, exact: true }).getAttribute('href'), chapterPath(chapters[49]))
+          assert.equal(await page.getByRole('link', { name: nextLabel, exact: true }).count(), 0)
+          await goto(page, origin, chapterPath(chapters[50]), chapters[50].title)
+          await page.getByRole('link', { name: previousLabel, exact: true }).waitFor()
+          await goto(page, origin, `${detail}?page=invalid`, item.title)
+          await page.getByRole('link', { name: `1. ${chapters[0].title}`, exact: true }).waitFor()
+          assert(fixture.requests.some(request => request.path === `/api/v1/${family}/${item.id}/chapters` && request.query.page === '2' && request.query.limit === '50'))
+        }
+        entry.pagination = 'Both directories expose chapter 51; page two starts at chapter one; chapter 50/51 navigation passed'
+      })
+    })
     await t.test('native playback, episodes, sources and failure state', async () => {
       await scenario('playback', origin, async (page, _context, entry, screenshot) => {
         await goto(page, origin, '/movies/regression-movie', '回归影视')
@@ -633,22 +666,61 @@ test('portal HTTP and browser regression', { timeout: 360000 }, async t => {
         // Cached site settings still require review; the POST response decides visibility.
         fixture.commentState.status = 'approved'
         await body.fill('直接公开的评论')
-        const refreshed = page.waitForResponse(response => response.url().includes('/api/v1/comments/public?') && response.request().method() === 'GET' && response.status() === 200)
+        const refreshed = page.waitForResponse(response => response.url().includes('/api/v1/comments/public/page?') && response.request().method() === 'GET' && response.status() === 200)
         const approvedPost = page.waitForResponse(response => response.url().endsWith('/api/v1/comments') && response.request().method() === 'POST')
         await page.getByRole('button', { name: '提交评论', exact: true }).click()
         await page.getByText('✅ 评论提交成功', { exact: true }).waitFor()
         await refreshed
         assert.equal((await approvedPost).status(), 201)
         await page.getByText('直接公开的评论', { exact: true }).waitFor()
-        await page.getByRole('heading', { name: '💬 评论 (1)', exact: true }).waitFor()
+        await page.getByRole('heading', { name: '💬 评论', exact: true }).waitFor()
         assert.equal(await body.inputValue(), '')
         assert.equal(posts().length, 2)
         assert.deepEqual(posts()[1].body, { contentId: article.id, guestName: '回归游客', guestEmail: 'reader@example.test', body: '直接公开的评论' })
-        const gets = fixture.requests.slice(start).filter(item => item.path === '/api/v1/comments/public')
+        const gets = fixture.requests.slice(start).filter(item => item.path === '/api/v1/comments/public/page')
         assert(gets.length >= 2)
-        for (const get of gets) assert.deepEqual(get.query, { contentId: article.id })
+        for (const get of gets) assert.deepEqual(get.query, { contentId: article.id, page: '1', limit: '20' })
         entry.comments = { postStatuses: [201, 201], publicCount: 1, posts: posts(), publicReads: gets.length }
         await screenshot('approved')
+      })
+    })
+    await t.test('public comment roots and nested replies load only requested pages', async () => {
+      await scenario('comment-pages', origin, async (page, _context, entry, screenshot) => {
+        const start = fixture.requests.length
+        const reads = () => fixture.requests.slice(start).filter(item => item.path === '/api/v1/comments/public/page' && item.query.contentId === threadedArticle.id)
+        await goto(page, origin, `/articles/${threadedArticle.slug}`, threadedArticle.title)
+        await page.getByText('根评论1', { exact: true }).waitFor()
+        assert.equal(await page.getByText('可见孤儿评论', { exact: true }).count(), 0)
+        assert.equal(await page.getByText('隐藏父评论', { exact: true }).count(), 0)
+        assert.equal(reads().filter(item => item.query.parentId).length, 0)
+        const roots = page.getByRole('navigation', { name: '评论分页', exact: true })
+        await roots.getByRole('button', { name: '下一页', exact: true }).click()
+        await page.getByText('可见孤儿评论', { exact: true }).waitFor()
+        assert.equal(await page.getByText('根评论1', { exact: true }).count(), 0)
+        await roots.getByRole('button', { name: '上一页', exact: true }).click()
+        const firstRoot = page.locator('li').filter({ has: page.getByText('根评论1', { exact: true }) }).first()
+        await firstRoot.getByRole('button', { name: '查看回复', exact: true }).click()
+        await page.getByText('直系回复1', { exact: true }).waitFor()
+        assert.equal(await page.getByText('直系回复21', { exact: true }).count(), 0)
+        assert.equal(await page.getByText('孙回复', { exact: true }).count(), 0)
+        const replies = firstRoot.getByRole('navigation', { name: '回复分页', exact: true })
+        await replies.getByRole('button', { name: '下一页', exact: true }).click()
+        await page.getByText('直系回复21', { exact: true }).waitFor()
+        assert.equal(await page.getByText('直系回复1', { exact: true }).count(), 0)
+        await replies.getByRole('button', { name: '上一页', exact: true }).click()
+        const firstReply = firstRoot.locator('li').filter({ has: page.getByText('直系回复1', { exact: true }) }).first()
+        await firstReply.getByRole('button', { name: '查看回复', exact: true }).click()
+        await page.getByText('孙回复', { exact: true }).waitFor()
+        const grandchild = firstReply.locator('li').filter({ has: page.getByText('孙回复', { exact: true }) }).first()
+        await grandchild.getByRole('button', { name: '查看回复', exact: true }).click()
+        await grandchild.getByText('暂无回复', { exact: true }).waitFor()
+        assert.equal(new Set(reads().filter(item => item.query.parentId).map(item => item.query.parentId)).size, 3)
+        assert(reads().some(item => item.query.page === '2' && !item.query.parentId))
+        assert(reads().some(item => item.query.page === '2' && item.query.parentId))
+        for (const read of reads()) assert.equal(read.query.limit, '20')
+        assert.equal(await page.getByText('隐藏父评论', { exact: true }).count(), 0)
+        entry.comments = { rootPages: 2, replyPages: 2, expandedParents: 3, reads: reads() }
+        await screenshot('nested-replies')
       })
     })
     let unconfiguredOrigin
@@ -690,12 +762,12 @@ test('portal HTTP and browser regression', { timeout: 360000 }, async t => {
           item.state = { status: 200, data: { ...item.item, id: id(item.id), slug: item.slug, title: `旧${item.item.title}` } }
           fixture.cacheStates.set(item.apiPath, item.state)
           if (item.chapter) {
-            item.chapterState = { status: 200, data: { ...item.chapter, id: id(item.id + 1), [item.family === 'novels' ? 'novelId' : 'comicId']: id(item.id), title: `旧${item.chapter.title}` } }
+            item.chapterState = { status: 200, data: { ...item.chapter, id: id(item.id + 1), [item.family === 'novels' ? 'novelId' : 'comicId']: id(item.id), title: `旧${item.chapter.title}`, previousChapterId: null, nextChapterId: null } }
             item.chapterApi = `/${item.family}/chapters/${id(item.id + 1)}`
             item.directoryApi = `/${item.family}/${id(item.id)}/chapters`
             item.chapterRoute = `${item.detailRoute}/chapters/${id(item.id + 1)}`
             fixture.cacheStates.set(item.chapterApi, item.chapterState)
-            fixture.cacheStates.set(item.directoryApi, { status: 200, data: [item.chapterState.data] })
+            fixture.cacheStates.set(item.directoryApi, { status: 200, data: { data: [item.chapterState.data], meta: { total: 1, page: 1, limit: 50, totalPages: 1 } } })
           }
           assert((await render(item.listRoute)).includes(item.item.title))
           assert((await render(item.detailRoute)).includes(item.state.data.title))
@@ -707,7 +779,7 @@ test('portal HTTP and browser regression', { timeout: 360000 }, async t => {
           fixture.listItems.set(`/${item.family}`, { ...item.item, title: `新列表${item.item.title}` })
           if (item.chapter) {
             item.chapterState.data = { ...item.chapterState.data, title: `新${item.chapter.title}`, ...(item.family === 'novels' ? { content: '更新后的小说正文' } : { pageUrls: ['/uploads/updated-comic.png'] }) }
-            fixture.cacheStates.get(item.directoryApi).data = [item.chapterState.data]
+            fixture.cacheStates.get(item.directoryApi).data.data = [item.chapterState.data]
           }
           assert((await render(item.detailRoute)).includes(item.oldTitle))
           assert.equal(count(item.apiPath), item.warmCount)

@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 import { Comment } from './entities/comment.entity';
 import { CreateCommentDto, COMMENT_GUEST_NAME_MAX } from './dto/create-comment.dto';
 import { QueryCommentDto } from './dto/query-comment.dto';
+import { QueryPublicCommentPageDto } from './dto/query-public-comment-page.dto';
 import { Content, ContentStatus } from '../content/entities/content.entity';
 import { User } from '../user/entities/user.entity';
 import { isDisplayNameTaken, normalizeDisplayName } from '../user/display-name';
@@ -26,7 +27,7 @@ export interface PublicComment {
   children: PublicComment[];
 }
 
-/** 管理端评论列表的分页：缺省每页 20 条，上限 100 条（避免 ?limit=100000 一次拖出全表） */
+/** 评论列表的分页：缺省每页 20 条，上限 100 条（避免一次拖出全表） */
 export const COMMENT_PAGE_SIZE_DEFAULT = 20;
 export const COMMENT_PAGE_SIZE_MAX = 100;
 
@@ -151,7 +152,7 @@ export class CommentService {
   }
 
   /**
-   * 公共接口：仅返回某篇已发布内容下已审核通过的评论（树形）。
+   * 旧公共接口：最多返回某篇已发布内容下的前 100 条已审核评论（树形）；完整列表走 /public/page。
    * 内容不存在、未发布（含定时发布还没到点）或已删除时返回空列表（与没有评论相同，不区分是哪种情况）：
    * 此前只看 contentId，文章下线或删除后，它的评论仍能按 ID 匿名读到。
    *
@@ -169,7 +170,8 @@ export class CommentService {
         body: true, status: true, parentId: true, createdAt: true,
       },
       where: { contentId, status: 'approved' },
-      order: { createdAt: 'ASC' },
+      order: { createdAt: 'ASC', id: 'ASC' },
+      take: COMMENT_PAGE_SIZE_MAX,
     });
 
     const map = new Map<string, PublicComment>();
@@ -186,6 +188,40 @@ export class CommentService {
       }
     });
     return roots;
+  }
+
+  /** 根评论分页；指定父级时只加载该父级的直系回复，不递归读取正文。 */
+  async findApprovedPage(query: QueryPublicCommentPageDto): Promise<{
+    data: PublicComment[];
+    meta: { total: number; page: number; limit: number; totalPages: number };
+  }> {
+    const { contentId, parentId } = query;
+    const limit = clampInt(query.limit, COMMENT_PAGE_SIZE_DEFAULT, 1, COMMENT_PAGE_SIZE_MAX);
+    const page = clampInt(query.page, 1, 1, Math.floor(Number.MAX_SAFE_INTEGER / limit));
+    if (!(await this.isPublishedContent(contentId))) {
+      return { data: [], meta: { total: 0, page, limit, totalPages: 0 } };
+    }
+
+    const qb = this.commentRepository.createQueryBuilder('comment')
+      .select([
+        'comment.id', 'comment.contentId', 'comment.userId', 'comment.guestName',
+        'comment.body', 'comment.status', 'comment.parentId', 'comment.createdAt',
+      ])
+      .where('comment.contentId = :contentId AND comment.status = :status', { contentId, status: 'approved' });
+    const parentCondition = 'parent.id = comment.parentId AND parent.contentId = comment.contentId AND parent.status = :status';
+    if (parentId) {
+      qb.innerJoin(Comment, 'parent', parentCondition)
+        .andWhere('comment.parentId = :parentId', { parentId });
+    } else {
+      // 与旧组树行为一致：父级已删除、未审核或属于别篇内容时，已审核子评论仍作为根显示。
+      qb.leftJoin(Comment, 'parent', parentCondition).andWhere('parent.id IS NULL');
+    }
+    const [list, total] = await qb.orderBy('comment.createdAt', 'ASC').addOrderBy('comment.id', 'ASC')
+      .offset((page - 1) * limit).limit(limit).getManyAndCount();
+    return {
+      data: list.map(toPublicComment),
+      meta: { total, page, limit, totalPages: Math.ceil(total / limit) },
+    };
   }
 
   async findOne(id: string): Promise<Comment> {

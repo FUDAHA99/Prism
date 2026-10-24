@@ -18,6 +18,14 @@ import { ThrottlerBehindProxyGuard } from '../guards/throttler-behind-proxy.guar
 import { createAccessProbe, Decision, ProbeUser } from '../testing/access-probe';
 import { AppModule } from '../../app.module';
 
+// 静态导入 AppModule 也会调用 forRoot；测试只使用显式环境，不读取本机 .env。
+jest.mock('@nestjs/config', () => {
+  const actual = jest.requireActual('@nestjs/config');
+  const forRoot = actual.ConfigModule.forRoot.bind(actual.ConfigModule);
+  actual.ConfigModule.forRoot = jest.fn((options) => forRoot({ ...options, ignoreEnvFile: true }));
+  return actual;
+});
+
 /**
  * 全路由访问矩阵回归测试（批次 1-F）。
  *
@@ -113,6 +121,7 @@ const MATRIX: Record<string, AccessLevel> = {
   'POST /api/v1/comments/batch/delete': 'staff',
   'POST /api/v1/comments/batch/spam': 'staff',
   'GET /api/v1/comments/public': 'public',
+  'GET /api/v1/comments/public/page': 'public',
   // ContentController
   'GET /api/v1/contents': 'optional',
   'POST /api/v1/contents': 'staff',
@@ -223,6 +232,7 @@ const PORTAL_PATHS: readonly string[] = [
   'GET /api/v1/categories',
   'GET /api/v1/tags',
   'GET /api/v1/comments/public',
+  'GET /api/v1/comments/public/page',
   'POST /api/v1/comments',
   'GET /api/v1/movies',
   'GET /api/v1/movies/slug/:slug',
@@ -235,7 +245,7 @@ const PORTAL_PATHS: readonly string[] = [
   'GET /api/v1/comics/:id/chapters',
   'GET /api/v1/comics/chapters/:chapterId',
   'GET /api/v1/site-settings/public',
-  // portal/components/CommentSection.tsx 也直接 fetch 评论的两个接口（同上）
+  // portal/components/CommentSection.tsx 直接 fetch 评论分页与发表评论接口（同上）
   // portal/components/ResumeButton.tsx
   'GET /api/v1/watch-history',
   // portal/app/movies/[slug]/play/[srcIdx]/[ep]/PlayClient.tsx
