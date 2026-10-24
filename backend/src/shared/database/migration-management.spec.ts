@@ -10,6 +10,9 @@ import { SearchKeywordDaily1792195200000 } from './migrations/1792195200000-Sear
 const baseline = { name: 'InitialSchema1791936000000', timestamp: 1791936000000 };
 const owner = { name: 'WatchHistoryOwner1791936001000', timestamp: 1791936001000 };
 const search = { name: 'SearchKeywordDaily1792195200000', timestamp: 1792195200000 };
+const revocation = { name: 'PersistentTokenRevocation1792713600000', timestamp: 1792713600000 };
+const category = { name: 'CategoryParentColumn1792713601000', timestamp: 1792713601000 };
+const commentIndex = { name: 'PublicCommentThreadIndex1792713602000', timestamp: 1792713602000 };
 const config = (values: Record<string, string | undefined>) => ({
   get: (key: string, fallback?: string) => values[key] ?? fallback,
 }) as ConfigService;
@@ -41,12 +44,12 @@ describe('migration configuration and read-only startup gate', () => {
   it('migration execution does not load mutable application entities', () => {
     expect(migrationDataSource().options.entities).toEqual([]);
     expect(migrationDataSource(true).options.migrations).toHaveLength(1);
-    expect(DATABASE_MIGRATIONS.map(migration => new migration().name)).toEqual([baseline.name, owner.name, search.name]);
+    expect(DATABASE_MIGRATIONS.map(migration => new migration().name)).toEqual([baseline.name, owner.name, search.name, revocation.name, category.name, commentIndex.name]);
   });
 
   function source(records: unknown[], exists = true) {
     const runner = { hasTable: jest.fn().mockResolvedValue(exists), query: jest.fn().mockResolvedValue(records), release: jest.fn() };
-    const dataSource = { migrations: [owner, search, baseline], createQueryRunner: () => runner } as unknown as DataSource;
+    const dataSource = { migrations: [owner, search, baseline, revocation, category, commentIndex], createQueryRunner: () => runner } as unknown as DataSource;
     return { dataSource, runner };
   }
 
@@ -62,8 +65,8 @@ describe('migration configuration and read-only startup gate', () => {
   });
 
   it('complete history passes using only a SELECT', async () => {
-    const { dataSource, runner } = source([baseline, owner, search]);
-    await expect(checkMigrationHistory(dataSource, true)).resolves.toEqual([baseline, owner, search]);
+    const { dataSource, runner } = source([baseline, owner, search, revocation, category, commentIndex]);
+    await expect(checkMigrationHistory(dataSource, true)).resolves.toEqual([baseline, owner, search, revocation, category, commentIndex]);
     expect(runner.query.mock.calls).toEqual([['SELECT `timestamp`, `name` FROM `migrations` ORDER BY `id`']]);
     expect(runner.release).toHaveBeenCalledTimes(1);
   });
@@ -72,6 +75,21 @@ describe('migration configuration and read-only startup gate', () => {
     const { dataSource } = source([baseline]);
     await expect(checkMigrationHistory(dataSource, false)).resolves.toEqual([baseline]);
     await expect(checkMigrationHistory(dataSource, true)).rejects.toThrow(owner.name);
+  });
+
+  it('requires the persistent revocation migration before accepting an existing database at startup', async () => {
+    const { dataSource } = source([baseline, owner, search]);
+    await expect(checkMigrationHistory(dataSource, true)).rejects.toThrow(revocation.name);
+  });
+
+  it('requires the unified category parent column before accepting a four-step database at startup', async () => {
+    const { dataSource } = source([baseline, owner, search, revocation]);
+    await expect(checkMigrationHistory(dataSource, true)).rejects.toThrow(category.name);
+  });
+
+  it('requires the public comment index before accepting a five-step database at startup', async () => {
+    const { dataSource } = source([baseline, owner, search, revocation, category]);
+    await expect(checkMigrationHistory(dataSource, true)).rejects.toThrow(commentIndex.name);
   });
 
   it('a previously complete two-step database must run the new search migration before startup', async () => {

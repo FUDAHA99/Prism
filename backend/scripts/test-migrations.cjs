@@ -46,6 +46,9 @@ async function main() {
   const { DATABASE_MIGRATIONS, migrationDataSource } = require(path.join(dist, 'shared/database/data-source.js'));
   const { SearchKeywordDaily } = require(path.join(dist, 'modules/stats/entities/search-keyword-daily.entity.js'));
   const { SearchKeywordsService } = require(path.join(dist, 'modules/stats/search-keywords.service.js'));
+  const { TokenRevocationStore } = require(path.join(dist, 'modules/auth/token-revocation.store.js'));
+  const { GLOBAL_VALID_AFTER_KEY, isIssuedBeforeRevocation, validAfterKey } = require(path.join(dist, 'modules/auth/token-revocation.js'));
+  const { UserService } = require(path.join(dist, 'modules/user/user.service.js'));
   admin = await mysql.createConnection(connection);
   const [[server]] = await admin.query('SELECT VERSION() AS version');
   console.log(JSON.stringify({ node: process.version, driver: process.env.DB_TYPE, server: server.version }));
@@ -82,6 +85,15 @@ async function main() {
     assert.deepEqual(await ledger(db), [{ name: 'InitialSchema1791936000000' }, { name: 'WatchHistoryOwner1791936001000' }]);
     return db;
   }
+  async function categoryLegacyDatabase() {
+    const db = await database();
+    const previous = new DataSource({ ...migrationDataSource().options, database: db, migrations: DATABASE_MIGRATIONS.slice(0, 4) });
+    await previous.initialize();
+    try { await previous.runMigrations({ transaction: 'none' }); }
+    finally { await previous.destroy(); }
+    assert.deepEqual(await ledger(db), [{ name: 'InitialSchema1791936000000' }, { name: 'WatchHistoryOwner1791936001000' }, { name: 'SearchKeywordDaily1792195200000' }, { name: 'PersistentTokenRevocation1792713600000' }]);
+    return db;
+  }
   function cli(db, command, succeeds = true, extraEnv = {}) {
     assert.ok(created.has(db));
     const result = spawnSync(process.execPath, [cliPath, command], {
@@ -108,13 +120,13 @@ async function main() {
   }
 
   let fresh;
-  await test('empty database migrates all three steps; run is idempotent; check is read-only', async () => {
+  await test('empty database migrates all six steps; run is idempotent; check is read-only', async () => {
     fresh = await database();
     cli(fresh, 'check', false);
     assert.equal((await sql(fresh, 'SHOW TABLES')).length, 0);
     cli(fresh, 'run');
-    assert.deepEqual(await ledger(fresh), [{ name: 'InitialSchema1791936000000' }, { name: 'WatchHistoryOwner1791936001000' }, { name: 'SearchKeywordDaily1792195200000' }]);
-    assert.equal((await sql(fresh, 'SHOW TABLES')).length, 29);
+    assert.deepEqual(await ledger(fresh), [{ name: 'InitialSchema1791936000000' }, { name: 'WatchHistoryOwner1791936001000' }, { name: 'SearchKeywordDaily1792195200000' }, { name: 'PersistentTokenRevocation1792713600000' }, { name: 'CategoryParentColumn1792713601000' }, { name: 'PublicCommentThreadIndex1792713602000' }]);
+    assert.equal((await sql(fresh, 'SHOW TABLES')).length, 30);
     const history = await ledger(fresh);
     cli(fresh, 'run'); cli(fresh, 'check');
     assert.deepEqual(await ledger(fresh), history);
@@ -122,15 +134,15 @@ async function main() {
     assert.deepEqual(await ledger(fresh), history);
   });
 
-  await test('existing two-step database upgrades only the aggregate table and preserves business rows', async () => {
+  await test('existing two-step database adds aggregate and revocation tables and preserves business rows', async () => {
     const db = await twoStepDatabase();
     const id = randomUUID();
     await sql(db, 'INSERT INTO movies (id, title, slug) VALUES (?, ?, ?)', [id, 'existing synthetic movie', 'existing-synthetic-movie']);
     const before = await sql(db, 'SELECT * FROM movies WHERE id = ?', [id]);
     assert.match(cli(db, 'check', false), /SearchKeywordDaily1792195200000/);
     cli(db, 'run'); cli(db, 'check');
-    assert.equal((await sql(db, 'SHOW TABLES')).length, 29);
-    assert.equal((await ledger(db)).length, 3);
+    assert.equal((await sql(db, 'SHOW TABLES')).length, 30);
+    assert.equal((await ledger(db)).length, 6);
     assert.deepEqual(await sql(db, 'SELECT * FROM movies WHERE id = ?', [id]), before);
     const history = await ledger(db);
     cli(db, 'run');
@@ -144,6 +156,75 @@ async function main() {
     assert.equal((await ledger(db)).length, 2);
     assert.equal((await sql(db, "SHOW COLUMNS FROM search_keyword_daily LIKE 'marker'")).length, 1);
   });
+
+  await test('category migration removes only the redundant column and preserves existing foreign-key relationships', async () => {
+    const db = await categoryLegacyDatabase();
+    const parent = randomUUID(), equalChild = randomUUID(), relationChild = randomUUID();
+    await sql(db, 'INSERT INTO categories (id, name, slug) VALUES (?, ?, ?)', [parent, 'parent', 'parent']);
+    await sql(db, 'INSERT INTO categories (id, name, slug, parentId, parent_id) VALUES (?, ?, ?, ?, ?)', [equalChild, 'equal', 'equal', parent, parent]);
+    await sql(db, 'INSERT INTO categories (id, name, slug, parent_id) VALUES (?, ?, ?, ?)', [relationChild, 'relation', 'relation', parent]);
+    const before = await sql(db, 'SELECT id, name, slug, parent_id FROM categories ORDER BY id');
+    cli(db, 'run'); cli(db, 'check');
+    assert.equal((await sql(db, "SHOW COLUMNS FROM categories LIKE 'parentId'")).length, 0);
+    assert.deepEqual(await sql(db, 'SELECT id, name, slug, parent_id FROM categories ORDER BY id'), before);
+    const keys = await sql(db, "SELECT COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'categories' AND CONSTRAINT_NAME = 'FK_88cea2dc9c31951d06437879b40'", [db]);
+    assert.deepEqual(keys, [{ COLUMN_NAME: 'parent_id', REFERENCED_TABLE_NAME: 'categories', REFERENCED_COLUMN_NAME: 'id' }]);
+    await assert.rejects(sql(db, 'DELETE FROM categories WHERE id = ?', [parent]), error => error.code === 'ER_ROW_IS_REFERENCED_2');
+  });
+
+  await test('public comment migration creates the exact non-unique index without prefix truncation', async () => {
+    const indexes = await sql(fresh, "SHOW INDEX FROM comments WHERE Key_name = 'IDX_comments_public_thread'");
+    indexes.sort((left, right) => left.Seq_in_index - right.Seq_in_index);
+    assert.deepEqual(indexes.map(index => index.Column_name), ['contentId', 'status', 'parentId', 'createdAt', 'id']);
+    assert.ok(indexes.every(index => index.Non_unique === 1 && index.Sub_part === null));
+  });
+
+  for (const indexName of ['IDX_comments_public_thread', 'qa_equivalent_comment_index']) {
+    await test(`an unregistered ${indexName} is rejected without adopting it or changing comment data`, async () => {
+      const db = await database();
+      const previous = new DataSource({ ...migrationDataSource().options, database: db, migrations: DATABASE_MIGRATIONS.slice(0, 5) });
+      await previous.initialize();
+      try { await previous.runMigrations({ transaction: 'none' }); }
+      finally { await previous.destroy(); }
+      assert.equal((await ledger(db)).length, 5);
+      assert.match(cli(db, 'check', false), /PublicCommentThreadIndex1792713602000/);
+      await sql(db, `CREATE INDEX \`${indexName}\` ON comments (contentId, status, parentId, createdAt, id)`);
+      await sql(db, 'INSERT INTO comments (id, contentId, status, body) VALUES (?, ?, ?, ?)', [randomUUID(), randomUUID(), 'approved', 'synthetic comment']);
+      const schema = await sql(db, 'SHOW CREATE TABLE comments');
+      const before = await sql(db, 'SELECT * FROM comments');
+      assert.match(cli(db, 'run', false), /已存在但迁移未登记/);
+      assert.equal((await ledger(db)).length, 5);
+      assert.deepEqual(await sql(db, 'SHOW CREATE TABLE comments'), schema);
+      assert.deepEqual(await sql(db, 'SELECT * FROM comments'), before);
+    });
+  }
+
+  for (const [name, changes] of [
+    ['legacy parent with an empty relation', ([parent, , child]) => [[child, parent, null]]],
+    ['different parents', ([parent, other, child]) => [[child, parent, other]]],
+    ['orphan parent', ([, , child]) => [[child, 'ffffffff-ffff-4fff-8fff-ffffffffffff', 'ffffffff-ffff-4fff-8fff-ffffffffffff']]],
+    ['overlong legacy parent', ([, , child]) => [[child, 'x'.repeat(37), null]]],
+    ['parent cycle', ([parent, other]) => [[parent, other, other], [other, parent, parent]]],
+  ]) {
+    await test(`category migration rejects ${name} before changing any schema or data`, async () => {
+      const db = await categoryLegacyDatabase();
+      const ids = [randomUUID(), randomUUID(), randomUUID()];
+      for (const [index, id] of ids.entries()) await sql(db, 'INSERT INTO categories (id, name, slug) VALUES (?, ?, ?)', [id, `category-${index}`, `category-${index}`]);
+      // Only this synthetic orphan fixture bypasses the FK, reproducing imported legacy corruption.
+      if (name === 'orphan parent') await sql(db, 'SET FOREIGN_KEY_CHECKS = 0');
+      try {
+        for (const [id, legacy, relation] of changes(ids)) await sql(db, 'UPDATE categories SET parentId = ?, parent_id = ? WHERE id = ?', [legacy, relation, id]);
+      } finally {
+        if (name === 'orphan parent') await sql(db, 'SET FOREIGN_KEY_CHECKS = 1');
+      }
+      const schema = await sql(db, 'SHOW CREATE TABLE categories');
+      const before = await sql(db, 'SELECT * FROM categories ORDER BY id');
+      cli(db, 'run', false);
+      assert.equal((await ledger(db)).length, 4);
+      assert.deepEqual(await sql(db, 'SHOW CREATE TABLE categories'), schema);
+      assert.deepEqual(await sql(db, 'SELECT * FROM categories ORDER BY id'), before);
+    });
+  }
 
   await test('unregistered legacy database is rejected; matching baseline adopts exactly one step', async () => {
     const db = await legacy();
@@ -282,6 +363,85 @@ async function main() {
       await sources.delete(source.id);
       assert.equal(await mappings.countBy({ sourceId: source.id }), 0);
     });
+
+    await test('persistent token revocation preserves a permanent migration baseline and cleans only expired rows', async () => {
+      const store = new TokenRevocationStore(ds.manager);
+      const [baseline] = await sql(fresh, 'SELECT * FROM token_revocations WHERE `key` = ?', [GLOBAL_VALID_AFTER_KEY]);
+      assert.ok(Number(baseline.value) > 0);
+      assert.equal(baseline.expiresAt, null);
+      assert.equal(await isIssuedBeforeRevocation(store, randomUUID(), Math.floor(Number(baseline.value) / 1000) - 1), true);
+      const indexes = await sql(fresh, "SHOW INDEX FROM token_revocations WHERE Key_name = 'IDX_token_revocations_expiresAt'");
+      assert.deepEqual(indexes.map(index => index.Column_name), ['expiresAt']);
+      assert.equal(await store.get('qa:missing'), undefined);
+      await sql(fresh, 'INSERT INTO token_revocations (`key`, `value`, expiresAt) VALUES (?, ?, ?)', ['qa:expired', 1, Date.now() - 1000]);
+      await store.set('qa:blacklist', 1, 60_000);
+      assert.equal(await store.get('qa:blacklist'), 1);
+      assert.equal((await sql(fresh, 'SELECT * FROM token_revocations WHERE `key` = ?', ['qa:expired'])).length, 0);
+      assert.deepEqual(await sql(fresh, 'SELECT * FROM token_revocations WHERE `key` = ?', [GLOBAL_VALID_AFTER_KEY]), [baseline]);
+    });
+
+    await test('Category API parentId metadata writes the existing foreign-key column and loads both relations', async () => {
+      const categories = ds.getRepository('Category');
+      const parent = await categories.save({ name: 'parent QA', slug: 'category-parent-qa' });
+      const child = await categories.save({ name: 'child QA', slug: 'category-child-qa', parentId: parent.id });
+      try {
+        const stored = await categories.findOneOrFail({ where: { id: child.id }, relations: { parent: true } });
+        assert.equal(stored.parentId, parent.id);
+        assert.equal(stored.parent.id, parent.id);
+        const loadedParent = await categories.findOneOrFail({ where: { id: parent.id }, relations: { children: true } });
+        assert.deepEqual(loadedParent.children.map(row => row.id), [child.id]);
+        await assert.rejects(categories.delete(parent.id), error => error.code === 'ER_ROW_IS_REFERENCED_2');
+      } finally {
+        await categories.delete(child.id);
+        await categories.delete(parent.id);
+      }
+    });
+
+    await test('revocation time and retention never move backwards on independent database connections', async () => {
+      const runners = Array.from({ length: 4 }, () => ds.createQueryRunner());
+      const key = validAfterKey(randomUUID()), now = Date.now();
+      try {
+        await Promise.all(runners.map(runner => runner.connect()));
+        const connections = await Promise.all(runners.map(runner => runner.query('SELECT CONNECTION_ID() AS id')));
+        assert.equal(new Set(connections.map(rows => rows[0].id)).size, 4);
+        const stores = runners.map(runner => new TokenRevocationStore(runner.manager));
+        await stores[0].set(key, now, 60_000);
+        const [initial] = await sql(fresh, 'SELECT * FROM token_revocations WHERE `key` = ?', [key]);
+        await Promise.all([300, 100, 200, 50].map((offset, index) => stores[index].set(key, now + offset, 10_000)));
+        await stores[0].set(key, now + 1, 1000);
+        assert.equal(await stores[0].get(key), now + 300);
+        const [latest] = await sql(fresh, 'SELECT * FROM token_revocations WHERE `key` = ?', [key]);
+        assert.equal(Number(latest.expiresAt), Number(initial.expiresAt));
+      } finally { await Promise.all(runners.map(runner => runner.release())); }
+    });
+
+    await test('missing revocation storage rejects real reads and writes rather than returning a miss', async () => {
+      const store = new TokenRevocationStore(ds.manager);
+      await sql(fresh, 'RENAME TABLE token_revocations TO qa_unavailable_revocations');
+      try {
+        await assert.rejects(store.get('qa:blacklist'), error => error.code === 'ER_NO_SUCH_TABLE');
+        await assert.rejects(store.set('qa:write-failure', 1, 1000), error => error.code === 'ER_NO_SUCH_TABLE');
+      } finally {
+        await sql(fresh, 'RENAME TABLE qa_unavailable_revocations TO token_revocations');
+      }
+    });
+
+    await test('password update rolls back when the real database refuses the revocation write', async () => {
+      const users = ds.getRepository('User');
+      const user = await users.save({ username: 'revocation-qa', email: 'revocation-qa@example.test', passwordHash: 'synthetic-original-hash' });
+      await sql(fresh, "CREATE TRIGGER qa_reject_revocation BEFORE INSERT ON token_revocations FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'revocation QA write failure'");
+      try {
+        const service = new UserService(users, null, null, { del: async () => undefined });
+        await assert.rejects(service.updatePassword(user.id, 'Test-Replacement2026!', 'synthetic-original-hash'), /revocation QA write failure/);
+        const [stored] = await sql(fresh, 'SELECT passwordHash FROM users WHERE id = ?', [user.id]);
+        assert.equal(stored.passwordHash, 'synthetic-original-hash');
+        assert.equal((await sql(fresh, 'SELECT * FROM token_revocations WHERE `key` = ?', [validAfterKey(user.id)])).length, 0);
+      } finally {
+        await sql(fresh, 'DROP TRIGGER qa_reject_revocation');
+        await users.delete(user.id);
+      }
+    });
+
     const service = new WatchHistoryService(ds.getRepository(WatchHistory));
     const contentId = randomUUID();
     const dto = (progressSec, changes = {}) => ({ contentType: 'movie', contentId, guestId: 'concurrent', progressSec,
