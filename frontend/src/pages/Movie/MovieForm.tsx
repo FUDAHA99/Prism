@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import {
   App,
   Form,
@@ -59,6 +59,7 @@ export default function MovieForm() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [form] = Form.useForm<FormValues>()
+  const initializedMovieId = useRef<string>()
 
   const { data: movie, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['movie', id],
@@ -67,7 +68,15 @@ export default function MovieForm() {
   })
 
   useEffect(() => {
-    if (movie) {
+    if (!id) {
+      if (initializedMovieId.current !== undefined) {
+        form.resetFields()
+        initializedMovieId.current = undefined
+      }
+      return
+    }
+    if (movie && movie.id === id && initializedMovieId.current !== id) {
+      form.resetFields()
       form.setFieldsValue({
         title: movie.title,
         originalTitle: movie.originalTitle,
@@ -94,8 +103,9 @@ export default function MovieForm() {
         metaKeywords: movie.metaKeywords,
         metaDescription: movie.metaDescription,
       })
+      initializedMovieId.current = id
     }
-  }, [movie, form])
+  }, [id, movie, form])
 
   const createMutation = useMutation({
     mutationFn: (data: CreateMovieData) => createMovie(data),
@@ -368,7 +378,7 @@ export default function MovieForm() {
                     loading={isPending}
                     onClick={() => handleSubmit(false)}
                   >
-                    保存草稿
+                    {movie?.status === 'published' ? '保存修改（立即生效）' : movie?.status === 'archived' ? '保存修改' : '保存草稿'}
                   </Button>
                   <Button
                     type="primary"

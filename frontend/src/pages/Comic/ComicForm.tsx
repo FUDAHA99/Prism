@@ -252,7 +252,7 @@ export default function ComicForm() {
             loading={isPending}
             onClick={() => handleSubmit(false)}
           >
-            保存草稿
+            {comic?.status === 'published' ? '保存修改（立即生效）' : comic?.status === 'archived' ? '保存修改' : '保存草稿'}
           </Button>
           <Button
             type="primary"

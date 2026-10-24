@@ -252,7 +252,7 @@ export default function NovelForm() {
             loading={isPending}
             onClick={() => handleSubmit(false)}
           >
-            保存草稿
+            {novel?.status === 'published' ? '保存修改（立即生效）' : novel?.status === 'archived' ? '保存修改' : '保存草稿'}
           </Button>
           <Button
             type="primary"

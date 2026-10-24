@@ -309,7 +309,7 @@ export default function ContentForm() {
               loading={isPending}
               onClick={handleSaveDraft}
             >
-              保存草稿
+              {content?.status === 'published' ? '保存修改（立即生效）' : content?.status === 'archived' ? '保存修改' : '保存草稿'}
             </Button>
             <Button
               type="primary"
