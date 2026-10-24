@@ -112,6 +112,9 @@ export interface PublicComicChapter {
   isVip: boolean;
   viewCount: number;
   pageUrls?: string[];
+  /** 仅公开单章接口返回；目录与后台编辑视图不附带邻章。 */
+  previousChapterId?: string | null;
+  nextChapterId?: string | null;
 }
 
 export interface ComicPage<T> {
@@ -526,7 +529,22 @@ export class ComicService {
       .andWhere('c.isPublished = :p', { p: true })
       .getOne();
     if (!ch) throw new NotFoundException(`章节不存在: ${chapterId}`);
-    return toPublicComicChapter(ch, true);
+    // 在数据库内比较创建时间，保留 datetime(6) 精度；每侧只读取一个 ID，不依赖目录分页。
+    const adjacent = (operator: '<' | '>', order: 'ASC' | 'DESC') => this.chapterRepo
+      .createQueryBuilder('c')
+      .select('c.id')
+      .innerJoin(ComicChapter, 'currentChapter', 'currentChapter.id = :chapterId', { chapterId: ch.id })
+      .where('c.comicId = :comicId AND c.isPublished = :published', { comicId: ch.comicId, published: true })
+      .andWhere(`(c.chapterNumber ${operator} currentChapter.chapterNumber
+        OR (c.chapterNumber = currentChapter.chapterNumber AND c.createdAt ${operator} currentChapter.createdAt)
+        OR (c.chapterNumber = currentChapter.chapterNumber AND c.createdAt = currentChapter.createdAt AND c.id ${operator} currentChapter.id))`)
+      .orderBy('c.chapterNumber', order)
+      .addOrderBy('c.createdAt', order)
+      .addOrderBy('c.id', order)
+      .limit(1)
+      .getOne();
+    const [previous, next] = await Promise.all([adjacent('<', 'DESC'), adjacent('>', 'ASC')]);
+    return { ...toPublicComicChapter(ch, true), previousChapterId: previous?.id ?? null, nextChapterId: next?.id ?? null };
   }
 
   /**
@@ -548,15 +566,14 @@ export class ComicService {
       isVip: dto.isVip ?? false,
       isPublished: dto.isPublished ?? true,
     });
-    const saved = await this.chapterRepo.save(ch);
-
-    try {
-      await this.comicRepo.increment({ id: comicId }, 'chapterCount', 1);
-      await this.comicRepo.update(comicId, { lastChapterAt: new Date() });
-    } finally {
-      // 章节已经提交；后续聚合写入失败也必须让门户丢弃旧章节缓存。
-      await this.portalCache.invalidate(['portal:comics']);
-    }
+    const saved = await this.chapterRepo.manager.transaction(async (manager) => {
+      const savedChapter = await manager.getRepository(ComicChapter).save(ch);
+      const comics = manager.getRepository(Comic);
+      await comics.increment({ id: comicId }, 'chapterCount', 1);
+      await comics.update(comicId, { lastChapterAt: new Date() });
+      return savedChapter;
+    });
+    await this.portalCache.invalidate(['portal:comics']);
 
     await this.auditService.log({
       userId,
@@ -601,12 +618,12 @@ export class ComicService {
 
   async removeChapter(chapterId: string, userId: string): Promise<void> {
     const ch = await this.getChapter(chapterId);
-    await this.chapterRepo.delete(chapterId);
-    try {
-      await this.comicRepo.decrement({ id: ch.comicId }, 'chapterCount', 1);
-    } finally {
-      await this.portalCache.invalidate(['portal:comics']);
-    }
+    await this.chapterRepo.manager.transaction(async (manager) => {
+      const result = await manager.getRepository(ComicChapter).delete(ch.id);
+      if (result.affected !== 1) throw new ConflictException('章节已变化，请刷新后重试');
+      await manager.getRepository(Comic).decrement({ id: ch.comicId }, 'chapterCount', 1);
+    });
+    await this.portalCache.invalidate(['portal:comics']);
     await this.auditService.log({
       userId,
       action: 'COMIC_CHAPTER_DELETE',

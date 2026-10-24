@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import type { Metadata } from 'next'
-import { getComicBySlug, getComicChapters, getComicChapter } from '@/lib/api'
+import { getComicBySlug, getComicChapter } from '@/lib/api'
 import { safeMediaSrc } from '@/lib/safe-url'
 
 interface Props { params: Promise<{ slug: string; chapterId: string }> }
@@ -20,16 +20,12 @@ export default async function ComicChapterPage({ params: paramsPromise }: Props)
   const comic = await getComicBySlug(params.slug)
   if (!comic) notFound()
 
-  const [chapter, chapters] = await Promise.all([
-    getComicChapter(params.chapterId),
-    getComicChapters(comic.id),
-  ])
+  const chapter = await getComicChapter(params.chapterId)
   // 章节必须属于地址栏里的这部漫画：否则任意已发布章节都能挂在别的漫画名下显示
   if (!chapter || chapter.comicId !== comic.id) notFound()
 
-  const idx = chapters.findIndex((c) => c.id === chapter.id)
-  const prev = idx > 0 ? chapters[idx - 1] : null
-  const next = idx >= 0 && idx < chapters.length - 1 ? chapters[idx + 1] : null
+  const prev = chapter.previousChapterId
+  const next = chapter.nextChapterId
 
   // 页面图地址不合格的（非 http(s) / 站内路径）不渲染成 <img>，占位保留页序
   const pages = (chapter.pageUrls ?? []).map((url) => safeMediaSrc(url))
@@ -74,12 +70,12 @@ export default async function ComicChapterPage({ params: paramsPromise }: Props)
 
       <div className="mt-10 flex items-center justify-between">
         {prev ? (
-          <Link href={`/comics/${comic.slug}/chapters/${prev.id}`}
+          <Link href={`/comics/${comic.slug}/chapters/${prev}`}
             className="px-4 py-2 rounded bg-gray-100 hover:bg-gray-200 text-sm">← 上一话</Link>
         ) : <span />}
         <Link href={`/comics/${comic.slug}`} className="text-sm text-gray-500 hover:text-brand-600">目录</Link>
         {next ? (
-          <Link href={`/comics/${comic.slug}/chapters/${next.id}`}
+          <Link href={`/comics/${comic.slug}/chapters/${next}`}
             className="px-4 py-2 rounded bg-brand-600 text-white hover:bg-brand-700 text-sm">下一话 →</Link>
         ) : <span />}
       </div>

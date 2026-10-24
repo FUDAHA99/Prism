@@ -273,17 +273,13 @@ export const getNovelBySlug = cachedItem(
 
 export async function getNovelChapters(
   novelId: string,
-): Promise<NovelChapter[]> {
-  try {
-    // 后端返回 { data: NovelChapter[], meta } 这种分页结构，这里把 data 拆出来
-    const r = await request<NovelChapter[] | Pagination<NovelChapter>>(
-      `/novels/${novelId}/chapters`,
-      { revalidate: REVALIDATE_DETAIL, tags: ['portal:novels'] },
-    )
-    return Array.isArray(r) ? r : (r?.data ?? [])
-  } catch {
-    return []
-  }
+  params: { page?: number; limit?: number } = {},
+): Promise<Pagination<NovelChapter>> {
+  const qs = buildQs({ page: 1, limit: 50, ...params })
+  return request<Pagination<NovelChapter>>(
+    `/novels/${novelId}/chapters?${qs}`,
+    { revalidate: REVALIDATE_DETAIL, tags: ['portal:novels'] },
+  )
 }
 
 export const getNovelChapter = cachedItem(
@@ -320,16 +316,13 @@ export const getComicBySlug = cachedItem(
 
 export async function getComicChapters(
   comicId: string,
-): Promise<ComicChapter[]> {
-  try {
-    const r = await request<ComicChapter[] | Pagination<ComicChapter>>(
-      `/comics/${comicId}/chapters`,
-      { revalidate: REVALIDATE_DETAIL, tags: ['portal:comics'] },
-    )
-    return Array.isArray(r) ? r : (r?.data ?? [])
-  } catch {
-    return []
-  }
+  params: { page?: number; limit?: number } = {},
+): Promise<Pagination<ComicChapter>> {
+  const qs = buildQs({ page: 1, limit: 50, ...params })
+  return request<Pagination<ComicChapter>>(
+    `/comics/${comicId}/chapters?${qs}`,
+    { revalidate: REVALIDATE_DETAIL, tags: ['portal:comics'] },
+  )
 }
 
 export const getComicChapter = cachedItem(

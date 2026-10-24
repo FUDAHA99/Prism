@@ -113,6 +113,9 @@ export interface PublicNovelChapter {
   isVip: boolean;
   viewCount: number;
   content?: string;
+  /** 仅公开单章接口返回；目录与后台编辑视图不附带邻章。 */
+  previousChapterId?: string | null;
+  nextChapterId?: string | null;
 }
 
 export interface NovelPage<T> {
@@ -541,7 +544,22 @@ export class NovelService {
       .andWhere('c.isPublished = :p', { p: true })
       .getOne();
     if (!ch) throw new NotFoundException(`章节不存在: ${chapterId}`);
-    return toPublicNovelChapter(ch, true);
+    // 在数据库内比较创建时间，保留 datetime(6) 精度；每侧只读取一个 ID，不依赖目录分页。
+    const adjacent = (operator: '<' | '>', order: 'ASC' | 'DESC') => this.chapterRepo
+      .createQueryBuilder('c')
+      .select('c.id')
+      .innerJoin(NovelChapter, 'currentChapter', 'currentChapter.id = :chapterId', { chapterId: ch.id })
+      .where('c.novelId = :novelId AND c.isPublished = :published', { novelId: ch.novelId, published: true })
+      .andWhere(`(c.chapterNumber ${operator} currentChapter.chapterNumber
+        OR (c.chapterNumber = currentChapter.chapterNumber AND c.createdAt ${operator} currentChapter.createdAt)
+        OR (c.chapterNumber = currentChapter.chapterNumber AND c.createdAt = currentChapter.createdAt AND c.id ${operator} currentChapter.id))`)
+      .orderBy('c.chapterNumber', order)
+      .addOrderBy('c.createdAt', order)
+      .addOrderBy('c.id', order)
+      .limit(1)
+      .getOne();
+    const [previous, next] = await Promise.all([adjacent('<', 'DESC'), adjacent('>', 'ASC')]);
+    return { ...toPublicNovelChapter(ch, true), previousChapterId: previous?.id ?? null, nextChapterId: next?.id ?? null };
   }
 
   /**
@@ -564,19 +582,17 @@ export class NovelService {
       isVip: dto.isVip ?? false,
       isPublished: dto.isPublished ?? true,
     });
-    const saved = await this.chapterRepo.save(ch);
-
-    try {
-      // 小说的聚合计数
-      await this.novelRepo.increment({ id: novelId }, 'chapterCount', 1);
+    const saved = await this.chapterRepo.manager.transaction(async (manager) => {
+      const savedChapter = await manager.getRepository(NovelChapter).save(ch);
+      const novels = manager.getRepository(Novel);
+      await novels.increment({ id: novelId }, 'chapterCount', 1);
       if (wordCount > 0) {
-        await this.novelRepo.increment({ id: novelId }, 'wordCount', wordCount);
+        await novels.increment({ id: novelId }, 'wordCount', wordCount);
       }
-      await this.novelRepo.update(novelId, { lastChapterAt: new Date() });
-    } finally {
-      // 章节已经提交；后续聚合写入失败也必须让门户丢弃旧章节缓存。
-      await this.portalCache.invalidate(['portal:novels']);
-    }
+      await novels.update(novelId, { lastChapterAt: new Date() });
+      return savedChapter;
+    });
+    await this.portalCache.invalidate(['portal:novels']);
 
     await this.auditService.log({
       userId,
@@ -605,16 +621,18 @@ export class NovelService {
     if (typeof dto.content === 'string') patch.wordCount = dto.content.length;
 
     if (Object.keys(patch).length > 0) {
-      await this.chapterRepo.update(chapterId, patch);
-      try {
+      await this.chapterRepo.manager.transaction(async (manager) => {
+        // 条件写入拒绝字数已变化或已删除的旧快照，差值只对实际更新的一行累加。
+        const result = await manager.getRepository(NovelChapter).update({ id: ch.id, wordCount: ch.wordCount }, patch);
+        if (result.affected !== 1) throw new ConflictException('章节已变化，请刷新后重试');
+        const novels = manager.getRepository(Novel);
         if (delta > 0) {
-          await this.novelRepo.increment({ id: ch.novelId }, 'wordCount', delta);
+          await novels.increment({ id: ch.novelId }, 'wordCount', delta);
         } else if (delta < 0) {
-          await this.novelRepo.decrement({ id: ch.novelId }, 'wordCount', -delta);
+          await novels.decrement({ id: ch.novelId }, 'wordCount', -delta);
         }
-      } finally {
-        await this.portalCache.invalidate(['portal:novels']);
-      }
+      });
+      await this.portalCache.invalidate(['portal:novels']);
     }
 
     await this.auditService.log({
@@ -631,15 +649,16 @@ export class NovelService {
 
   async removeChapter(chapterId: string, userId: string): Promise<void> {
     const ch = await this.getChapter(chapterId);
-    await this.chapterRepo.delete(chapterId);
-    try {
-      await this.novelRepo.decrement({ id: ch.novelId }, 'chapterCount', 1);
+    await this.chapterRepo.manager.transaction(async (manager) => {
+      const result = await manager.getRepository(NovelChapter).delete({ id: ch.id, wordCount: ch.wordCount });
+      if (result.affected !== 1) throw new ConflictException('章节已变化，请刷新后重试');
+      const novels = manager.getRepository(Novel);
+      await novels.decrement({ id: ch.novelId }, 'chapterCount', 1);
       if (ch.wordCount > 0) {
-        await this.novelRepo.decrement({ id: ch.novelId }, 'wordCount', ch.wordCount);
+        await novels.decrement({ id: ch.novelId }, 'wordCount', ch.wordCount);
       }
-    } finally {
-      await this.portalCache.invalidate(['portal:novels']);
-    }
+    });
+    await this.portalCache.invalidate(['portal:novels']);
     await this.auditService.log({
       userId,
       action: 'NOVEL_CHAPTER_DELETE',

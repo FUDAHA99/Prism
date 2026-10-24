@@ -18,6 +18,8 @@ import { Novel, NovelSerialStatus, NovelStatus } from './entities/novel.entity';
 import { NovelChapter } from './entities/novel-chapter.entity';
 import { NOVEL_PUBLIC_MAX_LIMIT } from './dto/query-novel.dto';
 import { AuthService } from '../auth/auth.service';
+import { TokenRevocationStore } from '../auth/token-revocation.store';
+import { TokenRevocation } from '../auth/entities/token-revocation.entity';
 import { JwtStrategy } from '../auth/strategies/jwt.strategy';
 import { UserService } from '../user/user.service';
 import { RoleService } from '../role/role.service';
@@ -103,7 +105,7 @@ const PUBLIC_NOVEL_KEYS = [
   'wordCount',
 ];
 const PUBLIC_CHAPTER_LIST_KEYS = ['chapterNumber', 'id', 'isVip', 'novelId', 'title', 'viewCount', 'wordCount'];
-const PUBLIC_CHAPTER_DETAIL_KEYS = [...PUBLIC_CHAPTER_LIST_KEYS, 'content'].sort();
+const PUBLIC_CHAPTER_DETAIL_KEYS = [...PUBLIC_CHAPTER_LIST_KEYS, 'content', 'previousChapterId', 'nextChapterId'].sort();
 /** 后台目录：除正文外的全部列（与此前「整行读出再去掉 content」一致） */
 const STAFF_CHAPTER_LIST_KEYS = [
   'chapterNumber',
@@ -242,7 +244,7 @@ describe('小说模块 HTTP', () => {
             type: 'better-sqlite3',
             database: ':memory:',
             // User 关联闭包里的实体 + 小说两张表
-            entities: [User, Role, Permission, AuditLog, MediaFile, Content, Category, Comment, Novel, NovelChapter],
+            entities: [User, Role, Permission, AuditLog, MediaFile, Content, Category, Comment, Novel, NovelChapter, TokenRevocation],
             synchronize: true,
             logging: ['query'],
             logger: sql,
@@ -266,6 +268,7 @@ describe('小说模块 HTTP', () => {
         // 与 AppModule 相同：Access() 只写元数据，访问级别由全局 AccessGuard 执行
         { provide: APP_GUARD, useClass: AccessGuard },
         AuthService,
+        TokenRevocationStore,
         JwtStrategy,
         UserService,
         RoleService,
@@ -355,7 +358,7 @@ describe('小说模块 HTTP', () => {
   });
 
   describe('GET /novels', () => {
-    it('门户缓存：章节增改删通知、阅读不通知，后续聚合失败仍通知已提交章节', async () => {
+    it('门户缓存：章节增改删提交后通知、阅读不通知，聚合失败回滚章节', async () => {
       const parent = await novels.save({ title: '缓存小说', slug: 'cache-chapters-novel', status: NovelStatus.PUBLISHED, publishedAt: new Date('2020-01-01') });
       try {
         const created = await as(http().post(`/novels/${parent.id}/chapters`), 'editor').send({ title: '新章', content: '正文', isPublished: true }).expect(201);
@@ -370,8 +373,8 @@ describe('小说模块 HTTP', () => {
         await ds.query("CREATE TRIGGER cache_parent_fail BEFORE UPDATE ON novels BEGIN SELECT RAISE(ABORT, 'cache regression'); END");
         try {
           await as(http().post(`/novels/${parent.id}/chapters`), 'editor').send({ title: '新章', content: '正文', isPublished: true }).expect(500);
-          expect(await ds.getRepository(NovelChapter).countBy({ novelId: parent.id })).toBe(1);
-          expect(portalCache.invalidate.mock.calls).toEqual([[['portal:novels']]]);
+          expect(await ds.getRepository(NovelChapter).countBy({ novelId: parent.id })).toBe(0);
+          expect(portalCache.invalidate).not.toHaveBeenCalled();
         } finally {
           await ds.query('DROP TRIGGER cache_parent_fail');
         }
@@ -831,6 +834,50 @@ describe('小说模块 HTTP', () => {
   });
 
   describe('GET /novels/chapters/:chapterId（正文）', () => {
+    it('第 50 与 51 章导航跨越目录分页，首尾邻章为空', async () => {
+      const novel = await novels.save({ title: '长篇导航', slug: 'chapter-navigation-51', status: NovelStatus.PUBLISHED });
+      try {
+        const rows = await chapters.save(Array.from({ length: 51 }, (_, i) => ({
+          novelId: novel.id, chapterNumber: i + 1, title: `第${i + 1}章`, content: '正文', isPublished: true,
+        })));
+        const directory = await get(`/novels/${novel.id}/chapters`, 'anonymous').expect(200);
+        expect(directory.body.data).toHaveLength(50);
+        expect(directory.body.meta.total).toBe(51);
+        const first = await get(`/novels/chapters/${rows[0].id}`, 'anonymous').expect(200);
+        const fiftieth = await get(`/novels/chapters/${rows[49].id}`, 'anonymous').expect(200);
+        const last = await get(`/novels/chapters/${rows[50].id}`, 'anonymous').expect(200);
+        expect(first.body).toMatchObject({ previousChapterId: null, nextChapterId: rows[1].id });
+        expect(fiftieth.body).toMatchObject({ previousChapterId: rows[48].id, nextChapterId: rows[50].id });
+        expect(last.body).toMatchObject({ previousChapterId: rows[49].id, nextChapterId: null });
+        const staff = await get(`/novels/chapters/${rows[49].id}`, 'admin').expect(200);
+        expect(staff.body).not.toHaveProperty('previousChapterId');
+        expect(staff.body).not.toHaveProperty('nextChapterId');
+      } finally { await novels.delete(novel.id); }
+    });
+
+    it('重复章号按创建时间和 ID 定位，跳过隐藏章且不跨书', async () => {
+      const novel = await novels.save({ title: '重复章号', slug: 'chapter-navigation-ties', status: NovelStatus.PUBLISHED });
+      const other = await novels.save({ title: '其他小说', slug: 'chapter-navigation-other', status: NovelStatus.PUBLISHED });
+      const prefix = randomUUID().slice(0, 24);
+      const chapterId = (n: number) => `${prefix}${String(n).padStart(12, '0')}`;
+      try {
+        await chapters.save([10, 20, 25, 30, 40].map((n) => ({
+          id: chapterId(n), novelId: novel.id, chapterNumber: 7, title: String(n), content: '正文', isPublished: n !== 25,
+          createdAt: new Date(n === 10 ? '2026-01-01T00:00:00Z' : n === 40 ? '2026-03-01T00:00:00Z' : '2026-02-01T00:00:00Z'),
+        })));
+        await chapters.save({ id: chapterId(22), novelId: other.id, chapterNumber: 7, title: '另一书', content: '其他正文' });
+        // 保留数据库的微秒精度；JS Date 回读只保留毫秒，邻章比较不能依赖这个截断值。
+        await ds.query('UPDATE novel_chapters SET createdAt = ? WHERE id IN (?, ?, ?, ?)', [
+          '2026-02-01 00:00:00.123456', chapterId(20), chapterId(22), chapterId(25), chapterId(30),
+        ]);
+        const middle = await get(`/novels/chapters/${chapterId(20)}`, 'anonymous').expect(200);
+        const next = await get(`/novels/chapters/${chapterId(30)}`, 'anonymous').expect(200);
+        expect(middle.body).toMatchObject({ previousChapterId: chapterId(10), nextChapterId: chapterId(30) });
+        expect(next.body).toMatchObject({ previousChapterId: chapterId(20), nextChapterId: chapterId(40) });
+        await get(`/novels/chapters/${chapterId(25)}`, 'anonymous').expect(404);
+      } finally { await novels.delete([novel.id, other.id]); }
+    });
+
     it.each<Who>(['anonymous', 'plain'])('%s：已发布小说的已发布章节 —— 公开字段 + 正文，阅读数 +1', async (who) => {
       const id = chapterIds.published.pub1;
       const before = await chapterViewCountOf(id);
@@ -898,6 +945,74 @@ describe('小说模块 HTTP', () => {
         .get(`/novels/chapters/${chapterIds.published.pub1}`)
         .set('Authorization', 'Bearer not.a.jwt')
         .expect(401);
+    });
+  });
+
+  describe('章节写入与父计数原子性（审查第 11 项）', () => {
+    function holdChapterRead() {
+      let read!: () => void;
+      let resume!: () => void;
+      const ready = new Promise<void>((resolve) => { read = resolve; });
+      const released = new Promise<void>((resolve) => { resume = resolve; });
+      const original = service.getChapter.bind(service);
+      const spy = jest.spyOn(service, 'getChapter').mockImplementationOnce(async (id) => {
+        const snapshot = await original(id);
+        read();
+        await released;
+        return snapshot;
+      });
+      return { ready, resume, restore: () => spy.mockRestore() };
+    }
+
+    it.each(['update', 'remove', 'remove-after-update'] as const)('%s 的过期快照返回 409，不再重复累加或扣减', async (operation) => {
+      const parent = await novels.save({ title: '并发计数', slug: `chapter-count-${operation}` });
+      const ch = await service.addChapter(parent.id, { title: '章节', content: 'a'.repeat(100) }, ids.admin);
+      const hold = holdChapterRead();
+      const pending = operation === 'update'
+        ? service.updateChapter(ch.id, { content: 'b'.repeat(200) }, ids.admin)
+        : service.removeChapter(ch.id, ids.admin);
+      const outcome = pending.then(() => null, (error) => error);
+      await hold.ready;
+      try {
+        if (operation === 'remove') await service.removeChapter(ch.id, ids.admin);
+        else await service.updateChapter(ch.id, { content: 'c'.repeat(300) }, ids.admin);
+        const auditCount = await ds.getRepository(AuditLog).countBy({ resourceId: ch.id });
+        portalCache.invalidate.mockClear();
+        hold.resume();
+        expect(await outcome).toMatchObject({ status: 409 });
+        expect(await novels.findOneByOrFail({ id: parent.id })).toMatchObject({
+          chapterCount: operation === 'remove' ? 0 : 1, wordCount: operation === 'remove' ? 0 : 300,
+        });
+        expect(await chapters.countBy({ novelId: parent.id })).toBe(operation === 'remove' ? 0 : 1);
+        expect(await ds.getRepository(AuditLog).countBy({ resourceId: ch.id })).toBe(auditCount);
+        expect(portalCache.invalidate).not.toHaveBeenCalled();
+      } finally {
+        hold.resume();
+        await outcome;
+        hold.restore();
+        await novels.delete(parent.id);
+      }
+    });
+
+    it.each(['update', 'remove'] as const)('%s 遇到父计数写入失败，章节和计数一起回滚且不通知/审计', async (operation) => {
+      const parent = await novels.save({ title: '计数回滚', slug: `chapter-count-failure-${operation}` });
+      const ch = await service.addChapter(parent.id, { title: '章节', content: '原正文' }, ids.admin);
+      const before = await chapters.findOneByOrFail({ id: ch.id });
+      const auditCount = await ds.getRepository(AuditLog).countBy({ resourceId: ch.id });
+      portalCache.invalidate.mockClear();
+      await ds.query("CREATE TRIGGER reject_novel_count BEFORE UPDATE ON novels BEGIN SELECT RAISE(ABORT, 'aggregate write failed'); END");
+      try {
+        await expect(operation === 'update'
+          ? service.updateChapter(ch.id, { content: '新正文更长' }, ids.admin)
+          : service.removeChapter(ch.id, ids.admin)).rejects.toThrow('aggregate write failed');
+        expect(await chapters.findOneBy({ id: ch.id })).toEqual(before);
+        expect(await novels.findOneByOrFail({ id: parent.id })).toMatchObject({ chapterCount: 1, wordCount: 3 });
+        expect(await ds.getRepository(AuditLog).countBy({ resourceId: ch.id })).toBe(auditCount);
+        expect(portalCache.invalidate).not.toHaveBeenCalled();
+      } finally {
+        await ds.query('DROP TRIGGER reject_novel_count');
+        await novels.delete(parent.id);
+      }
     });
   });
 

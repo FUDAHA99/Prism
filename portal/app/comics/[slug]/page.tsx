@@ -5,8 +5,13 @@ import { notFound } from 'next/navigation'
 import type { Metadata } from 'next'
 import { getComicBySlug, getComicChapters } from '@/lib/api'
 import { safeMediaSrc } from '@/lib/safe-url'
+import { parsePageParam } from '@/lib/page-param'
+import Pagination from '@/components/Pagination'
 
-interface Props { params: Promise<{ slug: string }> }
+interface Props {
+  params: Promise<{ slug: string }>
+  searchParams: Promise<{ page?: string | string[] }>
+}
 
 export async function generateMetadata({ params: paramsPromise }: Props): Promise<Metadata> {
   const params = await paramsPromise
@@ -15,12 +20,18 @@ export async function generateMetadata({ params: paramsPromise }: Props): Promis
   return { title: c.title, description: c.intro?.slice(0, 160) }
 }
 
-export default async function ComicDetailPage({ params: paramsPromise }: Props) {
+export default async function ComicDetailPage({ params: paramsPromise, searchParams: searchParamsPromise }: Props) {
   const params = await paramsPromise
   const comic = await getComicBySlug(params.slug)
   if (!comic) notFound()
 
-  const chapters = await getComicChapters(comic.id)
+  const page = parsePageParam((await searchParamsPromise).page)
+  const [list, firstPage] = await Promise.all([
+    getComicChapters(comic.id, { page }).catch(() => null),
+    page > 1 ? getComicChapters(comic.id, { page: 1, limit: 1 }).catch(() => null) : null,
+  ])
+  const chapters = list?.data ?? []
+  const firstChapter = page === 1 ? chapters[0] : firstPage?.data[0]
   const coverSrc = safeMediaSrc(comic.coverUrl)
 
   return (
@@ -56,9 +67,9 @@ export default async function ComicDetailPage({ params: paramsPromise }: Props) 
             </div>
           )}
 
-          {chapters[0] && (
+          {firstChapter && (
             <Link
-              href={`/comics/${comic.slug}/chapters/${chapters[0].id}`}
+              href={`/comics/${comic.slug}/chapters/${firstChapter.id}`}
               className="inline-block mt-4 px-5 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded font-semibold"
             >
               开始阅读
@@ -67,10 +78,10 @@ export default async function ComicDetailPage({ params: paramsPromise }: Props) 
         </div>
       </div>
 
-      {chapters.length > 0 && (
+      {list ? (
         <div className="mt-6 bg-white rounded-lg shadow-sm border border-gray-200">
           <div className="px-5 py-3 border-b border-gray-100 text-sm font-semibold text-gray-700">
-            目录（{chapters.length} 话）
+            目录（{list.meta.total} 话）
           </div>
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2 p-4">
             {chapters.map((c) => (
@@ -83,8 +94,9 @@ export default async function ComicDetailPage({ params: paramsPromise }: Props) 
               </Link>
             ))}
           </div>
+          <Pagination currentPage={Number(list.meta.page)} totalPages={list.meta.totalPages} basePath={`/comics/${comic.slug}`} />
         </div>
-      )}
+      ) : <p className="mt-6 text-sm text-gray-500">目录加载失败，请稍后重试</p>}
     </div>
   )
 }

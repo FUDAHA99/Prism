@@ -18,6 +18,8 @@ import { Comic, ComicSerialStatus, ComicStatus } from './entities/comic.entity';
 import { ComicChapter } from './entities/comic-chapter.entity';
 import { COMIC_PUBLIC_MAX_LIMIT } from './dto/query-comic.dto';
 import { AuthService } from '../auth/auth.service';
+import { TokenRevocationStore } from '../auth/token-revocation.store';
+import { TokenRevocation } from '../auth/entities/token-revocation.entity';
 import { JwtStrategy } from '../auth/strategies/jwt.strategy';
 import { UserService } from '../user/user.service';
 import { RoleService } from '../role/role.service';
@@ -102,7 +104,7 @@ const PUBLIC_COMIC_KEYS = [
   'viewCount',
 ];
 const PUBLIC_CHAPTER_LIST_KEYS = ['chapterNumber', 'comicId', 'id', 'isVip', 'pageCount', 'title', 'viewCount'];
-const PUBLIC_CHAPTER_DETAIL_KEYS = [...PUBLIC_CHAPTER_LIST_KEYS, 'pageUrls'].sort();
+const PUBLIC_CHAPTER_DETAIL_KEYS = [...PUBLIC_CHAPTER_LIST_KEYS, 'pageUrls', 'previousChapterId', 'nextChapterId'].sort();
 /** 后台目录：完整字段（编辑弹窗直接用列表里的 pageUrls） */
 const STAFF_CHAPTER_LIST_KEYS = [
   'chapterNumber',
@@ -241,7 +243,7 @@ describe('漫画模块 HTTP', () => {
           type: 'better-sqlite3',
           database: ':memory:',
           // User 关联闭包里的实体 + 漫画两张表（pageUrls 是 json 列，SQLite 驱动直接支持）
-          entities: [User, Role, Permission, AuditLog, MediaFile, Content, Category, Comment, Comic, ComicChapter],
+          entities: [User, Role, Permission, AuditLog, MediaFile, Content, Category, Comment, Comic, ComicChapter, TokenRevocation],
           synchronize: true,
           logging: ['query'],
           logger: sql,
@@ -257,6 +259,7 @@ describe('漫画模块 HTTP', () => {
         // 与 AppModule 相同：Access() 只写元数据，访问级别由全局 AccessGuard 执行
         { provide: APP_GUARD, useClass: AccessGuard },
         AuthService,
+        TokenRevocationStore,
         JwtStrategy,
         UserService,
         RoleService,
@@ -345,7 +348,7 @@ describe('漫画模块 HTTP', () => {
   });
 
   describe('GET /comics', () => {
-    it('门户缓存：章节增改删通知、阅读不通知，后续聚合失败仍通知已提交章节', async () => {
+    it('门户缓存：章节增改删提交后通知、阅读不通知，聚合失败回滚章节', async () => {
       const parent = await comics.save({ title: '缓存漫画', slug: 'cache-chapters-comic', status: ComicStatus.PUBLISHED, publishedAt: new Date('2020-01-01') });
       try {
         const created = await as(http().post(`/comics/${parent.id}/chapters`), 'editor').send({ title: '新章', pageUrls: ['/uploads/page.png'], isPublished: true }).expect(201);
@@ -360,8 +363,8 @@ describe('漫画模块 HTTP', () => {
         await ds.query("CREATE TRIGGER cache_parent_fail BEFORE UPDATE ON comics BEGIN SELECT RAISE(ABORT, 'cache regression'); END");
         try {
           await as(http().post(`/comics/${parent.id}/chapters`), 'editor').send({ title: '新章', pageUrls: ['/uploads/page.png'], isPublished: true }).expect(500);
-          expect(await ds.getRepository(ComicChapter).countBy({ comicId: parent.id })).toBe(1);
-          expect(portalCache.invalidate.mock.calls).toEqual([[['portal:comics']]]);
+          expect(await ds.getRepository(ComicChapter).countBy({ comicId: parent.id })).toBe(0);
+          expect(portalCache.invalidate).not.toHaveBeenCalled();
         } finally {
           await ds.query('DROP TRIGGER cache_parent_fail');
         }
@@ -795,6 +798,46 @@ describe('漫画模块 HTTP', () => {
   });
 
   describe('GET /comics/chapters/:chapterId（阅读页）', () => {
+    it('第 50 与 51 话导航跨越目录分页，首尾邻章为空', async () => {
+      const comic = await comics.save({ title: '长篇导航', slug: 'chapter-navigation-51', status: ComicStatus.PUBLISHED });
+      try {
+        const rows = await chapters.save(Array.from({ length: 51 }, (_, i) => ({
+          comicId: comic.id, chapterNumber: i + 1, title: `第${i + 1}话`, pageUrls: ['/uploads/page.jpg'], isPublished: true,
+        })));
+        const directory = await get(`/comics/${comic.id}/chapters`, 'anonymous').expect(200);
+        expect(directory.body.data).toHaveLength(50);
+        expect(directory.body.meta.total).toBe(51);
+        const first = await get(`/comics/chapters/${rows[0].id}`, 'anonymous').expect(200);
+        const fiftieth = await get(`/comics/chapters/${rows[49].id}`, 'anonymous').expect(200);
+        const last = await get(`/comics/chapters/${rows[50].id}`, 'anonymous').expect(200);
+        expect(first.body).toMatchObject({ previousChapterId: null, nextChapterId: rows[1].id });
+        expect(fiftieth.body).toMatchObject({ previousChapterId: rows[48].id, nextChapterId: rows[50].id });
+        expect(last.body).toMatchObject({ previousChapterId: rows[49].id, nextChapterId: null });
+      } finally { await comics.delete(comic.id); }
+    });
+
+    it('重复话号按创建时间和 ID 定位，跳过隐藏话且不跨漫画', async () => {
+      const comic = await comics.save({ title: '重复话号', slug: 'chapter-navigation-ties', status: ComicStatus.PUBLISHED });
+      const other = await comics.save({ title: '其他漫画', slug: 'chapter-navigation-other', status: ComicStatus.PUBLISHED });
+      const prefix = randomUUID().slice(0, 24);
+      const chapterId = (n: number) => `${prefix}${String(n).padStart(12, '0')}`;
+      try {
+        await chapters.save([10, 20, 25, 30, 40].map((n) => ({
+          id: chapterId(n), comicId: comic.id, chapterNumber: 7, title: String(n), pageUrls: ['/uploads/page.jpg'], isPublished: n !== 25,
+          createdAt: new Date(n === 10 ? '2026-01-01T00:00:00Z' : n === 40 ? '2026-03-01T00:00:00Z' : '2026-02-01T00:00:00Z'),
+        })));
+        await chapters.save({ id: chapterId(22), comicId: other.id, chapterNumber: 7, title: '另一漫画', pageUrls: ['/uploads/other.jpg'] });
+        await ds.query('UPDATE comic_chapters SET createdAt = ? WHERE id IN (?, ?, ?, ?)', [
+          '2026-02-01 00:00:00.123456', chapterId(20), chapterId(22), chapterId(25), chapterId(30),
+        ]);
+        const middle = await get(`/comics/chapters/${chapterId(20)}`, 'anonymous').expect(200);
+        const next = await get(`/comics/chapters/${chapterId(30)}`, 'anonymous').expect(200);
+        expect(middle.body).toMatchObject({ previousChapterId: chapterId(10), nextChapterId: chapterId(30) });
+        expect(next.body).toMatchObject({ previousChapterId: chapterId(20), nextChapterId: chapterId(40) });
+        await get(`/comics/chapters/${chapterId(25)}`, 'anonymous').expect(404);
+      } finally { await comics.delete([comic.id, other.id]); }
+    });
+
     it('已发布漫画的已发布章节：公开字段 + 页面图地址，阅读数 +1', async () => {
       const id = chapterIds.published.pub1;
       const before = await chapterViewCountOf(id);
@@ -838,6 +881,61 @@ describe('漫画模块 HTTP', () => {
     it('公开接口不解析 token：带着管理员 token 也读不到未发布章节（后台编辑弹窗用的是目录里的 pageUrls）', async () => {
       await get(`/comics/chapters/${chapterIds.published.hidden}`, 'admin').expect(404);
       await get(`/comics/chapters/${chapterIds.draft.pub1}`, 'editor').expect(404);
+    });
+  });
+
+  describe('章节删除与父计数原子性（审查第 11 项）', () => {
+    it('两次删除持有同一快照时只扣减一次，迟到请求返回 409', async () => {
+      const parent = await comics.save({ title: '并发计数', slug: 'chapter-count-remove' });
+      const ch = await service.addChapter(parent.id, { title: '章节', pageUrls: ['/uploads/1.jpg'] }, ids.admin);
+      let read!: () => void;
+      let resume!: () => void;
+      const ready = new Promise<void>((resolve) => { read = resolve; });
+      const released = new Promise<void>((resolve) => { resume = resolve; });
+      const original = service.getChapter.bind(service);
+      const spy = jest.spyOn(service, 'getChapter').mockImplementationOnce(async (id) => {
+        const snapshot = await original(id);
+        read();
+        await released;
+        return snapshot;
+      });
+      const outcome = service.removeChapter(ch.id, ids.admin).then(() => null, (error) => error);
+      await ready;
+      try {
+        await service.removeChapter(ch.id, ids.admin);
+        const auditCount = await ds.getRepository(AuditLog).countBy({ resourceId: ch.id });
+        portalCache.invalidate.mockClear();
+        resume();
+        expect(await outcome).toMatchObject({ status: 409 });
+        expect((await comics.findOneByOrFail({ id: parent.id })).chapterCount).toBe(0);
+        expect(await chapters.countBy({ comicId: parent.id })).toBe(0);
+        expect(await ds.getRepository(AuditLog).countBy({ resourceId: ch.id })).toBe(auditCount);
+        expect(portalCache.invalidate).not.toHaveBeenCalled();
+      } finally {
+        resume();
+        await outcome;
+        spy.mockRestore();
+        await comics.delete(parent.id);
+      }
+    });
+
+    it('删除时父计数写入失败，章节一并回滚且不通知/审计', async () => {
+      const parent = await comics.save({ title: '计数回滚', slug: 'chapter-count-failure' });
+      const ch = await service.addChapter(parent.id, { title: '章节', pageUrls: ['/uploads/1.jpg'] }, ids.admin);
+      const before = await chapters.findOneByOrFail({ id: ch.id });
+      const auditCount = await ds.getRepository(AuditLog).countBy({ resourceId: ch.id });
+      portalCache.invalidate.mockClear();
+      await ds.query("CREATE TRIGGER reject_comic_count BEFORE UPDATE ON comics BEGIN SELECT RAISE(ABORT, 'aggregate write failed'); END");
+      try {
+        await expect(service.removeChapter(ch.id, ids.admin)).rejects.toThrow('aggregate write failed');
+        expect(await chapters.findOneBy({ id: ch.id })).toEqual(before);
+        expect((await comics.findOneByOrFail({ id: parent.id })).chapterCount).toBe(1);
+        expect(await ds.getRepository(AuditLog).countBy({ resourceId: ch.id })).toBe(auditCount);
+        expect(portalCache.invalidate).not.toHaveBeenCalled();
+      } finally {
+        await ds.query('DROP TRIGGER reject_comic_count');
+        await comics.delete(parent.id);
+      }
     });
   });
 

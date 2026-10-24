@@ -171,6 +171,9 @@ export interface NovelChapter {
   chapterNumber: number
   title: string
   content?: string
+  /** 单章接口返回；目录不含邻章字段 */
+  previousChapterId?: string | null
+  nextChapterId?: string | null
   wordCount: number
   isVip: boolean
   viewCount: number
@@ -207,6 +210,9 @@ export interface ComicChapter {
   chapterNumber: number
   title: string
   pageUrls?: string[]
+  /** 单章接口返回；目录不含邻章字段 */
+  previousChapterId?: string | null
+  nextChapterId?: string | null
   pageCount: number
   isVip: boolean
   viewCount: number
