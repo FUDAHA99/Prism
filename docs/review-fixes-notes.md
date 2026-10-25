@@ -279,3 +279,303 @@ backend 3 项失败，均在 `config/backup-scripts.spec.ts`，都属于 Windows
 portal 回归：本机 Playwright 1.63 需要的 headless shell 1243 未安装，改用已安装的 `chromium_headless_shell-1228`（通过 `PORTAL_TEST_BROWSER_EXECUTABLE` 指定）。输出目录放在仓库外的 `F:\METU\portal-test-tmp`，以免默认的 C: 盘临时目录与 F: 盘 `node_modules` 跨盘导致 Next webpack 构建解析失败。本批修复相关场景全部通过：第 50 章后的目录分页与邻章、评论根分页及多层回复按需加载、游客评论审核。失败的 2 项是 development 模式下“resume 经 Next rewrite”“搜索上报经 Next rewrite”，Next 开发错误浮层计数为 2。在 `bd46190`（未含本批修复）的临时 worktree 上用同样方式复跑，这 2 项同样失败（14 通过 / 2 失败），属于既有问题或本机开发模式环境问题，与本批修复无关，未修改。
 
 本轮没有对源码做额外修改，没有跳过测试或放宽断言。没有连接真实数据库、Redis、Docker 或线上环境，也没有执行真实备份、恢复或部署。
+
+## 后续修复（2026-10-25）
+
+### 修改前的根因证据
+
+本轮从 `codex/followups-20261025` / `cc31bd23cc8acbcc03569cc314e2e454906a851e` 的干净工作区开始。以下证据先于代码修改记录；未读取真实环境文件或密钥，未启动 Docker，未写 `.git`。
+
+- 已读取既有沙箱外报告 `F:\METU\portal-test-tmp\portal-regression-i5Bwyb\result.json` 和两个 `development-*-failure.png`：resume 和 search 均显示橙色 **1 Insight**，页面没有可见红色错误框。两个场景的 `pageErrors`、`externalRequests` 均为空；search 的 `consoleErrors` 为空，resume 仅有已允许的 401 资源错误；两者上报均为 204。`development.log` 无编译错误。
+- **不是健康 Dev Tools 菜单误匹配，也没有证据支持修改续播/搜索业务代码。** 本地 Next 16.4.0 的 `portal/node_modules/next/dist/compiled/next-devtools/index.js:3037` 对应 source map 中 `src/next-devtools/dev-overlay/components/errors/error-overlay/error-overlay.tsx:52–65,78–90`：build error 单独渲染；runtime errors 与 vulnerability insight 都没有时返回 null；否则 React `Activity` 即使 hidden 仍保留对话框 DOM。
+- `index.js:3866,4098` 分别生成 `data-nextjs-dialog` 和 `data-nextjs-error-overlay-nav`。其 source map 原源码为 `components/dialog/dialog.tsx:84–94` 和 `components/errors/error-overlay-nav/error-overlay-nav.tsx:37–60`（均在上述 `src/next-devtools/dev-overlay/` 下）。普通菜单不生成这对元素；错误布局和 `components/vulnerability-insight/vulnerability-insight.tsx:57–95` 都会生成，后者另含 `data-nextjs-vulnerability-insight` 和安全升级说明。
+- **两个匹配最符合安全升级 Insight 的隐藏导航和对话框，而不是两个错误。** `dist/server/config-shared.js:192` 默认 `agentUpgrade: 'security'`；`dist/server/lib/router-server.js:173–184` 将服务端公告评估 `kind === 'security'` 送入该 Insight；`dist/lib/upgrade/nudge.js:181–226` 根据公告匹配返回 security。harness 的子进程环境白名单没有传入强制测试 Insight 的变量。浏览器外部请求为空不能排除 Next 服务端的公告查询。
+- 已用公开 npm bulk advisory 接口查询版本 `16.4.0 / 16.4.1 / 16.4.3`，返回的三项 Next 公告受影响范围均截止 `16.4.0`：`GHSA-p3m5-59mp-jv5r`、`GHSA-2464-fhr4-w9xw`、`GHSA-673q-mjm6-r5xr`。[Next 官方 2026-10-14 公告](https://nextjs.org/blog/nextjs-security-update-october-14-2026) 指定 `16.4.1` 为修复版本。这证明依赖版本告警有依据，不等于证明本站满足每项漏洞的利用条件。最小修复选择固定 `next@16.4.1`，保留原断言；不设置 CI/关闭 agentUpgrade 来隐藏提示。
+- 旧报告未保存 outerHTML，所以具体 DOM 身份仍需新报告直接确认；下面增加仅失败时的诊断。上述源码行号针对修改前已安装的 **16.4.0**，source map 引用的是 `index.js.map` 的 `sources` / `sourcesContent`，不是仓库自有源码。
+
+### 修改、验证结果与 portal 外部复跑
+
+- `portal/tests/portal-regression.test.cjs`：保留原来的两个属性 `count() === 0` 断言，增加 `data-next-badge[data-error="true"]` / `[data-insights-only="true"]` 为零的断言，覆盖折叠的错误/Insight。依据 `index.js:3421` 的 source map `components/devtools-indicator/next-logo.tsx:80–103,438–442`；不只检测 `:visible`，也不把安全 Insight 排除。失败时 `entry.nextDevTools` 保存对话框、导航、badge、计数、vulnerability 标志的 `textContent` 与 `outerHTML` 片段；诊断异常单独记录，原始断言错误仍然抛出。没有删改业务断言、跳过测试或增加 `.skip/todo`。
+- `docs/followups-20261025-next.patch`：准备了固定 `next@16.4.1` 的清单和锁文件补丁。锁文件通过隔离目录里的 npm `install next@16.4.1 --save-exact --package-lock-only --ignore-scripts --no-audit --no-fund` 生成，使用空 user/global npm 配置；仅 Next、`@next/env`、8 个配套 SWC 包变化，已有 sharp 满足新要求，无其他依赖升级。
+- **落地阻塞**：沙箱对 `portal/package.json` 的普通写入和 `apply_patch` 均报拒绝写入。未尝试改权限、删除重建或提权；已恢复工作区原锁文件，保持清单/锁文件都为 16.4.0。升级候选保存在上述补丁，尚未安装或应用，不能声称两项失败已修复。其余测试诊断修改已直接落地。
+
+本轮可执行检查：
+
+| 检查 | 结果 / 成功标准 |
+| --- | --- |
+| Node 22.23.3 `--check portal/tests/portal-regression.test.cjs` | 退出 0；修改后的 CJS 语法通过 |
+| 在 portal 执行 `node node_modules/typescript/bin/tsc --noEmit --incremental false` | 退出 0；使用当前已安装的 Next 16.4.0，只代表当前树静态检查 |
+| `git apply --check docs/followups-20261025-next.patch` | 退出 0；只检查可应用性，没有写 `.git` 或应用补丁 |
+| `git diff --check`、行尾及命令语法检查 | 退出 0；三个交付文件保持 LF，5 段 PowerShell 经 Parser 解析、2 段内嵌 JavaScript 经 `vm.Script` 解析通过；只验证语法，未执行数据库操作 |
+| 公开 npm bulk advisory 分别查询 next 16.4.0 / 16.4.1 | 前者三项、后者空；这是版本公告查询，不是生产安全验收 |
+| 完整 portal 回归 / Next build / 新版本浏览器检查 | 待沙箱外执行；已知子进程 `spawn EPERM`，本轮不重复启动这些受限程序，也没有通过改代码规避限制 |
+
+**待沙箱外执行**（新开 PowerShell；补丁只修改工作区清单和锁文件，不使用 `--index` / `--cached`，不 commit/push）：
+
+```powershell
+Set-Location 'F:\METU\cms-project'
+git apply --check docs/followups-20261025-next.patch
+if ($LASTEXITCODE -ne 0) { throw '补丁检查失败，停止应用' }
+git apply docs/followups-20261025-next.patch
+if ($LASTEXITCODE -ne 0) { throw '补丁应用失败' }
+
+$reviewNode = 'F:\METU\cms-project\.cache\node22-qa-20261013-212547-f7899a96\node-v22.23.3-win-x64\node.exe'
+$env:Path = (Split-Path $reviewNode) + ';' + $env:Path
+$env:NODE_OPTIONS = ''
+$env:PORTAL_TEST_OUTPUT_DIR = 'F:\METU\portal-test-tmp'
+$env:PORTAL_TEST_BROWSER_EXECUTABLE = Join-Path $env:LOCALAPPDATA 'ms-playwright\chromium_headless_shell-1228\chrome-headless-shell-win64\chrome-headless-shell.exe'
+Set-Location portal
+npm.cmd ci --ignore-scripts --no-audit --no-fund
+if ($LASTEXITCODE -ne 0) { throw 'portal 依赖安装失败' }
+& $reviewNode -p "require('next/package.json').version"
+& $reviewNode node_modules/typescript/bin/tsc --noEmit --incremental false
+if ($LASTEXITCODE -ne 0) { throw 'portal tsc 失败' }
+& $reviewNode --test tests/portal-regression.test.cjs
+if ($LASTEXITCODE -ne 0) { throw 'portal 回归失败，请保留报告和日志' }
+```
+
+成功标准：实际安装输出 `16.4.1`；tsc 退出 0；原 18 个子场景全部通过，尤其两个 development 上报仍为 204，原错误浮层及新增 badge 断言均为零，`cleanupErrors=[]`。测试复制源文件时排除 `.env*`，Next build/dev/start 都在仓库外的隔离副本运行，因此无需读取 `portal/.env.local`。若仍失败，查看新 `result.json` 的 `nextDevTools` 和原 console/http 字段，不能把 Insight 计数改成允许值。旧证据、当前静态检查与升级后的真实复跑必须分别记录。
+
+### 迁移验证准备（待沙箱外执行）
+
+配置核查：`docker-compose.yml:11–62` 为本地 MySQL 8 / Redis 7，另有可选 Adminer（66–77）；下面只启动 mysql、redis。开发凭据来自该公开 compose 和 `backend/.env.example:16–22`，不是读取真实 `.env`。`backend/src/shared/database/data-source.ts:12–20` 注册六项迁移并只使用显式 `process.env`；`database-options.ts:8–18` 使用 `DB_TYPE`、`DATABASE_HOST/PORT/NAME/USER/PASSWORD`，关闭 synchronize/migrationsRun、事务模式为 `none`。迁移入口不加载 Nest 应用、JWT 或 dotenv，因此不用环境文件。
+
+**现有工程没有 `npm run migration:revert`。** `backend/package.json:18–20` 只有 run/baseline/check，`migration-cli.ts:7–8` 也不支持 revert。以下使用 TypeORM `undoLastMigration()`，即 TypeORM `migration:revert` 的底层操作；每次只撤销最后一条，down 成功才删除历史（`node_modules/typeorm/migration/MigrationExecutor.js:294–328`）。不能伪造迁移记录或删表绕过拒绝。
+
+| 迁移 | up / down 与验收 |
+| --- | --- |
+| `1792713600000` | 创建 token_revocations，主键 key、expiresAt 索引，插入永久全局撤销基线；down 明确抛错，避免旧 token 重新放行（迁移文件 11–27 行） |
+| `1792713601000` | 核对父级双列、外键和数据一致性、孤儿、环后删除旧 parentId，保留 parent_id；down 明确拒绝自动恢复双列（11–56 行） |
+| `1792713602000` | 创建 `IDX_comments_public_thread(contentId,status,parentId,createdAt,id)`；down 仅删除此索引，可再 up（8–25 行） |
+
+因此不能要求三项都成功 down/up。下面先在空的隔离库运行到 0000，实测其 down 按设计拒绝；再完成所有 up，回退 2000，实测 1000 拒绝，最后重新 up 2000。不覆盖现有开发库，不删除卷，不连接线上。
+
+```powershell
+# 新开 PowerShell；外部先启动本机 Docker Desktop。
+Set-Location 'F:\METU\cms-project'
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$localDockerEndpoint = docker context inspect desktop-linux --format '{{.Endpoints.docker.Host}}'
+if ($LASTEXITCODE -ne 0 -or $localDockerEndpoint -notlike 'npipe://*') { throw '必须先核实本机 Docker Desktop named-pipe context；不要改用远程 context' }
+# 显式 env-file 防止 Compose 自动读取根目录真实 .env。
+docker --context desktop-linux compose --env-file backend/.env.example -f docker-compose.yml up -d --wait mysql redis
+if ($LASTEXITCODE -ne 0) { throw '本地依赖未就绪' }
+docker --context desktop-linux exec -e MYSQL_PWD=root123 cms-mysql mysql -uroot -e "CREATE DATABASE cms_migration_verify_20261025 CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; GRANT ALL PRIVILEGES ON cms_migration_verify_20261025.* TO 'cms'@'%';"
+if ($LASTEXITCODE -ne 0) { throw '隔离库创建失败；库已存在时请核查，不要覆盖或删除' }
+
+$reviewNode = 'F:\METU\cms-project\.cache\node22-qa-20261013-212547-f7899a96\node-v22.23.3-win-x64\node.exe'
+$env:Path = (Split-Path $reviewNode) + ';' + $env:Path
+$env:NODE_OPTIONS = ''
+$env:NODE_ENV = 'development'
+$env:DB_TYPE = 'mysql'
+$env:DB_SYNC = 'false'
+$env:DATABASE_HOST = '127.0.0.1'
+$env:DATABASE_PORT = '3306'
+$env:DATABASE_NAME = 'cms_migration_verify_20261025'
+$env:DATABASE_USER = 'cms'
+$env:DATABASE_PASSWORD = 'cms123'
+Set-Location backend
+npm.cmd run build
+if ($LASTEXITCODE -ne 0) { throw 'backend build 失败' }
+& $reviewNode -e "const a=require('node:assert/strict');const {DATABASE_MIGRATIONS:m}=require('./dist/shared/database/data-source');a.equal(m.length,6);a.deepEqual(m.slice(-3).map(x=>x.name),['PersistentTokenRevocation1792713600000','CategoryParentColumn1792713601000','PublicCommentThreadIndex1792713602000']);console.log('migration build verified');"
+if ($LASTEXITCODE -ne 0) { throw '构建产物迁移列表不正确' }
+```
+
+本轮发现现有 `backend/dist/shared/database/data-source.js:9–11` 只注册两条旧迁移；上述 build 与六项列表断言不可省略。build 仅编译，不启动 Nest 应用或读取环境文件。
+
+先验证 0000（继续在 backend、使用上面的进程变量）：
+
+```powershell
+@'
+const assert = require('node:assert/strict');
+const { migrationDataSource, DATABASE_MIGRATIONS } = require('./dist/shared/database/data-source');
+(async () => {
+  const ds = migrationDataSource();
+  ds.setOptions({ migrations: DATABASE_MIGRATIONS.slice(0, 4) });
+  await ds.initialize();
+  try {
+    await ds.runMigrations({ transaction: 'none' });
+    const history = () => ds.query('SELECT id, timestamp, name FROM migrations ORDER BY id');
+    const tokens = () => ds.query('SELECT * FROM token_revocations ORDER BY `key`');
+    const before = await history();
+    const beforeTokens = await tokens();
+    assert.equal(before.at(-1).name, 'PersistentTokenRevocation1792713600000');
+    assert.equal(beforeTokens.length, 1);
+    assert.equal(beforeTokens[0].key, 'auth:valid-after:global');
+    assert.equal(beforeTokens[0].expiresAt, null);
+    await assert.rejects(ds.undoLastMigration({ transaction: 'none' }), {
+      message: '撤销状态禁止自动删除或回滚；会重新放行旧 token，请停写并人工制定凭据轮换方案。',
+    });
+    assert.deepEqual(await history(), before);
+    assert.deepEqual(await tokens(), beforeTokens);
+    console.log('0000 up 成功；down 按设计拒绝，历史和撤销状态不变。');
+  } finally { await ds.destroy(); }
+})().catch(error => { console.error(error); process.exitCode = 1; });
+'@ | & $reviewNode -
+if ($LASTEXITCODE -ne 0) { throw '0000 验证失败' }
+npm.cmd run migration:run
+if ($LASTEXITCODE -ne 0) { throw '剩余迁移 up 失败' }
+npm.cmd run migration:check
+if ($LASTEXITCODE -ne 0) { throw '迁移历史检查失败' }
+```
+
+再逐项 down / up（1000 拒绝后最后一条仍是 1000，再调用 revert 也不会退到 0000）：
+
+```powershell
+@'
+const assert = require('node:assert/strict');
+const { migrationDataSource } = require('./dist/shared/database/data-source');
+(async () => {
+  const ds = migrationDataSource();
+  await ds.initialize();
+  try {
+    const history = () => ds.query('SELECT id, timestamp, name FROM migrations ORDER BY id');
+    const index = () => ds.query("SHOW INDEX FROM comments WHERE Key_name = 'IDX_comments_public_thread'");
+    assert.equal((await history()).at(-1).name, 'PublicCommentThreadIndex1792713602000');
+    assert.deepEqual((await index()).sort((a, b) => a.Seq_in_index - b.Seq_in_index).map(row => row.Column_name),
+      ['contentId', 'status', 'parentId', 'createdAt', 'id']);
+    await ds.undoLastMigration({ transaction: 'none' });
+    assert.equal((await index()).length, 0);
+    const before = await history();
+    assert.equal(before.at(-1).name, 'CategoryParentColumn1792713601000');
+    const columns = () => ds.query('SHOW COLUMNS FROM categories');
+    const beforeColumns = await columns();
+    assert.ok(beforeColumns.some(column => column.Field === 'parent_id'));
+    assert.ok(!beforeColumns.some(column => column.Field === 'parentId'));
+    await assert.rejects(ds.undoLastMigration({ transaction: 'none' }), {
+      message: '分类父级迁移不自动回滚双列；请停写并人工制定结构与应用版本的恢复方案。',
+    });
+    assert.deepEqual(await history(), before);
+    assert.deepEqual(await columns(), beforeColumns);
+    console.log('2000 down 成功；1000 down 按设计拒绝，历史和分类列不变。');
+  } finally { await ds.destroy(); }
+})().catch(error => { console.error(error); process.exitCode = 1; });
+'@ | & $reviewNode -
+if ($LASTEXITCODE -ne 0) { throw '2000/1000 回滚验证失败' }
+npm.cmd run migration:run
+if ($LASTEXITCODE -ne 0) { throw '2000 重新 up 失败' }
+npm.cmd run migration:check
+if ($LASTEXITCODE -ne 0) { throw '迁移历史检查失败' }
+npm.cmd run migration:run
+if ($LASTEXITCODE -ne 0) { throw '重复 migration:run 失败' }
+docker --context desktop-linux exec -e MYSQL_PWD=cms123 cms-mysql mysql -ucms cms_migration_verify_20261025 -e "SELECT id,timestamp,name FROM migrations ORDER BY id; SHOW CREATE TABLE token_revocations; SELECT * FROM token_revocations; SHOW CREATE TABLE categories; SHOW INDEX FROM comments WHERE Key_name='IDX_comments_public_thread';"
+if ($LASTEXITCODE -ne 0) { throw '迁移结构检查失败' }
+```
+
+通过标准：所有命令退出 0（两个预期拒绝由 `assert.rejects` 验证）；六条历史完整、末三项顺序为 0000/1000/2000；撤销基线为毫秒时间戳且 expiresAt 为 NULL；categories 只有 parent_id 父列并保留原自引用外键；索引五列顺序正确、down 后消失、重新 up 后恢复；最后一次 run 输出“无待执行迁移”。本方案覆盖空库及回滚保护，不代表已有业务数据迁移验收。
+
+### 公开评论分页 EXPLAIN（待沙箱外执行）
+
+SQL 取自 `backend/src/modules/comment/comment.service.ts:193–220`，默认 limit=20（30–32 行），先核查内容已发布（201–203、347–351 行）。以下为评论查询的等价 SQL，page=1；第 2 页将 OFFSET 改为 20。根查询必须保留 LEFT JOIN + `parent.id IS NULL`，不能改成 `comment.parentId IS NULL`，否则会漏掉应作为根显示的已审核孤儿/隐藏父级子评论。join 下的去重计数来自 TypeORM `SelectQueryBuilder.js:1671–1699,1738`。
+
+在上述**隔离测试库**准备有代表性的合成内容、父评论和回复，把示例 UUID 替换为实际存在的已发布内容及已审核父评论 ID。通过本机容器客户端进入测试库执行下面 SQL：
+
+```powershell
+docker --context desktop-linux exec -it -e MYSQL_PWD=cms123 cms-mysql mysql -ucms cms_migration_verify_20261025
+```
+
+```sql
+ANALYZE TABLE comments;
+
+-- 根评论。
+EXPLAIN
+SELECT `comment`.id, `comment`.contentId, `comment`.userId, `comment`.guestName,
+       `comment`.body, `comment`.status, `comment`.parentId, `comment`.createdAt
+FROM comments AS `comment`
+LEFT JOIN comments AS `parent`
+  ON `parent`.id = `comment`.parentId AND `parent`.contentId = `comment`.contentId
+ AND `parent`.status = 'approved'
+WHERE `comment`.contentId = '11111111-1111-4111-8111-111111111111'
+  AND `comment`.status = 'approved' AND `parent`.id IS NULL
+ORDER BY `comment`.createdAt ASC, `comment`.id ASC
+LIMIT 20 OFFSET 0;
+
+-- 直接回复。
+EXPLAIN
+SELECT `comment`.id, `comment`.contentId, `comment`.userId, `comment`.guestName,
+       `comment`.body, `comment`.status, `comment`.parentId, `comment`.createdAt
+FROM comments AS `comment`
+INNER JOIN comments AS `parent`
+  ON `parent`.id = `comment`.parentId AND `parent`.contentId = `comment`.contentId
+ AND `parent`.status = 'approved'
+WHERE `comment`.contentId = '11111111-1111-4111-8111-111111111111'
+  AND `comment`.status = 'approved'
+  AND `comment`.parentId = '22222222-2222-4222-8222-222222222222'
+ORDER BY `comment`.createdAt ASC, `comment`.id ASC
+LIMIT 20 OFFSET 0;
+
+-- 根评论计数。
+EXPLAIN
+SELECT COUNT(DISTINCT `comment`.id) AS cnt
+FROM comments AS `comment`
+LEFT JOIN comments AS `parent`
+  ON `parent`.id = `comment`.parentId AND `parent`.contentId = `comment`.contentId
+ AND `parent`.status = 'approved'
+WHERE `comment`.contentId = '11111111-1111-4111-8111-111111111111'
+  AND `comment`.status = 'approved' AND `parent`.id IS NULL;
+
+-- 回复计数。
+EXPLAIN
+SELECT COUNT(DISTINCT `comment`.id) AS cnt
+FROM comments AS `comment`
+INNER JOIN comments AS `parent`
+  ON `parent`.id = `comment`.parentId AND `parent`.contentId = `comment`.contentId
+ AND `parent`.status = 'approved'
+WHERE `comment`.contentId = '11111111-1111-4111-8111-111111111111'
+  AND `comment`.status = 'approved'
+  AND `comment`.parentId = '22222222-2222-4222-8222-222222222222';
+```
+
+执行计划验收：保存四条原样 EXPLAIN，检查 comment 的实际 `key` 是否为 `IDX_comments_public_thread`，不能只看 possible_keys；parent 通常使用主键。回复固定索引前三列，后两列支持排序；根查询只固定前两列，可能仍有 `Using filesort`，不能要求其消失。空表、不存在的父级导致 `Impossible WHERE` 或小表扫描都不能当作索引使用通过；不使用 FORCE INDEX。若代表性数据下未选新索引，保留计划、行数和统计信息继续分析。
+
+本轮只完成源码核查及命令准备，未执行上述 Docker、迁移、数据库 SQL、Next build 或浏览器流程；未部署、连接线上、读真实环境文件或密钥，也未 commit/push。
+
+### 真实 MySQL 迁移验证发现
+
+根因已核实：外部在全新 MySQL 8.0 上复现的 `varchar(255)` / `length: ''` 与本地 TypeORM 0.3.31 源码一致。`MysqlDriver.js:209` 定义 varchar 默认长度 255，`MysqlQueryRunner.js:1718–1721` 读取默认长度时将其归一化为空字符串；MySQL/MariaDB 共用此驱动。原有 1000/2000 迁移直接比较 `'255'`，因此误拒绝符合冻结基线的结构；原 spec 仅模拟显式 `'255'`，未覆盖驱动表示。
+
+修改与逐项成功标准：
+
+- `1792713601000-CategoryParentColumn`：仅在 varchar 长度比较中把精确的 `''` 视为 `'255'`。成功标准是旧 `parentId` 的默认长度表示能继续数据检查并执行原 DROP COLUMN；`'100'`、`'36'`、错误类型仍在任何数据查询或 DDL 前拒绝；`parent_id(36)` 不接受空长度。外键、可空性、父关系校验及拒绝自动 down 均不变。
+- `1792713602000-PublicCommentThreadIndex`：采用相同的局部长度归一化，不新增辅助文件。成功标准是 `contentId` / `parentId` 分别或同时报告空长度时创建原五列索引；`'100'`、`'36'`、错误类型仍拒绝，`status(20)` / `id(36)` 不接受空长度。时间精度、重复索引守卫、DDL 及 down 行为不变。
+- 两个现有迁移 spec 沿用 Table / QueryRunner 夹具，补充上述成功与拒绝场景。先加用例、未改迁移时：4 个空长度用例失败、48 个通过；修复后连同 persistent-token-revocation、migration-management 两个 spec，共 4 套、89 个测试通过。成功标准包含非法结构不产生查询或 DDL，不能只验证正常路径。
+- 已排查 `1792713600000-PersistentTokenRevocation`、`schema-baseline.ts`、`migration-state.ts` 及其余迁移校验：未发现其他同类列长度比较。0000 只检查表是否存在并执行固定 DDL；baseline 比较 `SHOW CREATE TABLE` 与冻结 SQL；migration-state 检查迁移历史。这些文件无需修改。
+
+本轮沙箱内实际验证（在 `backend/` 执行）：
+
+```powershell
+node node_modules/jest/bin/jest.js --runInBand --runTestsByPath src/shared/database/category-parent-column-migration.spec.ts src/shared/database/public-comment-thread-index-migration.spec.ts src/shared/database/persistent-token-revocation-migration.spec.ts src/shared/database/migration-management.spec.ts
+node node_modules/typescript/bin/tsc --noEmit --incremental false -p tsconfig.json
+```
+
+两条命令均退出 0，本轮未遇到 `spawn EPERM`，未跳过测试或放宽检查。以上为模拟元数据的单元测试及类型检查，不代表真实数据库验收。
+
+外部成功标准（待沙箱外复跑）：上述相关 Jest spec 通过；重新构建后，在全新本地 MySQL 8.0 空库按 `DATABASE_MIGRATIONS` 顺序执行六条迁移全部成功；`1792713602000` down 后索引消失、up 后原五列索引恢复；使用上节代表性数据与原样查询，EXPLAIN 的实际 `key` 使用 `IDX_comments_public_thread`，不能以 `possible_keys`、空表结果或 FORCE INDEX 替代。本轮未连接 MySQL/MariaDB，六条迁移、真实 down/up 和 EXPLAIN 尚未验证；未运行迁移 CLI、部署、连接线上、读取真实环境文件或密钥，也未 commit/push。
+
+### 沙箱外落地与复跑结果（2026-10-25）
+
+在 Codex 沙箱外、本机 Windows 11 上执行，Node v22.23.3。
+
+**portal**：`git apply` 应用了上文的 `docs/followups-20261025-next.patch`（应用后补丁文件已删除，不提交），然后 `npm ci --ignore-scripts`，确认装上的是 `next@16.4.1`。回归 18 项全部通过，原来失败的两个 development 场景也通过了：原浮层断言、新增的 badge 断言都为 0，上报都是 204。portal tsc 通过。只升级 Next、不改业务代码就修好了，说明 16.4.0 下那 2 个匹配元素来自 Next dev tools 针对 16.4.0 安全公告给出的升级 Insight，不是产品缺陷。这次升级本身也修复了 [2026-10-14 官方公告](https://nextjs.org/blog/nextjs-security-update-october-14-2026) 中的 3 个漏洞。上文“落地阻塞”的说法到这里作废。
+
+**真实 MySQL 迁移验证**：为了不覆盖已有的 `cms_mysql_data` 开发卷，没有使用 compose，而是另起一个临时容器 `mysql:8.0`。参数与 `docker-compose.yml` 相同（utf8mb4、STRICT_TRANS_TABLES 等），不挂卷，映射到 127.0.0.1:33306，用完已删除。凭据是 compose 里的公开开发值，没有读取任何 `.env`。
+
+- 修复前：0000 能成功，到 1000 时被前置结构检查拒绝（原因见下一节），2000 根本没跑到。
+- 修复后，在全新的空库上依次验证：
+  - 先只迁到 0000：`token_revocations` 写入全局撤销基线（`expiresAt` 为 NULL）。对 0000 执行 down，按设计被拒绝。
+  - 再执行剩余迁移：1000 和 2000 都成功，6 条迁移记录完整，`categories` 只剩 `parent_id`。`IDX_comments_public_thread` 的列顺序是 `(contentId,status,parentId,createdAt,id)`。
+  - 对 2000 执行 down，索引消失；接着对 1000 执行 down，按设计被拒绝，迁移记录不变；再 up 2000，索引恢复。再跑一次迁移，结果是 0 条待执行。
+- EXPLAIN：先写入 2 万条合成评论（50 篇内容，每篇约 1/3 是回复，1/5 是 pending），执行 `ANALYZE TABLE`，再对第 2 页（`LIMIT 20 OFFSET 20`）做 EXPLAIN，comment 表实际使用的 key 都是 `IDX_comments_public_thread`：
+  - 根评论分页：`ref=const,const`、rows≈400、`Using filesort`（只固定了前两列，符合上文预期）。parent 走 PRIMARY，`Not exists`。
+  - 直接回复分页：`ref=const,const,const`、rows=1、`Using index condition`，不需要 filesort。
+  - 根评论计数和回复计数：都是 `Using index`，即覆盖索引。
+
+| 套件 | 修改前（cc31bd2） | 修改后 |
+| --- | --- | --- |
+| backend Jest | 3557 / 3560 | 3572 / 3575（新增 15 项迁移用例，仍是 `backup-scripts.spec.ts` 的 3 项 Windows 环境失败：`sha256sum` 输出格式、没有 `flock`） |
+| backend tsc | 通过 | 通过 |
+| frontend Vitest | 489 / 489 | 489 / 489 |
+| frontend tsc | 通过 | 通过 |
+| portal 回归 | 16 / 18 | 18 / 18 |
+| portal tsc | 通过 | 通过 |
+
+没有部署，没有连接线上环境或真实数据库，没有 push。
