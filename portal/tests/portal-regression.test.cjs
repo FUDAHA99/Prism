@@ -160,8 +160,10 @@ async function scenario(name, origin, body, allowedHttp = () => false, contextOp
     assert(entry.url.startsWith(origin))
     assert(entry.title.length > 0)
     assert((await page.locator('main').innerText()).trim().length > 0)
-    // Next's healthy development indicator shares this host with the error overlay.
+    // Next 16.4 keeps closed errors/security insights in hidden Activity DOM; count them too.
+    // compiled/next-devtools/index.js.map: error-overlay.tsx:63-90, next-logo.tsx:438-442.
     assert.equal(await page.locator('nextjs-portal [data-nextjs-dialog], nextjs-portal [data-nextjs-error-overlay-nav]').count(), 0)
+    assert.equal(await page.locator('nextjs-portal [data-next-badge][data-error="true"], nextjs-portal [data-next-badge][data-insights-only="true"]').count(), 0)
     assert.deepEqual(entry.pageErrors, [])
     assert.deepEqual(entry.externalRequests, [])
     assert.deepEqual(entry.httpErrors.filter(item => !allowedHttp(item)), [])
@@ -175,6 +177,10 @@ async function scenario(name, origin, body, allowedHttp = () => false, contextOp
     entry.passed = true
   } catch (error) {
     entry.failure = error.stack
+    entry.nextDevTools = await page.locator('nextjs-portal [data-nextjs-dialog], nextjs-portal [data-nextjs-error-overlay-nav], nextjs-portal [data-next-badge], nextjs-portal [data-issues-count], nextjs-portal [data-nextjs-vulnerability-insight]').evaluateAll(elements => elements.map(element => ({
+      text: element.textContent?.slice(0, 2000),
+      outerHTML: element.outerHTML.slice(0, 6000),
+    }))).catch(error => ({ diagnosticError: String(error) }))
     await screenshot('failure').catch(() => {})
     throw error
   } finally {
