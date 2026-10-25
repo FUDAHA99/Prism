@@ -579,3 +579,119 @@ node node_modules/typescript/bin/tsc --noEmit --incremental false -p tsconfig.js
 | portal tsc | 通过 | 通过 |
 
 没有部署，没有连接线上环境或真实数据库，没有 push。
+
+## 依赖安全检查（2026-10-25）
+
+本轮从 `codex/followups-20261025` / `dbf2840` 的干净工作区开始。使用仓库指定的 Node **v22.23.3**、随附 npm **10.9.9**，所有 npm 请求显式指向 `https://registry.npmjs.org`。未 commit/push、未写 `.git`、未部署或连接线上服务器/DNS/生产数据库，也未读取真实 `.env*` 或密钥文件。以下 audit 数量是 npm 的依赖节点计数，包含传递告警，不等于独立漏洞数量。
+
+### React 公告判定与证据
+
+已核对 [GHSA-xqc2-xf4c-x3h3（Critical）](https://github.com/facebook/react/security/advisories/GHSA-xqc2-xf4c-x3h3) 和 [GHSA-h3gv-c5rc-p453（High）](https://github.com/facebook/react/security/advisories/GHSA-h3gv-c5rc-p453)。两者列出的包仅为 `react-server-dom-webpack`、`react-server-dom-parcel`、`react-server-dom-turbopack`，不包含 `react` / `react-dom` 本身。受影响稳定版本为 19.0.0–19.0.8、19.1.0–19.1.9、19.2.0–19.2.8、19.3.0；修复稳定版本为 19.0.9 / 19.1.10 / 19.2.9 / 19.3.1。
+
+- **三个应用的锁文件**：用 Node 解析各自 `package-lock.json` 的全部 `packages` 路径，三个受影响包均无独立安装条目。
+- **backend**：NestJS API，不使用 React/RSC，不受这两项 React 公告影响。
+- **frontend**：锁定 `react/react-dom@18.3.1`，`src/main.tsx` 使用 createRoot / BrowserRouter，`vite.config.ts` 使用普通 React 插件；浏览器 SPA 不使用 RSC，不受这两项公告影响。
+- **portal**：使用 Next App Router/RSC，不能仅凭锁文件没有独立包就排除。实读 `node_modules/next/dist/compiled/react-server-dom-webpack/package.json:55-56`、`react-server-dom-turbopack/package.json:51-52`，内置 peer 标识均为 **`19.3.0-canary-278794d7-20261002`**；`next/dist/compiled/react/cjs/react.production.js:565` 的 `exports.version` 相同。webpack/turbopack 客户端文件也含同一版本字符串；experimental 变体使用同一提交标识，没有 parcel 目录。**它不是 19.3.1 系列，不能仅凭 canary 字符串证明是否修复。**
+- **portal 修复状态的依据**：本地 Next package 与锁文件均为 **16.4.1**；[Next 16.4.1 发布说明](https://github.com/vercel/next.js/releases/tag/v16.4.1)、对应 [RCE 公告 GHSA-673q-mjm6-r5xr](https://github.com/vercel/next.js/security/advisories/GHSA-673q-mjm6-r5xr) 和 [DoS 公告 GHSA-p3m5-59mp-jv5r](https://github.com/vercel/next.js/security/advisories/GHSA-p3m5-59mp-jv5r) 均将 16.4.1 列为修复版。因此按官方包版本判定已包含对应修复；本轮没有做 RSC 攻击复现，也没有把旧 canary 标识误写为 19.3.1。
+- **版本兼容性**：Next 的 `react` / `react-dom` peer 均为 `^18.2.0 || 19.0.0-rc-de68d2f4-20241204 || ^19.0.0`，当前两者 19.3.0 均经 semver 检查满足。`@types/react-dom@19.3.0` 要求 `@types/react:^19.3.0`，当前也满足。公共 registry 确认 `react/react-dom@19.3.1` 存在，但两个 `@types/*@19.3.1` 均返回 E404。由于“Next 内置为 19.3.1 系列”的升级条件不成立，本轮保留 portal 的 React / React DOM / 两个类型包 19.3.0，不修改 portal 文件。
+
+### Audit 前后结果
+
+before 来自用户提供的 `F:\METU\codex-security-audit-before-{backend,frontend,portal}.json`；after 是本轮在各应用目录实际执行 `npm audit --json --registry=https://registry.npmjs.org` 的完整结果。三次 after 请求均成功取得报告；frontend/portal 退出码 1 表示仍有漏洞，不是网络失败。
+
+| 应用 | before：critical / high / moderate | after：critical / high / moderate | 结论 |
+| --- | --- | --- | --- |
+| backend | 0 / 10 / 1 | **0 / 0 / 0** | 本次报告项目全部清除 |
+| frontend | 0 / 7 / 4 | **0 / 6 / 4** | follow-redirects 已清除；其余受写入限制或兼容范围约束 |
+| portal | 0 / 0 / 2 | **0 / 0 / 2** | 构建工具的 moderate 保留 |
+
+### 已落地升级、可达性与成功标准
+
+| 应用 / 包 | 旧 → 新 | 原因、路径及逐项成功标准 |
+| --- | --- | --- |
+| backend `multer` | 2.4.0 → **2.5.0** | [GHSA-q7qp-rjg7-q26m](https://github.com/advisories/GHSA-q7qp-rjg7-q26m)。`media.controller.ts:60-62` 的 staff 上传接口经 FileInterceptor 使用它；`media.module.ts:18-35` 没有异步 fileFilter，未发现本次公告的必要触发条件。仍做同主版本小升级；成功标准为直接依赖及 Nest 实际解析均到 2.5.0，上传/拒绝/清理回归保持通过。已满足。 |
+| backend `body-parser` | 2.3.0 → **2.4.0** | [GHSA-27r3-jxmh-p828](https://github.com/advisories/GHSA-27r3-jxmh-p828)。`src/main.ts:17` 默认启用 Nest/Express 解析器，压缩请求体在路由鉴权前可达；Express 的 `^2.2.1` 允许更新。成功标准为 Express 实际解析到 2.4.0、audit 清除该 high、请求相关回归通过。已满足；未做恶意压缩体专项复现。 |
+| backend `js-yaml` | 4.1.0 → **4.3.2** | [GHSA-2883-xcg3-v3hh](https://github.com/advisories/GHSA-2883-xcg3-v3hh)。受影响节点是 ESLint/cosmiconfig 开发配置解析链，锁标记 dev；既有 Swagger override 的 5.4.2 不动。成功标准为 4.x 节点不低于 4.3.2、audit 清除、普通 YAML 配置解析通过。已满足。 |
+| backend `minimatch`（typescript-estree 子依赖） | 9.0.3 → **9.0.9** | 修复 [ReDoS](https://github.com/advisories/GHSA-23c5-xmqv-rm74) 及相关公告。`typescript-estree@6.21.0` 精确依赖 9.0.3，先尝试 npm update 后仍不能更新，因此仅为该父包添加 override。输入来自开发工具的项目 glob，未发现公网业务输入路径。成功标准为该父包解析到 9.0.9、minimatch 及 5 项 typescript-eslint 元告警消失、parser/glob 基本行为保持。已满足，无需 6→8。 |
+| backend `fast-uri` | 3.1.8 → **3.1.9** | AJV / webpack / Nest CLI 的开发工具链 moderate；现有范围允许补丁更新。成功标准为锁定 3.1.9 且 audit 清除。已满足。 |
+| frontend `follow-redirects` | 1.16.0 → **1.16.1** | 修复 [数组头凭据剥离](https://github.com/advisories/GHSA-q3jh-wrc6-jgq8) 和 [sensitiveHeaders 转义](https://github.com/advisories/GHSA-8r9p-f939-6h3c) 问题。Axios 的运行时依赖存在，但当前 Vite 浏览器构建将 Node HTTP adapter 映射为 null；未发现生产浏览器路径调用该包。成功标准为 Axios 实际解析到 1.16.1、对应 high 消失、原 API 回归通过。前两项满足；回归因 spawn EPERM 待外部执行。 |
+
+`@nestjs/platform-express` 保持 11.2.7：before 的 high 仅由 `via:["multer"]` 传播。查询到最新同主版本 11.2.8 仍固定依赖 multer 2.4.0，因此单升 Nest 无用，也不接受 audit 建议降级至 11.1.1。既有 `overrides.multer="$multer"` 已把 Nest 使用的版本一并更新。
+
+实际执行的变更命令（均带 `--ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org` 和下述工作区 cache）：backend `npm install multer@2.5.0 --save-exact`、`npm update body-parser js-yaml fast-uri minimatch`；加入定向 override 后再 `npm update minimatch`。frontend 单独执行 `npm update follow-redirects` 成功。锁文件全部由 npm 生成，未手改。
+
+锁文件附带差异：backend 原有 glob 的 minimatch **10.2.6** 及其 brace-expansion/balanced-match 只是 npm 重新提升/移动节点，glob 解析版本未变，不是将 typescript-estree 升到 10.x；它实际解析 9.0.9，TypeORM 原有 9.0.9 也不变。frontend 的 14 处可选平台包 `libc` 元数据由 npm 10.9.9 重写时移除（其 Arborist shrinkwrap 元数据列表包含 os/cpu、没有 libc）；这些包的版本、integrity、os/cpu、optional 未变。本轮未验证 Linux/Alpine 安装或构建。
+
+### 保留项与环境阻塞
+
+- **frontend 6 项 high**：minimatch 9.0.3，加上 `@typescript-eslint/eslint-plugin`、`parser`、`type-utils`、`typescript-estree`、`utils` 五个传递告警，均属开发工具链。6.x 最新仍是 6.21.0且精确依赖 9.0.3；backend 已验证定向 override 方案，但应用同样修改到 **`frontend/package.json` 时写入被沙箱拒绝**，按本次要求停止该文件写入，留外部命令。这里不需要跨大版本，也不能声称已修复。
+- **frontend 2 项 moderate（Vitest / mocker）**：4.1.11 → 4.1.12 是兼容补丁，公共 registry 已确认 4.1.12 及其 peer。本轮组合 `npm update follow-redirects minimatch vitest` 在 npm Arborist 构建依赖树时失败：`Cannot read properties of null (reading 'edgesOut')`；未落地 Vitest 更新。由于 frontend package 写入另已拒绝，将显式安装命令留外部；不使用 force/legacy-peer-deps 绕过依赖校验。相关 [mocker 公告](https://github.com/advisories/GHSA-qxg6-89mg-rqv8) 和 [Windows 路径公告](https://github.com/advisories/GHSA-xp26-3454-mjgp) 属开发测试服务面。
+- **frontend 2 项 moderate（react-router / react-router-dom）**：当前 6.30.6 已是 registry 最新 6.x；公告要求至少 7.18.0，涉及大版本迁移，保留。现有 BrowserRouter 不走 SSR hydration，但 Link/useNavigate 在浏览器运行，不能把两项都当成不可达。分别见 [重定向公告](https://github.com/advisories/GHSA-wrjc-x8rr-h8h6)、[SSR 公告](https://github.com/advisories/GHSA-337j-9hxr-rhxg)。
+- **portal 2 项 moderate**：`postcss-selector-parser` 及其父包 `@tailwindcss/typography`，用于本地样式构建；`tailwind.config.ts:5-6,20` 扫描仓库内容并加载插件。当前解析器 6.0.10/6.1.2；6.1.3 只能修其中 low，moderate [GHSA-rj75-hqrm-r3gf](https://github.com/advisories/GHSA-rj75-hqrm-r3gf) 要求 7.1.6。最新 typography 0.5.20 仍固定 6.0.10，Tailwind 3 仍要求 6.x；不做跨大版本 override 或无关降级。
+- npm 默认用户 cache 首次访问被拒绝；随后所有 npm 使用 `F:\METU\cms-project\.cache\npm-security-20261025`，公开 registry 访问、backend 写入及 frontend 锁文件写入正常。没有为沙箱限制修改业务代码或测试。
+
+### 本轮验证与边界
+
+- **通过**：backend / frontend 分别执行 `node node_modules/typescript/bin/tsc --noEmit --incremental false -p tsconfig.json`，均退出 0。
+- **通过**：backend 的 `node node_modules/jest/bin/jest.js --runInBand --runTestsByPath src/modules/media/media-storage.http.spec.ts src/modules/media/media.http.spec.ts src/common/pipes/global-validation.spec.ts`，**3 套、44 项通过**。使用现有 loopback HTTP、内存 SQLite 和临时上传目录，不读取真实 env、不连接生产数据库。日志中的 EEXIST/ENOSPC/保存失败等是用例注入的拒绝路径，套件退出 0。
+- **通过**：backend `npm ls multer body-parser js-yaml minimatch fast-uri @typescript-eslint/typescript-estree --all` 退出 0；通过父包 `createRequire` 核实真实解析路径。另执行 ESLint parser 的 TypeScript 声明解析、定向 minimatch 的匹配/不匹配和普通 YAML 配置加载检查，断言均通过。
+- **阻塞**：frontend 使用 Vitest API，明确 `configFile:false, envFile:false` 后尝试 `src/api/client.test.ts`、`src/api/auth.test.ts`；worker 启动报 **spawn EPERM**，退出 1、没有执行测试。未改 worker 配置、未跳过断言，不计为通过。
+- **通过**：三份锁文件 RSC 枚举、portal peer semver 校验、三次 after audit、`git diff --check`。未改 portal，因此本轮未重复 Next/浏览器回归，未在原目录运行可能加载真实 `.env.local` 的 Next build。
+- 版本与 audit 检查证明依赖树已离开相应公告范围；44 项既有测试验证受影响上传/请求行为。它们不等于对所有安全公告的攻击复现，也不是生产或真实 MySQL 验收。frontend 的修复与回归仍为 **blocked**，不能将整体工作标成全部 fixed。
+
+### 需沙箱外执行的命令
+
+**backend**：本轮升级与上述检查已完成，无待补的 npm 升级命令。**portal**：无待补的升级命令，保持 Next / React / 类型包版本与上述保留结论。**frontend**：下面是待落地命令，保留现有版本范围风格；不提交、不推送、不部署。遇到失败应停止并查看原始错误，不加 force，不删除/手改锁文件。
+
+```powershell
+$qaNode = 'F:\METU\cms-project\.cache\node22-qa-20261013-212547-f7899a96\node-v22.23.3-win-x64'
+$env:PATH = "$qaNode;$env:PATH"
+$npmArgs = @('--registry=https://registry.npmjs.org', '--cache=F:\METU\cms-project\.cache\npm-security-20261025')
+Set-Location 'F:\METU\cms-project\frontend'
+
+& "$qaNode\npm.cmd" pkg set 'overrides.@typescript-eslint/typescript-estree.minimatch=9.0.9' @npmArgs
+if ($LASTEXITCODE -ne 0) { throw '设置定向 override 失败' }
+& "$qaNode\npm.cmd" update minimatch --ignore-scripts --no-audit --no-fund @npmArgs
+if ($LASTEXITCODE -ne 0) { throw '更新 minimatch 失败' }
+& "$qaNode\npm.cmd" install 'vitest@^4.1.12' --save-dev --ignore-scripts --no-audit --no-fund @npmArgs
+if ($LASTEXITCODE -ne 0) { throw '更新 Vitest 失败' }
+
+& "$qaNode\npm.cmd" ls minimatch @typescript-eslint/typescript-estree vitest @vitest/mocker follow-redirects --all @npmArgs
+if ($LASTEXITCODE -ne 0) { throw '依赖树检查失败' }
+& "$qaNode\node.exe" node_modules/typescript/bin/tsc --noEmit --incremental false -p tsconfig.json
+if ($LASTEXITCODE -ne 0) { throw '类型检查失败' }
+
+# 完整 Vitest；保留仓库 Vite 配置，但禁止加载任何 .env 文件。
+@'
+import { startVitest } from 'vitest/node';
+const ctx = await startVitest('test', [], {run:true, watch:false, api:false}, {envFile:false});
+if (!ctx) process.exitCode = 1;
+else await ctx.close();
+'@ | & "$qaNode\node.exe" --input-type=module -
+if ($LASTEXITCODE -ne 0) { throw 'Vitest 回归失败' }
+
+& "$qaNode\npm.cmd" audit --json @npmArgs
+```
+
+外部成功标准：typescript-estree 仍是 6.x、实际子依赖 minimatch 为 9.0.9；Vitest/mocker 至少 4.1.12、follow-redirects 为 1.16.1；完整回归与类型检查通过且不放宽断言；更新后的 audit **预期** critical 0 / high 0 / moderate 2（仅 React Router 两个节点，须以外部新报告为准，不能当成本轮 after）。审阅 diff 只应有指定 override、Vitest 所需依赖行及 npm 生成的锁文件变化。
+
+### 沙箱外落地与复跑结果（2026-10-25）
+
+**frontend 补做**：沙箱里用 npm 10.9.9 生成的 frontend 锁文件把 14 个可选平台包的 `libc` 元数据删掉了。原锁文件由更新的 npm 写成，Linux 上靠这个字段区分 glibc 和 musl。为了不引入这类与本次无关的变化，我把锁文件恢复到 HEAD 的版本，改用 npm 11.21.1（只临时装在仓库外，运行时仍是 Node 22.23.3）重新执行：`npm update follow-redirects`；`npm pkg set overrides.@typescript-eslint/typescript-estree.minimatch=9.0.9`；`npm update minimatch`；`npm install vitest@^4.1.12 --save-dev`。全部带 `--ignore-scripts`，registry 为 npmjs.org。执行后 14 处 `libc` 都保留着；follow-redirects 是 1.16.1，typescript-estree 6.21.0 下的 minimatch 是 9.0.9（overridden），vitest 和 @vitest/mocker 都是 4.1.12。上文 frontend 的“阻塞”和预期数字到这里作废，以下面的实测为准。
+
+| 应用 | audit before：critical / high / moderate | 沙箱外 after |
+| --- | --- | --- |
+| backend | 0 / 10 / 1 | **0 / 0 / 0** |
+| frontend | 0 / 7 / 4 | **0 / 0 / 2**（只剩 react-router / react-router-dom，修复需要升到 7.x 大版本） |
+| portal | 0 / 0 / 2 | **0 / 0 / 2**（@tailwindcss/typography / postcss-selector-parser，修复需要 postcss-selector-parser 7.x，而 Tailwind 3 要求 6.x） |
+
+| 检查 | 结果 |
+| --- | --- |
+| backend Jest 全量 | 3572 / 3575，失败的仍是 `backup-scripts.spec.ts` 那 3 项已知的 Windows 环境问题 |
+| backend tsc / `nest build` | 通过 / 通过 |
+| frontend Vitest 全量 | 26 个文件，489 / 489 |
+| frontend tsc / `vite build` | 通过 / 通过（输出放在仓库外的临时目录，用完已删除） |
+| portal 回归（含隔离副本中的 Next 生产构建） | 18 / 18 |
+| portal tsc | 通过 |
+
+React 判定不变：三端都没有单独安装 react-server-dom-*；frontend 用的是 React 18 SPA，不受影响；portal 走 Next 16.4.1 内置的 RSC，这个版本官方已列为修复版。portal 的 react / react-dom 保持 19.3.0。
