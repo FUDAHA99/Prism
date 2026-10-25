@@ -24,6 +24,41 @@ describe('PublicCommentThreadIndex migration', () => {
   });
 
   it.each([
+    ['', '255'],
+    ['255', ''],
+    ['', ''],
+  ])('接受 TypeORM 的默认 varchar(255) 长度表示：contentId=%p、parentId=%p', async (contentLength, parentLength) => {
+    const table = schema();
+    table.findColumnByName('contentId')!.length = contentLength;
+    table.findColumnByName('parentId')!.length = parentLength;
+    const r = runner(table);
+    await new PublicCommentThreadIndex1792713602000().up(r as unknown as QueryRunner);
+    expect(r.getTable).toHaveBeenCalledWith('comments');
+    expect(r.query.mock.calls).toEqual([['CREATE INDEX `IDX_comments_public_thread` ON `comments` (`contentId`, `status`, `parentId`, `createdAt`, `id`)']]);
+  });
+
+  it.each([
+    ['contentId', '100'], ['contentId', '36'],
+    ['parentId', '100'], ['parentId', '36'],
+    ['status', ''], ['id', ''],
+  ])('%s 长度为 %p 不符合预期时拒绝且不执行 DDL', async (name, length) => {
+    const table = schema();
+    table.findColumnByName(name)!.length = length;
+    const r = runner(table);
+    await expect(new PublicCommentThreadIndex1792713602000().up(r as unknown as QueryRunner)).rejects.toThrow('结构不符合预期');
+    expect(r.query).not.toHaveBeenCalled();
+  });
+
+  it.each(['contentId', 'parentId'])('%s 为空长度但类型错误时拒绝且不执行 DDL', async name => {
+    const table = schema();
+    table.findColumnByName(name)!.length = '';
+    table.findColumnByName(name)!.type = 'text';
+    const r = runner(table);
+    await expect(new PublicCommentThreadIndex1792713602000().up(r as unknown as QueryRunner)).rejects.toThrow('结构不符合预期');
+    expect(r.query).not.toHaveBeenCalled();
+  });
+
+  it.each([
     ['同名错误列序', 'IDX_comments_public_thread', ['status', 'contentId']],
     ['同名正确列序', 'IDX_comments_public_thread', ['contentId', 'status', 'parentId', 'createdAt', 'id']],
     ['异名等价索引', 'existing_manual_index', ['contentId', 'status', 'parentId', 'createdAt', 'id']],

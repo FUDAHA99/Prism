@@ -8,7 +8,8 @@ export class CategoryParentColumn1792713601000 implements MigrationInterface {
     const legacy = table?.findColumnByName('parentId');
     const parent = table?.findColumnByName('parent_id');
     const foreignKey = table?.foreignKeys.find(key => key.name === 'FK_88cea2dc9c31951d06437879b40');
-    if (!legacy || legacy.type !== 'varchar' || legacy.length !== '255' || !legacy.isNullable ||
+    // TypeORM 的 MySQL/MariaDB 驱动将 varchar(255) 的默认长度表示为 ''。
+    if (!legacy || legacy.type !== 'varchar' || (legacy.length === '' ? '255' : legacy.length) !== '255' || !legacy.isNullable ||
         !parent || parent.type !== 'varchar' || parent.length !== '36' || !parent.isNullable ||
         !foreignKey || foreignKey.columnNames.join(',') !== 'parent_id' ||
         foreignKey.referencedTableName !== 'categories' || foreignKey.referencedColumnNames.join(',') !== 'id' ||

@@ -10,7 +10,8 @@ export class PublicCommentThreadIndex1792713602000 implements MigrationInterface
     const createdAt = table?.findColumnByName('createdAt');
     if (!table || textColumns.some(([name, length]) => {
       const column = table.findColumnByName(name);
-      return !column || column.type !== 'varchar' || column.length !== length;
+      // TypeORM 的 MySQL/MariaDB 驱动将 varchar(255) 的默认长度表示为 ''。
+      return !column || column.type !== 'varchar' || (column.length === '' ? '255' : column.length) !== length;
     }) || !createdAt || createdAt.type !== 'datetime' || createdAt.precision !== 6) {
       throw new Error('comments 分页索引所需列结构不符合预期；请人工核查后重试。');
     }

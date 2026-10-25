@@ -47,6 +47,17 @@ describe('CategoryParentColumn migration', () => {
     expect(r.query.mock.calls[1][0]).toBe('ALTER TABLE `categories` DROP COLUMN `parentId`');
   });
 
+  it('接受 TypeORM 将旧列 varchar(255) 长度报告为空字符串，继续检查数据并删除旧列', async () => {
+    const table = schema();
+    table.findColumnByName('parentId')!.length = '';
+    const r = runner([], table);
+    await new CategoryParentColumn1792713601000().up(r as unknown as QueryRunner);
+    expect(r.getTable).toHaveBeenCalledWith('categories');
+    expect(r.query).toHaveBeenCalledTimes(2);
+    expect(r.query.mock.calls[0][0]).toMatch(/^\s*SELECT\b/i);
+    expect(r.query.mock.calls[1][0]).toBe('ALTER TABLE `categories` DROP COLUMN `parentId`');
+  });
+
   it('接受基线外键的 RESTRICT 表示', async () => {
     const table = schema();
     table.foreignKeys[0].onDelete = 'RESTRICT';
@@ -82,6 +93,9 @@ describe('CategoryParentColumn migration', () => {
     ['缺旧列', table => { table.columns = table.columns.filter(c => c.name !== 'parentId'); }],
     ['缺关系列', table => { table.columns = table.columns.filter(c => c.name !== 'parent_id'); }],
     ['旧列长度漂移', table => { table.findColumnByName('parentId')!.length = '36'; }],
+    ['旧列长度为 100', table => { table.findColumnByName('parentId')!.length = '100'; }],
+    ['关系列长度为空', table => { table.findColumnByName('parent_id')!.length = ''; }],
+    ['旧列为空长度但类型错误', table => { table.findColumnByName('parentId')!.length = ''; table.findColumnByName('parentId')!.type = 'text'; }],
     ['缺外键', table => { table.foreignKeys = []; }],
     ['外键指向其他表', table => { table.foreignKeys[0].referencedTableName = 'other'; }],
     ['外键允许级联删除', table => { table.foreignKeys[0].onDelete = 'CASCADE'; }],
