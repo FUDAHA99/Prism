@@ -56,6 +56,11 @@
     "prettier": "^3.0.0",
     "typescript": "^5.0.2",
     "vite": "^6.4.4",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.12"
+  },
+  "overrides": {
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "9.0.9"
+    }
   }
 }
